@@ -1,0 +1,43 @@
+# Environments
+.env
+.env.*
+!.env.example
+
+# Runtime Data and Logs
+data/
+logs/
+*.log
+HALT
+*.tmp
+*.lock
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# System and IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Packaging and Distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Project Specific (Safe measure for any ad-hoc files)
+performance.csv
+performance.json
+scratch/
