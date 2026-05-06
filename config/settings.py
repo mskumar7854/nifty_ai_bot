@@ -312,15 +312,18 @@ class SessionStrategyConfig:
             },
             "lunch_dead": {
                 "start": "12:00", "end": "13:30",
-                "trade": False,
+                "trade": True,  # Temporarily enabled for testing
+                "max_trades": 1,
+                "strategy": "lunch_scalp",
+                "min_confidence": 75,
                 "reason": "Lunch lull — theta burns, choppy moves",
             },
             "afternoon_setup": {
                 "start": "13:30", "end": "14:15",
-                "trade": False,
-                "max_trades": 0,
+                "trade": True,  # Temporarily enabled for testing
+                "max_trades": 1,
                 "strategy": "scan_only",
-                "min_confidence": 90,
+                "min_confidence": 75,
                 "reason": "Scanning for power hour setup",
             },
             "power_hour": {
@@ -482,7 +485,7 @@ class ThresholdConfig:
     decay_time_value_min_pct: float = 10.0
     decay_intrinsic_safety_margin: float = 20.0
     min_confidence: float = 30.0
-    min_confluence_agents: int = 5
+    min_confluence_agents: int = 3  # was 5 — dynamic routing selects 2-4 agents per cycle; requiring 5 is impossible
     signal_quality_min: str = "B"
     agent_weights: Dict[str, float] = field(default_factory=lambda: {
         "market": 0.10,
@@ -565,8 +568,8 @@ class InstrumentConfig:
     # Dhan IDX_I security IDs (as of 2026)
     security_id_map: Dict[str, str] = field(
         default_factory=lambda: {
-            "NIFTY": os.getenv("NIFTY_SECURITY_ID", "1"),
-            "BANKNIFTY": os.getenv("BANKNIFTY_SECURITY_ID", "2"),
+            "NIFTY": os.getenv("NIFTY_SECURITY_ID", "13"),
+            "BANKNIFTY": os.getenv("BANKNIFTY_SECURITY_ID", "25"),
         }
     )
 

@@ -129,17 +129,21 @@ class DataManager:
         🚀 ASYNC HFT DATA FETCH
         Fetches data without blocking and returns (df, snapshot).
         """
+        import asyncio
         if self.data_source == "simulated":
             # Simulation is fast enough locally, but we still make it async-compliant
             df = self._fetch_simulated()
         elif self.data_source == "api":
             # In a real live environment, we'd use 'session' here to call Dhan API
-            # For now, we reuse the existing logic but keep the interface
-            df = self._fetch_from_api()
+            # 🚀 Wrapped in to_thread to prevent blocking the async event loop (Telegram, etc.)
+            df = await asyncio.to_thread(self._fetch_from_api)
         else:
             df = self._fetch_simulated()
 
-        self.ohlcv_data = df
+        if df is not None and not df.empty:
+            self.ohlcv_data = df
+            self.last_fetch_time = datetime.now()
+            
         snapshot = self.get_snapshot_incremental(df)
         return df, snapshot
 
@@ -175,13 +179,17 @@ class DataManager:
             expiry = today + timedelta(days=days_to_thursday)
             expiry_str = expiry.strftime("%Y-%m-%d")
 
-            response = dhan.get_option_chain(
-                UnderlyingScrip=instrument,
-                ExpiryDate=expiry_str
+            if self._api_security_id is None:
+                self._api_security_id = self._discover_nifty_id(dhan)
+
+            response = dhan.option_chain(
+                under_security_id=self._api_security_id,
+                under_exchange_segment=self._api_exchange_segment,
+                expiry=expiry_str
             )
 
             if response.get('status') != 'success':
-                self.logger.warning(f"OI Fetch failed: {response.get('remarks')}")
+                self.logger.debug(f"OI Fetch failed: {response.get('remarks')} - Falling back to simulation.")
                 return {}
 
             chain = response.get('data', {}).get('data', [])
@@ -233,7 +241,7 @@ class DataManager:
             return result
 
         except Exception as e:
-            self.logger.warning(f"⚠️ OI Fetch failed (using simulated): {e}")
+            self.logger.debug(f"⚠️ OI Fetch failed (using simulated): {e}")
             return {'data_source': DataSource.SIMULATED}
 
     def get_snapshot_incremental(self, df: pd.DataFrame) -> MarketSnapshot:
@@ -515,11 +523,19 @@ class DataManager:
 
             # 2. Fetch Intraday 1-minute data
             today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            # 🚀 OPTIMIZATION: Only fetch 5-day warmup if we don't have historical data.
+            # Fetching 5 days every second causes 550ms+ latency and execution risk.
+            if self.ohlcv_data is None or self.ohlcv_data.empty:
+                from_date_str = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+            else:
+                from_date_str = today_str
+
             response = dhan.intraday_minute_data(
                 security_id=self._api_security_id,
                 exchange_segment=self._api_exchange_segment,
                 instrument_type=self._api_instrument_type,
-                from_date=today_str,
+                from_date=from_date_str,
                 to_date=today_str
             )
 
@@ -534,11 +550,27 @@ class DataManager:
 
             # 3. Convert to DataFrame & Cleanup
             df = pd.DataFrame(raw_data)
-            if 'start_Time' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['start_Time'])
-                df.set_index('timestamp', inplace=True)
-
             df.columns = [c.lower() for c in df.columns]
+
+            time_col = None
+            if 'start_time' in df.columns:
+                time_col = 'start_time'
+            elif 'timestamp' in df.columns:
+                time_col = 'timestamp'
+
+            if time_col:
+                if pd.api.types.is_numeric_dtype(df[time_col]):
+                    # Parse as epoch and convert to IST
+                    df['timestamp'] = pd.to_datetime(df[time_col], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+                else:
+                    df['timestamp'] = pd.to_datetime(df[time_col])
+                df.set_index('timestamp', inplace=True)
+            else:
+                raise RuntimeError(f"API data missing time column. Columns: {df.columns.tolist()}")
+
+            # 🚀 OPTIMIZATION: Merge with historical cache if we only fetched today
+            if self.ohlcv_data is not None and not self.ohlcv_data.empty and from_date_str == today_str:
+                df = pd.concat([self.ohlcv_data, df])
 
             # Mandatory Professional Cleanup
             df.dropna(inplace=True)

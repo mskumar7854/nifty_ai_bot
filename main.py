@@ -104,6 +104,7 @@ class NiftyAISystem:
         self.execution_failures = 0 # Broker interaction failures
         
         self.last_cycle_time = 0
+        self.no_trade_streak = 0  # Fix #4: Trade Frequency Guard counter
 
         logger.info(
             f"Initializing v4.6.1 | "
@@ -254,12 +255,12 @@ class NiftyAISystem:
 
                     await self._run_cycle(session)
                     
-                    # ── P0-C: External heartbeat ping ──
-                    await self._ping_heartbeat(session)
+                    # ── P0-C: External heartbeat ping (Fire & Forget) ──
+                    asyncio.create_task(self._ping_heartbeat(session))
 
                     # Performance profiling
                     elapsed_sec = time.perf_counter() - start_time
-                    if elapsed_sec > 0.1: # Threshold for HFT warnings
+                    if elapsed_sec > 0.8: # Threshold for HFT warnings (API RTT accounts for ~500ms)
                         logger.warning(f"⚠️ Cycle Latency: {elapsed_sec * 1000:.2f}ms")
                     
                     if hasattr(self, "observer"):
@@ -387,7 +388,22 @@ class NiftyAISystem:
             if signal.signal_type == SignalType.NO_TRADE:
                 self.simulation.record_signal(passed=False)
                 self._update_dashboard(snapshot, signal)
+
+                # ── FIX #4: TRADE FREQUENCY GUARD ──
+                # Tracks consecutive no-trade cycles and alerts operators when
+                # the system appears structurally locked (not just market-filtered).
+                self.no_trade_streak += 1
+                if self.no_trade_streak in (100, 300, 500) or self.no_trade_streak % 500 == 0:
+                    last_reason = (signal.reasons[0] if signal.reasons else "unknown")
+                    logger.warning(
+                        f"⏳ NO-TRADE STREAK: {self.no_trade_streak} consecutive cycles with no signal. "
+                        f"Last reason: [{last_reason}]. "
+                        f"Check regime confidence, confidence gate, and edge thresholds."
+                    )
                 return
+
+            # ── Signal passed — reset streak ──
+            self.no_trade_streak = 0
 
             # ── 7. MASTER GATE: Final signal-level approval ──
             # This is the definitive go/no-go for THIS specific signal.
@@ -597,18 +613,6 @@ class NiftyAISystem:
                 logger.error(f"🔥 Engine error [{self.engine_errors}]: {e}", exc_info=True)
 
         finally:
-            # ── External Heartbeat Ping ──
-            # Pings healthchecks.io (or any URL) every cycle.
-            # If missed for >2 min, external watchdog alerts you.
-            # Set HEARTBEAT_URL in .env to activate.
-            heartbeat_url = os.getenv("HEARTBEAT_URL", "")
-            if heartbeat_url:
-                try:
-                    async with session.get(heartbeat_url, timeout=aiohttp.ClientTimeout(total=3)) as _:
-                        pass
-                except Exception:
-                    pass  # Never crash the cycle because of a heartbeat failure
-
             # ── HALT File Emergency Stop (Telegram-independent kill switch) ──
             # Write a file called 'HALT' to the project root to stop trading
             # without needing Telegram.
@@ -999,21 +1003,24 @@ class NiftyAISystem:
 
     async def _ping_heartbeat(self, session: aiohttp.ClientSession) -> None:
         """Dead man's switch. If this stops pinging, we're down.
-        
-        Setup: Create a free monitor at healthchecks.io (period: 1 min, grace: 2 min).
-        Set HEARTBEAT_URL in .env to the ping URL.
-        Configure alert → Telegram/SMS/email on miss.
+
+        Runs as fire-and-forget background task — never blocks the main loop.
+        Skipped automatically when system is under stress (last cycle > 0.5s).
         """
         if not HEARTBEAT_URL:
             return
+        # Skip during stress cycles — backpressure protection
+        last_cycle_duration = time.perf_counter() - getattr(self, "_last_cycle_start", 0)
+        if last_cycle_duration > 0.5:
+            return
         try:
-            await session.get(
+            async with session.get(
                 HEARTBEAT_URL,
-                timeout=aiohttp.ClientTimeout(total=5)
-            )
-        except Exception as e:
-            logger.warning("Heartbeat ping failed: %s", e)
-            # Don't crash on heartbeat failure — just log
+                timeout=aiohttp.ClientTimeout(total=2)
+            ) as _:
+                pass
+        except Exception:
+            pass  # Never log heartbeat failures — fills console with noise
 
     async def _deadman_watchdog(self) -> None:
         """P0-C: Force-close all positions if main loop stops updating.

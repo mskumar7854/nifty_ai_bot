@@ -437,25 +437,50 @@ class PositionManager:
         else:
             drawdown_factor = 1.0
 
-        # ── Confidence-based lot sizing ──
-        confidence = signal.confidence
-        lot_mapping = self.config.confidence_lot_mapping
+        # ── Dynamic Confidence/Quality-based lot sizing ──
+        # Fix: Raw confidence is lowered heavily by regime penalty.
+        # Instead of raw confidence > 70, we look at the exact Entry Quality
+        # via the metadata (dominance and alignment).
+        meta = signal.metadata if hasattr(signal, "metadata") and signal.metadata else {}
+        
+        quality = meta.get("quality", "UNKNOWN")
+        gap = meta.get("dominance_gap", 0)
+        directional_alignment = meta.get("directional_alignment", False)
 
-        if confidence >= 90:
-            confidence_lots = lot_mapping.get("90-100", 3)
-        elif confidence >= 80:
-            confidence_lots = lot_mapping.get("80-90", 2)
-        elif confidence >= 70:
-            confidence_lots = lot_mapping.get("70-80", 1)
+        if gap >= 0.08 or quality == "STRONG":
+            if directional_alignment:
+                confidence_lots = self.config.max_lot_size  # Usually 3
+            else:
+                confidence_lots = max(1, self.config.max_lot_size - 1)
+        elif gap >= 0.05 or quality == "MODERATE":
+            confidence_lots = max(1, self.config.max_lot_size - 1)
+        elif gap >= 0.04:
+            confidence_lots = 1
         else:
-            confidence_lots = lot_mapping.get("below_70", 0)
+            # Fallback for old tests / missing metadata
+            confidence = signal.confidence
+            lot_mapping = self.config.confidence_lot_mapping
+            if confidence >= 90:
+                confidence_lots = lot_mapping.get("90-100", 3)
+            elif confidence >= 80:
+                confidence_lots = lot_mapping.get("80-90", 2)
+            elif confidence >= 70:
+                confidence_lots = lot_mapping.get("70-80", 1)
+            else:
+                confidence_lots = lot_mapping.get("below_70", 0)
+
+        # Apply alignment penalty
+        if not directional_alignment and confidence_lots > 1 and gap < 0.08:
+            # If gap >= 0.08 and misaligned, it was already penalized above
+            confidence_lots -= 1  # Reduce size if agents are mixed
+            self.logger.info("Reduced lot size by 1 due to lack of directional alignment.")
 
         if confidence_lots == 0:
             return {
                 "lots": 0,
                 "qty": 0,
                 "risk_amount": 0,
-                "reason": f"Confidence {confidence:.0f}% below threshold",
+                "reason": f"Entry Quality insufficient for minimum size (Gap: {gap:.3f}, Quality: {quality})",
                 "allowed": False,
             }
 
@@ -524,15 +549,23 @@ class PositionManager:
             actual_risk, self.config.max_risk_per_trade
         )
 
+        # Exit expectations based on entry quality
+        if quality == "STRONG":
+            t1_mult, t2_mult = 2.0, 3.0
+        elif quality == "MODERATE":
+            t1_mult, t2_mult = 1.5, 2.0
+        else:
+            t1_mult, t2_mult = 1.0, 1.5
+
         # Stop loss price
         if signal.direction == Direction.BULLISH:
             sl_price = current_price - sl_distance
-            target_1 = current_price + sl_distance * 2
-            target_2 = current_price + sl_distance * 3
+            target_1 = current_price + sl_distance * t1_mult
+            target_2 = current_price + sl_distance * t2_mult
         else:
             sl_price = current_price + sl_distance
-            target_1 = current_price - sl_distance * 2
-            target_2 = current_price - sl_distance * 3
+            target_1 = current_price - sl_distance * t1_mult
+            target_2 = current_price - sl_distance * t2_mult
 
         # ── Execution Buffer (Dynamic) ──
         # Adapts to volatility: Low vol -> small buffer, High vol -> large buffer

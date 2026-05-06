@@ -145,9 +145,10 @@ class DecisionEngineV3:
             last_candle = df.iloc[-1]
             if 'high' in last_candle and 'low' in last_candle:
                 candle_range = last_candle['high'] - last_candle['low']
-                if snapshot.atr > 0 and candle_range > 2 * snapshot.atr:
+                # Require range to be at least 30 points AND > 2x ATR for it to be considered a freeze-worthy spike
+                if snapshot.atr > 0 and candle_range > 30 and candle_range > 2 * snapshot.atr:
                     self.spike_freeze_until = time.time() + 600  # 10 minute freeze
-                    self.logger.warning(f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 2xATR {2*snapshot.atr:.1f}. Freezing for 10m.")
+                    self.logger.warning(f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.")
         
         if time.time() < self.spike_freeze_until:
             return self._no_trade_signal(snapshot, ["Phase 2 Halt: Intraday Spike Freeze active"], outputs_dict)
@@ -165,19 +166,24 @@ class DecisionEngineV3:
         # Explicit Regime Verification
         regime = MarketRegime.UNKNOWN
         regime_penalty = 1.0
+        reg_conf = 1.0  # Default — no regime agent means full confidence
         if "regime" in outputs_dict:
             regime_agent_output = outputs_dict["regime"]
             regime_val = regime_agent_output.details.get("regime", "RANGING")
-            
-            # Phase 4: Regime Confidence Block
+
+            # ── FIX #1: SMOOTH REGIME SCALING (replaces hard 0.5 halving) ──
+            # Old: reg_conf < 0.6 → weights *= 0.5  (cliff edge, causes suffocation)
+            # New: smooth proportional scale, clamped to never go below 0.70
+            #      At 0.55 conf: penalty = max(0.70, 0.55) = 0.70  (was 0.50)
+            #      At 0.40 conf: hard block (unchanged)
+            #      At 0.60+ conf: penalty = 1.0 (unchanged)
             reg_conf = regime_agent_output.get_clamped_confidence()
             if reg_conf < 0.4:
                 return self._no_trade_signal(snapshot, [f"Phase 4 Halt: Regime Confidence Too Low ({reg_conf:.2f})"], outputs_dict)
             elif reg_conf < 0.6:
-                regime_penalty = 0.5
-                self.logger.warning(f"⚠️ Regime confidence low ({reg_conf:.2f}). Halving all agent weights.")
+                regime_penalty = max(0.70, reg_conf)  # smooth scale, floor at 0.70
+                self.logger.warning(f"⚠️ Regime confidence low ({reg_conf:.2f}). Applying scaled penalty ({regime_penalty:.2f}x).")
 
-            
             # Map string to enum
             regime_map = {
                 "STRONG_TREND_UP": MarketRegime.TRENDING_UP,
@@ -262,14 +268,29 @@ class DecisionEngineV3:
             direction = Direction.NEUTRAL
             confidence = 0.0
 
-        # 3. Apply Directional Gap Rule (Filter Indecision)
+        # 3. Minimum Dominance Rule (Adaptive Edge Guard)
+        # ── Prevents overtrading chop by requiring a minimum buy/sell score gap.
+        # Two-tier threshold — tighter in clear regime, relaxed (but not noise) in uncertain:
+        #   reg_conf >= 0.6: require gap >= 0.05 (MIN_DIRECTION_GAP)  — full selectivity
+        #   reg_conf <  0.6: require gap >= 0.04  — allows real edges, blocks 0.01-0.03 noise
+        # NOTE: 0.03 (previous) was too close to noise floor — risk of chop trades.
+        #       0.04 is the measured minimum for a signal to have intraday substance.
+        adaptive_gap = MIN_DIRECTION_GAP if reg_conf >= 0.6 else 0.04
         gap = abs(buy_prob - sell_prob)
-        if gap < MIN_DIRECTION_GAP and direction != Direction.NEUTRAL:
-             return self._no_trade_signal(snapshot, [f"Weak Edge Rule (Gap: {gap:.2f} < {MIN_DIRECTION_GAP})"], outputs_dict)
+        if gap < adaptive_gap and direction != Direction.NEUTRAL:
+            return self._no_trade_signal(snapshot, [f"Minimum Dominance Rule (Gap: {gap:.3f} < {adaptive_gap:.2f}, regime: {reg_conf:.2f})"], outputs_dict)
 
         # 4. Check Global Threshold
-        if confidence < MIN_CONFIDENCE:
-            reason = f"Low Confidence Gate ({confidence:.2f} < {MIN_CONFIDENCE})"
+        # ── FIX #3: ADAPTIVE CONFIDENCE GATE ──
+        # When regime penalty is active, the max achievable confidence is
+        # ~0.70 * original_score. With 0.55 regime, ceiling drops to ~0.38.
+        # Static gate of 0.45 is unreachable — permanent lock.
+        # Solution: lower gate to 0.32 when regime is uncertain.
+        #   reg_conf >= 0.6: gate = MIN_CONFIDENCE (0.45)
+        #   reg_conf < 0.6:  gate = 0.32 — still filters weak signals but is reachable
+        adaptive_confidence = MIN_CONFIDENCE if reg_conf >= 0.6 else 0.32
+        if confidence < adaptive_confidence:
+            reason = f"Low Confidence Gate ({confidence:.2f} < {adaptive_confidence:.2f}, regime: {reg_conf:.2f})"
             return self._no_trade_signal(snapshot, [reason], outputs_dict)
             
         final_confluence = self.scorer.score(outputs)
@@ -277,6 +298,15 @@ class DecisionEngineV3:
         
         if direction_agents < self.settings.thresholds.min_confluence_agents:
             return self._no_trade_signal(snapshot, [f"Not enough agreeing agents ({direction_agents})"], outputs_dict)
+
+        # ── FIX #5: MOMENTUM ALIGNMENT CHECK ──
+        bullish_agents = final_confluence.bullish_agents
+        bearish_agents = final_confluence.bearish_agents
+        directional_alignment = (direction == Direction.BULLISH and bullish_agents >= 3 and bearish_agents <= 1) or \
+                                (direction == Direction.BEARISH and bearish_agents >= 3 and bullish_agents <= 1)
+        
+        if not directional_alignment and gap < 0.05:
+            return self._no_trade_signal(snapshot, [f"Directional Alignment Failed ({bullish_agents}B vs {bearish_agents}S) with weak gap {gap:.3f}"], outputs_dict)
 
         # Build Base Parameters
         signal_type = SignalType.BUY_CE if direction == Direction.BULLISH else SignalType.BUY_PE
@@ -318,6 +348,16 @@ class DecisionEngineV3:
             for name, out in outputs_dict.items()
         }
 
+        # ── Entry Quality Log (Metric 2 monitor — parsed by analyze_logs.py) ──
+        dominance_pct = (gap / max(buy_prob + sell_prob, 0.001)) * 100
+        quality_tag = "STRONG" if dominance_pct >= 15 else ("MODERATE" if dominance_pct >= 8 else "WEAK")
+        self.logger.info(
+            f"[ENTRY_QUALITY] Signal: {signal_type.value} | "
+            f"Buy: {buy_prob:.3f} | Sell: {sell_prob:.3f} | "
+            f"Gap: {gap:.3f} | Dom: {dominance_pct:.1f}% | "
+            f"Regime: {reg_conf:.2f} | Quality: {quality_tag}"
+        )
+
         # ── Intelligence Breakdown Log ──
         self.logger.info(
             f"🧠 [PROBABILITY] Signal: {signal_type.value} | "
@@ -326,6 +366,16 @@ class DecisionEngineV3:
             f"Sell: {sell_prob:.2f} | "
             f"Gap: {gap:.2f}"
         )
+
+        # Attach dynamic sizing metrics to metadata so PositionManager can size properly
+        meta = {
+            "dominance_pct": dominance_pct,
+            "dominance_gap": gap,
+            "quality": quality_tag,
+            "regime_conf": reg_conf,
+            "directional_alignment": directional_alignment,
+            "gap_detected": self.session_gap_detected
+        }
 
         signal = Signal(
             id=str(uuid.uuid4())[:8],
@@ -337,6 +387,7 @@ class DecisionEngineV3:
             buy_score=round(buy_prob, 3),
             sell_score=round(sell_prob, 3),
             agent_breakdown={name: {"dir": o.direction.value, "conf": o.get_clamped_confidence()} for name, o in outputs_dict.items()},
+            metadata=meta,
             strength=strength,
             entry_price=trade_params.get("entry", snapshot.price),
             stop_loss=trade_params.get("stop_loss", 0),
@@ -352,8 +403,7 @@ class DecisionEngineV3:
             warnings=warnings[:5],
             created_at=time.time(),
             updated_at=time.time(),
-            execution_status="pending",
-            metadata={"gap_detected": self.session_gap_detected}
+            execution_status="pending"
         )
 
         # Grade the Signal

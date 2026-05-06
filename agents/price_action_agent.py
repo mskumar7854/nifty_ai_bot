@@ -233,7 +233,10 @@ class PriceActionAgent(BaseAgent):
         if len(df) < 20:
             return {"detected": False}
 
-        recent = df.tail(20)
+        # ⚠️ BUG FIX: Reset index so idxmax/idxmin returns integer positions (0-19)
+        # rather than timestamp labels, which would make abs(idx - idx) a Timedelta
+        # and cause a TypeError when compared to int 5.
+        recent = df.tail(20).reset_index(drop=True)
         highs = recent['high']
         lows = recent['low']
 
@@ -241,11 +244,11 @@ class PriceActionAgent(BaseAgent):
         tolerance = self.th.double_top_tolerance / 100
 
         # Double top
-        top1_idx = highs.idxmax()
+        top1_idx = int(highs.idxmax())
         top1 = highs[top1_idx]
         remaining = highs.drop(top1_idx)
         if len(remaining) > 0:
-            top2_idx = remaining.idxmax()
+            top2_idx = int(remaining.idxmax())
             top2 = remaining[top2_idx]
 
             if abs(top1 - top2) / top1 < tolerance and abs(top1_idx - top2_idx) > 5:
@@ -260,11 +263,11 @@ class PriceActionAgent(BaseAgent):
                     }
 
         # Double bottom
-        bot1_idx = lows.idxmin()
+        bot1_idx = int(lows.idxmin())
         bot1 = lows[bot1_idx]
         remaining = lows.drop(bot1_idx)
         if len(remaining) > 0:
-            bot2_idx = remaining.idxmin()
+            bot2_idx = int(remaining.idxmin())
             bot2 = remaining[bot2_idx]
 
             if abs(bot1 - bot2) / bot1 < tolerance and abs(bot1_idx - bot2_idx) > 5:

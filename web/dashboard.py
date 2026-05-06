@@ -250,7 +250,7 @@ class Dashboard:
 
     def __init__(self, host: str = "0.0.0.0", port: int = 5000):
         self.app = Flask(__name__)
-        self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='gevent')
+        self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='threading')
         self.host = host
         self.port = port
         self._status_data = {}

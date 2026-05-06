@@ -33,7 +33,7 @@ class LogObserver:
 
     def on_cycle_end(self, latency_sec: float):
         """Called at the end of every cycle to monitor execution speed."""
-        if latency_sec > 0.2:
+        if latency_sec > 0.5:
             logger.warning(f"⚠️ HIGH LATENCY: {round(latency_sec, 3)}s (Execution Risk)")
 
     def on_trade_close(self, trade_data: dict):
@@ -83,14 +83,20 @@ class LogObserver:
         self.oi_total += 1
         if source == "REAL":
             self.oi_real += 1
-            
-        # 4. Enforce OI Reliability
+
+        # 4. Enforce OI Reliability — only in LIVE modes.
+        # In SIMULATION, simulated OI is expected behavior, not a failure.
+        import os
+        system_mode = os.getenv("SYSTEM_MODE", "SIMULATION").upper()
+        if system_mode == "SIMULATION":
+            return  # Simulated OI is acceptable — don't degrade
+
         if self.oi_total > 10:
             reliability = (self.oi_real / self.oi_total) * 100
             if reliability < 80:
                 # Log periodically so we don't spam
                 if self.oi_total % 20 == 0:
-                    logger.error(f"🚨 OI UNRELIABLE ({reliability:.1f}%) — STRATEGY DEGRADED")
+                    logger.error(f"\U0001f6a8 OI UNRELIABLE ({reliability:.1f}%) — STRATEGY DEGRADED")
 
     def _evaluate_edge(self):
         """3. Detect Bad R Structure (Negative Edge) with Context"""

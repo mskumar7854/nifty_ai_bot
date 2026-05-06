@@ -102,8 +102,13 @@ class TimeSessionAgent(BaseAgent):
         lunch_start = time(12, 0)
         lunch_end = time(13, 30)
         if lunch_start <= current_time <= lunch_end:
-            base_score = 20
-            warnings.append("🍽️ Lunch session — low volume, avoid")
+            lunch_config = self.settings.session_strategy.sessions.get("lunch_dead", {})
+            if not lunch_config.get("trade", False):
+                base_score = 15  # Block it
+                warnings.append("🍽️ Lunch session — low volume, avoid")
+            else:
+                base_score = 80  # Temporary testing
+                warnings.append("🍽️ Lunch session — testing override enabled")
             details["lunch_zone"] = True
 
         # ── 6. EXPIRY DAY ADJUSTMENTS ──

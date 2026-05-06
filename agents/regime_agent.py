@@ -156,7 +156,10 @@ class RegimeAgent(BaseAgent):
         minus_di = adx_data['minus_di'].iloc[-1]
 
         if pd.isna(adx):
-            return self._neutral_output("ADX incomplete")
+            adx = 0.0
+            plus_di = 0.0
+            minus_di = 0.0
+            self.logger.debug("ADX is NaN (likely flat price data) — defaulting to 0")
 
         # ADX slope (trending up = strengthening)
         adx_slope = 0
