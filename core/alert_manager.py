@@ -74,7 +74,10 @@ class AlertManager:
 
         # 2. Telegram (Now Async & Integrated)
         if self.alert_config.telegram_enabled and self.telegram_bot:
-            await self.telegram_bot.process_signal(signal)
+            try:
+                await self.telegram_bot.process_signal(signal)
+            except Exception as e:
+                self.logger.error(f"Telegram failure: {e}")
 
         # Record
         self.last_alert_time = datetime.now()

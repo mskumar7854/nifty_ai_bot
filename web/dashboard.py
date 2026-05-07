@@ -8,11 +8,42 @@ agent statuses and signals
 
 import threading
 import time
-from flask import Flask, render_template_string, jsonify
+import json
+from enum import Enum
+from datetime import datetime, date
+from decimal import Decimal
+from flask import Flask, render_template_string, jsonify, Response
 from flask_socketio import SocketIO, emit
 from utils.logger import get_logger
 
 logger = get_logger("dashboard")
+
+
+class _SafeEncoder(json.JSONEncoder):
+    """
+    Handles all types that are commonly NOT JSON-serialisable:
+    - datetime / date   → ISO string
+    - Enum              → .value
+    - Decimal / float   → rounded float
+    - Everything else   → str() fallback (never crashes)
+    """
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, Enum):
+            return obj.value
+        if isinstance(obj, Decimal):
+            return float(obj)
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)   # absolute last resort — never crash
+
+
+def _safe_jsonify(data: dict, status: int = 200) -> Response:
+    """jsonify() replacement that never raises TypeError."""
+    payload = json.dumps(data, cls=_SafeEncoder)
+    return Response(payload, status=status, mimetype="application/json")
 
 
 # Dashboard HTML template
@@ -270,21 +301,19 @@ class Dashboard:
         @self.app.route("/api/status")
         def api_status():
             try:
-                # v4.6.1 Safe API Layer
                 if not self._status_data:
-                    return jsonify({
+                    return _safe_jsonify({
                         "status": "initializing",
                         "last_signal": None
                     })
-
-                return jsonify({
+                return _safe_jsonify({
                     "status": "active",
                     "data": self._status_data,
                     "last_signal": self._status_data.get("last_signal")
                 })
             except Exception as e:
-                logger.error(f"🔥 STATUS ERROR: {e}")
-                return jsonify({"status": "error", "message": str(e)}), 500
+                logger.error(f"STATUS ENDPOINT ERROR: {e}")
+                return _safe_jsonify({"status": "error", "message": str(e)}), 500
 
         @self.app.route("/health")
         def health():
@@ -343,14 +372,24 @@ class Dashboard:
                 return jsonify({"status": "error", "message": str(e)}), 500
 
     def _setup_error_handlers(self):
-        @self.app.errorhandler(Exception)
-        def handle_exception(e):
-            # Global Production Error Handler
-            logger.error(f"🔥 GLOBAL API ERROR: {e}")
+        # Use specific HTTP error handlers instead of a catch-all Exception handler.
+        # A catch-all @errorhandler(Exception) on Flask-SocketIO apps intercepts
+        # SocketIO's internal exceptions and returns HTML error pages instead of JSON.
+        @self.app.errorhandler(404)
+        def not_found(e):
+            return _safe_jsonify({"error": "Not found", "message": str(e)}), 404
+
+        @self.app.errorhandler(405)
+        def method_not_allowed(e):
+            return _safe_jsonify({"error": "Method not allowed", "message": str(e)}), 405
+
+        @self.app.errorhandler(500)
+        def internal_error(e):
+            logger.error(f"INTERNAL SERVER ERROR: {e}")
             self._errors += 1
-            return jsonify({
+            return _safe_jsonify({
                 "error": "Internal Server Error",
-                "message": str(e) if self.app.debug else "Check server logs"
+                "message": str(e)
             }), 500
 
     def _setup_socket_events(self):
@@ -362,7 +401,9 @@ class Dashboard:
     def emit_signal(self, signal_data: dict):
         """Broadcast a live signal to all connected clients"""
         try:
-            self.socketio.emit('signal_update', signal_data)
+            # Safe-encode before emitting to avoid SocketIO serialisation crashes
+            safe_data = json.loads(json.dumps(signal_data, cls=_SafeEncoder))
+            self.socketio.emit('signal_update', safe_data)
         except Exception as e:
             logger.error(f"Socket emit error: {e}")
 

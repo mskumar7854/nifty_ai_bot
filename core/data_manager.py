@@ -625,10 +625,22 @@ class DataManager:
             if not prev_data.empty:
                 prev_close = prev_data.iloc[-1]['close']
                 gap = abs(today_open - prev_close)
-
-                if gap > self.settings.trade_filter.gap_threshold_points:
-                    self.logger.warning(f"🚨 LARGE GAP DETECTED: {gap:.1f} pts! Indicators may be unstable.")
-                    # We can set a flag here to delay trading if needed
+                
+                if gap < 30: bucket = "NORMAL"
+                elif gap < 60: bucket = "ELEVATED"
+                elif gap < 100: bucket = "HIGH"
+                else: bucket = "CRITICAL"
+                
+                current_candle = df.index[-1]
+                if not hasattr(self, '_last_gap_bucket'):
+                    self._last_gap_bucket = None
+                    self._last_gap_candle = None
+                
+                if self._last_gap_bucket != bucket or self._last_gap_candle != current_candle:
+                    if bucket != "NORMAL" and gap > self.settings.trade_filter.gap_threshold_points:
+                        self.logger.warning(f"🚨 {bucket} GAP DETECTED: {gap:.1f} pts! Indicators may be unstable.")
+                    self._last_gap_bucket = bucket
+                    self._last_gap_candle = current_candle
 
     def _resample_data(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         """Resample 1m data to target timeframe"""

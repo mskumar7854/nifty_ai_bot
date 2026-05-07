@@ -39,6 +39,7 @@ from utils.trade_logger import TradeLogger
 from utils.logger import get_logger
 from utils.helpers import save_json, load_json, safe_divide
 from config.settings import Settings, PositionConfig
+from config.signal_weights import MIN_CONFIDENCE, MIN_DIRECTION_GAP
 
 
 # ── P0-E: SL Guarantee Config ──
@@ -222,6 +223,12 @@ class PositionManager:
 
         # ── Learning Engine ──
         self.trade_logger = TradeLogger()
+
+        # ── Self-learning Threshold Tuner ──
+        # Injected lazily by the system runner after construction,
+        # so both the engine and the manager share THE SAME instance.
+        # Fallback: if not set, import is safe (no crash).
+        self.tuner = None
 
         # ── Open Positions ──
         self.open_positions: Dict[str, OpenPosition] = {}
@@ -1172,6 +1179,21 @@ class PositionManager:
                 self.trade_logger.log_trade(record)
             except Exception as e:
                 self.logger.error(f"Failed to log trade to learning layer: {e}")
+
+            # ── Feed ThresholdTuner with trade outcome ──
+            try:
+                if self.tuner is not None:
+                    sl_dist = abs(pos.entry_price - pos.stop_loss)
+                    meta    = pos.agent_breakdown.get("_meta", {})
+                    self.tuner.record_trade(
+                        pnl=total_pnl,
+                        stop_distance=sl_dist,
+                        gap=meta.get("dominance_gap", abs(pos.buy_score - pos.sell_score)),
+                        confidence=pos.weighted_score,
+                        quality=meta.get("quality", "UNKNOWN"),
+                    )
+            except Exception as te:
+                self.logger.warning(f"Tuner record failed (non-fatal): {te}")
 
             # Remove from active
             del self.open_positions[position_id]

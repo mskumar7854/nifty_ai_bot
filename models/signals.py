@@ -33,11 +33,12 @@ class Strength(Enum):
 
 
 class SignalGrade(Enum):
-    A_PLUS = "A+"    # 90-100% — extremely rare, almost guaranteed
-    A = "A"          # 80-89%  — very high quality
-    B = "B"          # 70-79%  — good quality, tradeable
-    C = "C"          # 60-69%  — moderate, smaller size
-    D = "D"          # below 60 — skip
+    A_PLUS = "A+"    # 90+ — elite setup, full alignment
+    A = "A"          # 75-89 — very high quality
+    B_PLUS = "B+"    # 60-74 — strong, tradeable
+    B = "B"          # 45-59 — acceptable in trending regime
+    C = "C"          # 30-44 — marginal, reduce size
+    D = "D"          # below 30 — skip
 
 
 class MarketRegime(Enum):
@@ -418,10 +419,12 @@ class Signal:
         conf = self.confluence
         conf_str = ""
         if conf:
+            active_agents = conf.bullish_agents + conf.bearish_agents
+            total_evaluated = conf.total_agents if conf.total_agents > 0 else 11
             conf_str = (
-                f"   Confluence: {conf.bullish_agents}🟢 vs {conf.bearish_agents}🔴 "
-                f"({conf.confluence_ratio:.0%})\n"
-                f"   Agreeing  : {', '.join(conf.agreeing_agents[:5])}\n"
+                f"   Directional Confluence: {conf.bullish_agents} bullish / {conf.bearish_agents} bearish\n"
+                f"   Active Participation: {active_agents} of {total_evaluated} agents\n"
+                f"   Agreeing          : {', '.join(conf.agreeing_agents[:5])}\n"
             )
 
         return (

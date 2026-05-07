@@ -96,6 +96,7 @@ class NiftyAISystem:
         self.running = False
         self.cycle_count = 0
         self.trading_enabled = True # Use this as the master kill switch
+        self.cycle_running = False
         
         # ── Multi-Layer Circuit Breaker ──
         self.error_count = 0        # General
@@ -105,6 +106,7 @@ class NiftyAISystem:
         
         self.last_cycle_time = 0
         self.no_trade_streak = 0  # Fix #4: Trade Frequency Guard counter
+        self.last_candle_timestamp = None
 
         logger.info(
             f"Initializing v4.6.1 | "
@@ -118,6 +120,8 @@ class NiftyAISystem:
 
         # ── Production ──
         self.position_manager = PositionManager(settings)
+        # ── Share tuner: engine generates thresholds, PM feeds outcomes ──
+        self.position_manager.tuner = self.decision_engine.tuner
         self.risk_manager = RiskManager(settings, self.decision_engine.memory.db)
         self.slippage_model = SlippageModel(settings)
         self.metrics_engine = MetricsEngine(settings.get_capital())
@@ -278,6 +282,16 @@ class NiftyAISystem:
                 self.stop()
 
     async def _run_cycle(self, session: aiohttp.ClientSession):
+        if self.cycle_running:
+            return
+
+        self.cycle_running = True
+        try:
+            await self._run_cycle_inner(session)
+        finally:
+            self.cycle_running = False
+
+    async def _run_cycle_inner(self, session: aiohttp.ClientSession):
         self.cycle_count += 1
 
         # ── 0. Risk & Master Kill Switch ──
@@ -341,7 +355,6 @@ class NiftyAISystem:
                 "BUY_CE",   # signal type doesn't matter for pre-cycle gate
                 context={
                     "discipline_context": {
-                        "session_approved": True,  # master checks session internally
                         "daily_target_hit": self.exit_engine.daily_target_hit,
                         "consecutive_losses": getattr(self.exit_engine, "consecutive_losses", 0),
                         "seconds_since_last_trade": 999,
@@ -379,7 +392,18 @@ class NiftyAISystem:
                 else:
                     await self._live_execute(eid, pending, snapshot)
 
-            # ── 6. Generate signal ──
+            # ── 6. Process only new candles ──
+            current_candle_ts = df.index[-1] if df is not None and not df.empty else None
+            if self.last_candle_timestamp == current_candle_ts:
+                # Only run heavy decision engine when a new candle closes/opens
+                # Keep updating dashboard periodically
+                if self.cycle_count % 5 == 0:
+                    self._update_dashboard(snapshot, None)
+                return
+                
+            self.last_candle_timestamp = current_candle_ts
+            
+            # ── 7. Generate signal ──
             signal = self.decision_engine.process(df, snapshot)
             
             if hasattr(self, "observer") and signal.signal_type != SignalType.NO_TRADE:
@@ -405,7 +429,7 @@ class NiftyAISystem:
             # ── Signal passed — reset streak ──
             self.no_trade_streak = 0
 
-            # ── 7. MASTER GATE: Final signal-level approval ──
+            # ── 8. MASTER GATE: Final signal-level approval ──
             # This is the definitive go/no-go for THIS specific signal.
             # It re-verifies risk, session, and position limits at the
             # moment of signal evaluation (not at cycle start).
@@ -414,7 +438,6 @@ class NiftyAISystem:
                 signal_type_str,
                 context={
                     "discipline_context": {
-                        "session_approved": True,
                         "daily_target_hit": self.exit_engine.daily_target_hit,
                         "consecutive_losses": getattr(self.exit_engine, "consecutive_losses", 0),
                         "seconds_since_last_trade": 999,
@@ -713,8 +736,8 @@ class NiftyAISystem:
         """
         try:
             analysis = self.options_analyzer.analyze(price_trend=price_trend)
-            if "error" in analysis:
-                logger.warning("[OPTIONS] Fetch error: %s", analysis["error"])
+            if "error" in analysis or not analysis.get("raw_data_available", True):
+                logger.warning("[OPTIONS] Fetch error or no raw data: %s", analysis.get("error", "SIMULATION"))
                 return {"available": False, "sentiment": "neutral"}
             return {
                 "available":         True,

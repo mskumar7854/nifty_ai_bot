@@ -1,8 +1,20 @@
 """
 ============================================
-🏅 SIGNAL QUALITY GRADER v2
-Why: Not all 70% confidence signals are equal.
-     A+ setups have HTF alignment + low risk.
+SIGNAL QUALITY GRADER v3 (Dominance-Aware)
+
+Why: The old v2 grader used raw confidence
+     thresholds (85%, 75%) that are IMPOSSIBLE
+     to reach after regime scaling (~0.70x).
+     This version grades on relative edge
+     quality, not absolute probability.
+
+Grading factors:
+  1. Confluence ratio       (max 25 pts)
+  2. Risk/Reward ratio      (max 20 pts)
+  3. Dominance percentage   (max 25 pts)  ← NEW
+  4. Directional alignment  (max 15 pts)  ← NEW
+  5. Regime alignment       (max 15 pts)
+  - Penalty: excessive warnings
 ============================================
 """
 
@@ -12,11 +24,12 @@ from config.settings import Settings
 
 class SignalQualityGrader:
     """
-    Grades a signal from A+ down to D based on multiple criteria:
-    - Confluence ratio
-    - Risk Reward ratio
-    - Agent warnings
-    - Regime alignment
+    Grades a signal from A+ down to D based on:
+    - Confluence ratio  (how many agents agree)
+    - Risk/Reward       (is the math favorable)
+    - Dominance         (how decisive is the edge)
+    - Alignment         (do directional agents agree)
+    - Regime            (is the market helping or hurting)
     """
 
     def __init__(self, settings: Settings):
@@ -24,45 +37,92 @@ class SignalQualityGrader:
 
     def grade(self, signal: Signal) -> SignalGrade:
         score = 0
-        
-        # 1. Confluence Base Score (max 40)
+
+        # ── 1. Confluence Ratio (max 25) ──
+        # How many agents are voting in the same direction?
         conf_ratio = signal.confluence.confluence_ratio if signal.confluence else 0
-        if conf_ratio >= 0.9: score += 40
-        elif conf_ratio >= 0.8: score += 30
-        elif conf_ratio >= 0.7: score += 20
-        elif conf_ratio >= 0.6: score += 10
+        if conf_ratio >= 0.85:
+            score += 25
+        elif conf_ratio >= 0.70:
+            score += 20
+        elif conf_ratio >= 0.55:
+            score += 12
+        elif conf_ratio >= 0.40:
+            score += 6
 
-        # 2. Risk/Reward Score (max 30)
+        # ── 2. Risk/Reward (max 20) ──
         rr = signal.risk_reward_ratio
-        if rr >= 3.0: score += 30
-        elif rr >= 2.0: score += 20
-        elif rr >= 1.5: score += 10
-
-        # 3. Confidence Base Score (max 20)
-        if signal.confidence >= 85: score += 20
-        elif signal.confidence >= 75: score += 15
-        elif signal.confidence >= 65: score += 10
-        
-        # 4. Regime Alignment (max 10)
-        if signal.regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN, MarketRegime.BREAKOUT]:
+        if rr >= 3.0:
+            score += 20
+        elif rr >= 2.0:
+            score += 15
+        elif rr >= 1.5:
             score += 10
-            
-        # Penalties
-        # Excessive warnings
-        if len(signal.warnings) > 2:
-            score -= (len(signal.warnings) * 5)
+        elif rr >= 1.0:
+            score += 5
 
-        # Clean alignment check
-        clean_mtf = "multi_timeframe" in (signal.confluence.agreeing_agents if signal.confluence else [])
+        # ── 3. Dominance Percentage (max 25) ── NEW
+        # How decisive is the dominant direction?
+        # Dominance = |buy - sell| / (buy + sell) * 100
+        # 100% = one-sided (very strong), 0% = split (garbage)
+        meta = getattr(signal, "metadata", {}) or {}
+        dominance_pct = meta.get("dominance_pct", 0)
+        if dominance_pct >= 30:
+            score += 25
+        elif dominance_pct >= 20:
+            score += 20
+        elif dominance_pct >= 12:
+            score += 12
+        elif dominance_pct >= 6:
+            score += 6
 
-        # Assign Grade
-        if score >= 90 and clean_mtf and rr >= 2.0:
+        # ── 4. Directional Alignment (max 15) ── NEW
+        # Are the directional agents cleanly aligned?
+        alignment = meta.get("directional_alignment", False)
+        if alignment:
+            score += 15
+        else:
+            # Partial credit if gap is strong enough
+            gap = meta.get("dominance_gap", 0)
+            if gap >= 0.08:
+                score += 8
+            elif gap >= 0.05:
+                score += 4
+
+        # ── 5. Regime Alignment (max 15) ──
+        if signal.regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN, MarketRegime.BREAKOUT]:
+            score += 15
+        elif signal.regime == MarketRegime.SQUEEZE:
+            score += 8  # squeeze can break either way — partial credit
+        # RANGING/VOLATILE = 0 points (headwind, not aligned)
+
+        # ── Penalties ──
+        # Excessive warnings reduce quality
+        if len(signal.warnings) > 3:
+            score -= (len(signal.warnings) - 3) * 5
+
+        # Gap day with no confirmation is risky
+        if meta.get("gap_detected", False) and not alignment:
+            score -= 5
+
+        # Clamp to 0
+        score = max(0, score)
+
+        # ── Assign Grade ──
+        # A+: 90+ with alignment — elite
+        # A:  75+ — strong setup
+        # B+: 60+ — acceptable in trending regime
+        # B:  45+ — marginal
+        # C:  below 45 — too weak
+        if score >= 90 and alignment:
             return SignalGrade.A_PLUS
-        elif score >= 80:
+        elif score >= 75:
             return SignalGrade.A
-        elif score >= 65:
+        elif score >= 60:
+            return SignalGrade.B_PLUS if hasattr(SignalGrade, "B_PLUS") else SignalGrade.A
+        elif score >= 45:
             return SignalGrade.B
-        elif score >= 50:
+        elif score >= 30:
             return SignalGrade.C
         else:
             return SignalGrade.D

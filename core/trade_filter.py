@@ -148,15 +148,26 @@ class TradeFilter:
                 })
                 return self._kill(signal, gates, "CHOP_ZONE_ACTIVE", 1, 10)
 
-        # ── GATE 1: Confidence ──
+        # ── GATE 1: Confidence (Grade-Aware Thresholds) ──
         conf = signal.confidence
-        g1_pass = conf >= self.cfg.min_signal_confidence
+        grade_str = getattr(signal.grade, "value", str(signal.grade)) if hasattr(signal, "grade") and signal.grade else "C"
+        
+        if grade_str == "A+":
+            min_conf = 40.0
+        elif grade_str == "A":
+            min_conf = 45.0
+        elif grade_str == "B+":
+            min_conf = 55.0
+        else:
+            min_conf = self.cfg.min_signal_confidence
+            
+        g1_pass = conf >= min_conf
         g1_score = min(100, conf)
         gates.append({
             "gate": "Confidence",
             "pass": g1_pass,
             "score": g1_score,
-            "detail": f"{conf:.1f}% (need {self.cfg.min_signal_confidence}%)",
+            "detail": f"{conf:.1f}% (need {min_conf}%, Grade {grade_str})",
         })
         total_score += g1_score * 0.20
         max_score += 20.0

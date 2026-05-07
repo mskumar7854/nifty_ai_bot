@@ -215,16 +215,22 @@ class MasterDecisionEngine:
         _ok("G6_POSITIONS")
 
         # ── G7: Session rules ─────────────────────────────────────
+        session_is_approved = True
         if self.session_strategy is not None:
             rules = self.session_strategy.get_current_rules()
             if not rules.get("can_trade", True):
+                session_is_approved = False
                 return _block("G7_SESSION", rules.get("reason", "Session blocked"))
         _ok("G7_SESSION")
 
         # ── G8: Discipline rules ──────────────────────────────────
         if self.discipline is not None:
+            disc_ctx = ctx.get("discipline_context", {})
+            if "session_approved" not in disc_ctx:
+                disc_ctx["session_approved"] = session_is_approved
+            
             disc_ok, disc_msg = self.discipline.check_discipline(
-                "TRADE", ctx.get("discipline_context", {})
+                "TRADE", disc_ctx
             )
             if not disc_ok:
                 return _block("G8_DISCIPLINE", disc_msg)

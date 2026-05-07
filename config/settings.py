@@ -166,7 +166,7 @@ class TradeFilterConfig:
             "C": 50.0,
         }
     )
-    min_grade_to_trade: str = "A"               # was B+ → now A
+    min_grade_to_trade: str = "B+"              # was A → now B+ (A is unreachable after regime scaling)
 
     # ── ADDITIONAL PRO FILTERS ──
     require_multi_tf_alignment: bool = True
