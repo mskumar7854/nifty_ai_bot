@@ -44,9 +44,12 @@ class DataManager:
         self.last_fetch_time = datetime.min
         self.fetch_interval_seconds = 1.0  # Safe throttle
         self.prev_day_close: Optional[float] = None
+        self._day_open: Optional[float] = None   # today's first candle open
         self._api_security_id = None
         self._api_exchange_segment = "IDX_I"  # Default for index
         self._api_instrument_type = "INDEX"
+        self._api_failures = 0
+        self._api_circuit_breaker_until = 0.0
 
         # ── Real OI Cache (refreshed every 60s) ──
         self._oi_cache: dict = {}
@@ -144,7 +147,7 @@ class DataManager:
             self.ohlcv_data = df
             self.last_fetch_time = datetime.now()
             
-        snapshot = self.get_snapshot_incremental(df)
+        snapshot = await asyncio.to_thread(self.get_snapshot_incremental, df)
         return df, snapshot
 
     def _get_oi_data(self) -> dict:
@@ -244,6 +247,79 @@ class DataManager:
             self.logger.debug(f"⚠️ OI Fetch failed (using simulated): {e}")
             return {'data_source': DataSource.SIMULATED}
 
+    def fetch_option_quote(self, strike: int, opt_type: str, expiry: str) -> "OptionQuote":
+        """
+        🚀 PHASE A: Execution Realism
+        Fetches the live LTP, Bid, and Ask for a specific option contract.
+        If in SIMULATION mode, generates a highly realistic synthetic premium
+        incorporating spread, IV, and distance from Spot.
+        """
+        from models.signals import OptionQuote
+        import time as _time
+        
+        # 1. LIVE API MODE
+        if self.data_source == "api":
+            try:
+                dhan = get_dhan_client()
+                
+                # Fetch option chain once to find the specific contract
+                if self._api_security_id is None:
+                    self._api_security_id = self._discover_nifty_id(dhan)
+                    
+                response = dhan.option_chain(
+                    under_security_id=self._api_security_id,
+                    under_exchange_segment=self._api_exchange_segment,
+                    expiry=expiry
+                )
+                
+                if response.get('status') == 'success':
+                    chain = response.get('data', {}).get('data', [])
+                    for row in chain:
+                        if row.get('strikePrice') == strike:
+                            opt_data = row.get('callOption' if opt_type == 'CE' else 'putOption', {})
+                            return OptionQuote(
+                                security_id=opt_data.get('securityId', ''),
+                                symbol=opt_data.get('tradingSymbol', f"NIFTY {strike} {opt_type}"),
+                                ltp=float(opt_data.get('lastPrice', 0)),
+                                bid=float(opt_data.get('bidPrice', 0) or opt_data.get('lastPrice', 0)),
+                                ask=float(opt_data.get('askPrice', 0) or opt_data.get('lastPrice', 0)),
+                                volume=int(opt_data.get('volume', 0)),
+                                oi=int(opt_data.get('openInterest', 0))
+                            )
+            except Exception as e:
+                self.logger.error(f"Option quote fetch failed: {e}")
+                # Fallback to simulation logic below if API fails
+
+        # 2. SIMULATION MODE (Synthetic Option Pricing)
+        # This is CRITICAL for realistic paper trading. We cannot use Spot Nifty.
+        spot = self._sim_price if self.data_source == "simulated" else self.fetch_latest()['close'].iloc[-1]
+        
+        # Extremely rough Black-Scholes approximation for simulation realism
+        diff = spot - strike if opt_type == "CE" else strike - spot
+        intrinsic = max(0.0, diff)
+        
+        # Extrinsic value decays the further out of the money you are
+        otm_dist = max(0.0, -diff)
+        extrinsic = max(5.0, 150.0 - (otm_dist * 0.4))
+        
+        premium = intrinsic + extrinsic
+        
+        # Simulate bid/ask spread (wider for OTM)
+        spread_pct = 0.002 + (otm_dist * 0.00001)  # 0.2% base spread, increasing for OTM
+        bid = round(premium * (1 - spread_pct), 2)
+        ask = round(premium * (1 + spread_pct), 2)
+        
+        return OptionQuote(
+            security_id=f"SIM_{strike}_{opt_type}",
+            symbol=f"NIFTY {strike} {opt_type}",
+            ltp=round(premium, 2),
+            bid=bid,
+            ask=ask,
+            volume=int(np.random.uniform(10000, 500000)),
+            oi=int(np.random.uniform(500000, 5000000)),
+            iv=self._sim_vix
+        )
+
     def get_snapshot_incremental(self, df: pd.DataFrame) -> MarketSnapshot:
         """
         🚀 DELTA STATE CACHING
@@ -312,7 +388,10 @@ class DataManager:
             ema_fast=self.cached_ema_fast,
             ema_slow=self.cached_ema_slow,
             atr=self.cached_atr,
-            # ⚠️ P1.2: All OI/Greeks/VIX below are SIMULATED — agents must check oi_data_source
+            # Gap data — feeds into decision engine's GapPenaltyManager
+            prev_day_close=self.prev_day_close or 0.0,
+            day_open=self._day_open or latest['open'],
+            # OI/Greeks/VIX below are SIMULATED — agents must check oi_data_source
             total_ce_oi=oi.get('total_ce_oi', self._sim_ce_oi()),
             total_pe_oi=oi.get('total_pe_oi', self._sim_pe_oi()),
             pcr=oi.get('pcr', self._sim_pcr()),
@@ -514,6 +593,10 @@ class DataManager:
         Fetch from real broker API (Dhan).
         Includes robust cleanup, MTF resampling, and validation.
         """
+        import time
+        if time.time() < self._api_circuit_breaker_until:
+            return pd.DataFrame()
+
         try:
             dhan = get_dhan_client()
 
@@ -541,7 +624,12 @@ class DataManager:
 
             if response.get('status') != 'success':
                 self.logger.error(f"Dhan API Error: {response}")
-                raise RuntimeError(f"API Data Failure: {response.get('remarks')}")
+                self._api_failures += 1
+                self.logger.info(f"API FAILURES COUNT IS NOW: {self._api_failures}")
+                if self._api_failures >= 3:
+                    self.logger.critical("API Circuit Breaker TRIPPED! Suspending API calls for 60s")
+                    self._api_circuit_breaker_until = time.time() + 60
+                return pd.DataFrame()
 
             raw_data = response.get('data', [])
             if not raw_data:
@@ -602,12 +690,17 @@ class DataManager:
             if not self._is_market_open_safe():
                 return pd.DataFrame()
 
+            self._api_failures = 0
             return self.df_1m
 
         except Exception as e:
+            self._api_failures += 1
+            if self._api_failures >= 3:
+                self.logger.critical("API Circuit Breaker TRIPPED! Suspending API calls for 60s")
+                self._api_circuit_breaker_until = time.time() + 60
             self.logger.critical(f"API CRITICAL FAILURE: {str(e)}")
-            # No silent fallback for live API
-            raise RuntimeError(f"System halted: {str(e)}")
+            # Stabilize execution: do not halt system, return empty DF to skip cycle
+            return pd.DataFrame()
 
     def _handle_gap(self, df: pd.DataFrame):
         """Detect and handle opening gaps"""
@@ -641,6 +734,11 @@ class DataManager:
                         self.logger.warning(f"🚨 {bucket} GAP DETECTED: {gap:.1f} pts! Indicators may be unstable.")
                     self._last_gap_bucket = bucket
                     self._last_gap_candle = current_candle
+
+                # Store prev_day_close and day_open for snapshot consumption
+                # so the gap penalty manager can initialise correctly.
+                self.prev_day_close = prev_close
+                self._day_open = today_open
 
     def _resample_data(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         """Resample 1m data to target timeframe"""

@@ -15,6 +15,14 @@ import signal as sig_module
 import sys
 import os
 
+# Force UTF-8 Encoding on Windows to prevent Emoji/Rich logging crashes
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # ── P0-C: Heartbeat URL for dead man's switch ──
 HEARTBEAT_URL = os.getenv("HEARTBEAT_URL")  # e.g. https://hc-ping.com/your-uuid
 DEADMAN_TIMEOUT_SECONDS = int(os.getenv("DEADMAN_TIMEOUT_SECONDS", "30"))
@@ -56,6 +64,15 @@ def print_banner():
     phase = settings.system_mode.current_phase
     capital = settings.get_capital()
 
+    # ── Runtime topology counts (not repository inventory) ──
+    active_count = len(settings.pipeline.active_agents)
+    routed_count = len(set(
+        settings.pipeline.phase_1_gatekeepers +
+        settings.pipeline.phase_2_core +
+        settings.pipeline.phase_3_confirmation +
+        settings.pipeline.phase_4_risk
+    ))
+
     mode_icon = {
         "SIMULATION": "🧪",
         "SMALL_CAPITAL": "💵",
@@ -76,7 +93,7 @@ def print_banner():
 ║    🎯 Daily Goal: ₹{settings.exit.daily_target_amount:<8,.0f} (auto-stop)                           ║
 ║                                                                          ║
 ║    ┌──────────── SIGNAL FLOW ────────────────────────────────┐           ║
-║    │  23 Agents → Decision Engine → 10-Gate Filter            │           ║
+║    │  {active_count} Agents ({routed_count} routed) → Decision Engine → 10-Gate Filter │           ║
 ║    │       ↓              ↓               ↓                   │           ║
 ║    │  Kill 65%     Smart Entry      Exit Intelligence         │           ║
 ║    │  of signals   + Confirmation   + Daily Target Lock       │           ║
@@ -262,11 +279,46 @@ class NiftyAISystem:
                     # ── P0-C: External heartbeat ping (Fire & Forget) ──
                     asyncio.create_task(self._ping_heartbeat(session))
 
-                    # Performance profiling
+                    # ── LATENCY PROFILING (Priority 4: Pre-market was 530ms) ──
                     elapsed_sec = time.perf_counter() - start_time
-                    if elapsed_sec > 0.8: # Threshold for HFT warnings (API RTT accounts for ~500ms)
-                        logger.warning(f"⚠️ Cycle Latency: {elapsed_sec * 1000:.2f}ms")
-                    
+                    elapsed_ms = elapsed_sec * 1000
+
+                    # Rolling latency tracker (last 100 cycles)
+                    if not hasattr(self, '_latency_history'):
+                        self._latency_history = []
+                    self._latency_history.append(elapsed_ms)
+                    if len(self._latency_history) > 100:
+                        self._latency_history = self._latency_history[-100:]
+
+                    LATENCY_WARN_MS = 500    # Warning: approaching safe execution window
+                    LATENCY_CRIT_MS = 800    # Critical: exceeding safe execution window
+
+                    if elapsed_ms > LATENCY_CRIT_MS:
+                        logger.critical(
+                            f"🔴 CRITICAL LATENCY: {elapsed_ms:.0f}ms "
+                            f"(>{LATENCY_CRIT_MS}ms threshold) — "
+                            f"cycle #{self.cycle_count}"
+                        )
+                    elif elapsed_ms > LATENCY_WARN_MS:
+                        logger.warning(
+                            f"⚠️ HIGH LATENCY: {elapsed_ms:.0f}ms "
+                            f"(>{LATENCY_WARN_MS}ms threshold) — "
+                            f"cycle #{self.cycle_count}"
+                        )
+
+                    # Periodic latency summary (every 60 cycles ≈ 1 min)
+                    if self.cycle_count % 60 == 0 and self._latency_history:
+                        avg_ms = sum(self._latency_history) / len(self._latency_history)
+                        max_ms = max(self._latency_history)
+                        p95_idx = int(len(self._latency_history) * 0.95)
+                        sorted_lat = sorted(self._latency_history)
+                        p95_ms = sorted_lat[min(p95_idx, len(sorted_lat) - 1)]
+                        logger.info(
+                            f"📊 [LATENCY] avg={avg_ms:.0f}ms | "
+                            f"p95={p95_ms:.0f}ms | max={max_ms:.0f}ms | "
+                            f"samples={len(self._latency_history)}"
+                        )
+
                     if hasattr(self, "observer"):
                         self.observer.on_cycle_end(elapsed_sec)
                         
@@ -590,6 +642,25 @@ class NiftyAISystem:
             log_entry["trade_id"] = trade_id
             signal.id = trade_id  # Attach to signal so exit logging can map it
             
+            # ── PHASE A: INSTRUMENT RESOLUTION & PREMIUM ──
+            from core.options_resolver import OptionContractBuilder
+            instrument = OptionContractBuilder.resolve_instrument(
+                signal.direction.value, 
+                snapshot.price, 
+                signal.grade.name
+            )
+            
+            # Fetch live premium (Ask for buy)
+            quote = self.data_manager.fetch_option_quote(
+                instrument["strike"], 
+                instrument["type"], 
+                instrument["expiry"]
+            )
+            
+            signal.metadata["instrument"] = instrument
+            signal.metadata["quote"] = quote
+            logger.info(f"🎯 Resolved Instrument: {instrument['symbol']} | Premium: ₹{quote.ltp} (Ask: {quote.ask})")
+            
             self.perf_logger.log_signal(log_entry)
 
             # ── 12. Route Signal to Master Execution & Dispatch ──
@@ -662,6 +733,10 @@ class NiftyAISystem:
         
         mode="new"       -> Initial entry from AI/Telegram into confirmation queue.
         mode="confirmed" -> Final real-money hand-off to PositionManager.
+
+        ⚠️ AI WARNING: This is THE ONLY permitted execution path for live orders.
+        All other code paths MUST route through this method.
+        Deadman watchdog will force-close positions if main loop stalls.
         """
         logger.info(f"⚡ [EXECUTE_SIGNAL] Mode: {mode} | Type: {signal.signal_type.value}")
 
@@ -754,7 +829,7 @@ class NiftyAISystem:
 
     def _monitor_positions(self, snapshot, df):
         if self.is_simulation:
-            closed = self.simulation.update_open_trades(snapshot.price, snapshot)
+            closed = self.simulation.update_open_trades(snapshot.price, snapshot, self.data_manager)
             for trade in closed:
                 pnl = trade.get("net_pnl", 0)
                 

@@ -160,8 +160,16 @@ class RiskManager:
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             tmp = STATE_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(state, indent=2))
-            tmp.replace(STATE_FILE)  # Atomic on POSIX — near-atomic on Windows
+            
+            for attempt in range(5):
+                try:
+                    tmp.write_text(json.dumps(state, indent=2))
+                    tmp.replace(STATE_FILE)  # Atomic on POSIX — near-atomic on Windows
+                    break
+                except PermissionError as e:
+                    if attempt == 4:
+                        raise e
+                    time.sleep(0.05)
         except Exception as e:
             logger.error("Failed to persist risk state to disk: %s", e)
 

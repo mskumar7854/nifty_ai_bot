@@ -16,6 +16,10 @@
 ║    • 1 gap where _live_execute() skipped the risk re-check               ║
 ║    • 1 NameError in core/risk_manager.py is_within_trading_hours()       ║
 ║                                                                          ║
+║  ⚠️ AI WARNING:                                                          ║
+║  Removing or weakening ANY gate can cause UNLIMITED CAPITAL LOSS.        ║
+║  ApprovalResult.__bool__ raises TypeError — use .approved explicitly.    ║
+║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
 

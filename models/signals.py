@@ -110,6 +110,27 @@ class AgentOutput:
 
 
 @dataclass
+class OptionQuote:
+    """Live option premium and liquidity data"""
+    security_id: str
+    symbol: str
+    ltp: float
+    bid: float
+    ask: float
+    volume: int = 0
+    oi: int = 0
+    iv: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    @property
+    def spread_pct(self) -> float:
+        """Calculate the bid-ask spread as a percentage"""
+        if self.ask > 0:
+            return ((self.ask - self.bid) / self.ask) * 100
+        return 0.0
+
+
+@dataclass
 class MarketSnapshot:
     timestamp: datetime
     price: float

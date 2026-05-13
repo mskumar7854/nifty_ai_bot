@@ -438,7 +438,11 @@ class TelegramController:
     # ─── HELPERS ───
     async def _send_admin_msg(self, text: str):
         app = self._get_app()
-        if app: await app.bot.send_message(chat_id=self.admin_chat_id, text=text, parse_mode='HTML')
+        if app:
+            try:
+                await app.bot.send_message(chat_id=self.admin_chat_id, text=text, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Failed to send admin message to {self.admin_chat_id}: {e}")
 
     async def notify_halt(self, reason: str):
         """Notifies admin of a system halt."""

@@ -17,6 +17,13 @@ This manages:
 
 RULE: This engine can OVERRIDE any signal.
 If risk limits are breached → NO TRADE.
+
+⚠️ AI WARNING: core/position_manager.py
+This file controls REAL MONEY position sizing and stop losses.
+DO NOT modify calculate_position_size() or open_position() without:
+  1. 50+ trade backtest on simulation data
+  2. Manual review of risk calculations
+  3. Verifying SL is ALWAYS set before order placement
 ============================================
 """
 
@@ -512,18 +519,16 @@ class PositionManager:
                 "allowed": False,
             }
 
-        # ── ATR-based risk calculation ──
-        if self.config.sl_type == "atr":
-            sl_distance = atr * self.config.sl_atr_multiplier
-        elif self.config.sl_type == "fixed":
-            sl_distance = self.config.sl_fixed_points
+        # ── PHASE A: Premium-based risk calculation ──
+        quote = signal.metadata.get("quote")
+        if quote and quote.ask > 0:
+            premium_price = quote.ask
+            # Sl is 20-25% of premium, with a hard floor to avoid gamma shakeouts
+            sl_distance = max(premium_price * 0.25, 5.0) 
         else:
-            sl_distance = current_price * \
-                          self.config.sl_percentage / 100
-
-        # P1-C: Floor + Hard Cap on SL
-        sl_distance = max(sl_distance, ATR_MIN_SL_POINTS)
-        sl_distance = min(sl_distance, ATR_MAX_SL_POINTS)
+            # Fallback if no quote
+            premium_price = current_price * 0.01 * 50
+            sl_distance = max(premium_price * 0.25, 5.0)
 
         # ── Risk-based lot calculation ──
         risk_per_lot = sl_distance * self.config.lot_qty
@@ -539,7 +544,7 @@ class PositionManager:
         final_lots = max(final_lots, self.config.min_lot_size)
 
         # ── Capital check ──
-        estimated_premium = current_price * 0.01 * 50  # rough
+        estimated_premium = premium_price
         capital_needed = estimated_premium * final_lots
         max_capital = self.total_capital * \
                       self.config.max_capital_per_trade
@@ -564,15 +569,11 @@ class PositionManager:
         else:
             t1_mult, t2_mult = 1.0, 1.5
 
-        # Stop loss price
-        if signal.direction == Direction.BULLISH:
-            sl_price = current_price - sl_distance
-            target_1 = current_price + sl_distance * t1_mult
-            target_2 = current_price + sl_distance * t2_mult
-        else:
-            sl_price = current_price + sl_distance
-            target_1 = current_price - sl_distance * t1_mult
-            target_2 = current_price - sl_distance * t2_mult
+        # Option premium ALWAYS goes UP when profitable (since we BUY CE or BUY PE)
+        # We do not short options in this phase.
+        sl_price = premium_price - sl_distance
+        target_1 = premium_price + sl_distance * t1_mult
+        target_2 = premium_price + sl_distance * t2_mult
 
         # ── Execution Buffer (Dynamic) ──
         # Adapts to volatility: Low vol -> small buffer, High vol -> large buffer

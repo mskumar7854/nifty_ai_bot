@@ -69,6 +69,8 @@ class StructureAgent(BaseAgent):
         if len(df) < 30:
             return self._neutral_output("Insufficient data")
 
+        df = df.tail(500).copy()
+
         price = snapshot.price
 
         # ── 1. SWING POINT DETECTION ──

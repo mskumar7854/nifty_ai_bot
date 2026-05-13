@@ -426,7 +426,8 @@ class Dashboard:
                 port=self.port,
                 debug=False,
                 use_reloader=False,
-                log_output=False
+                log_output=False,
+                allow_unsafe_werkzeug=True
             )
 
         thread = threading.Thread(target=run_server, daemon=True)

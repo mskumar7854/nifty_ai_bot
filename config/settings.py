@@ -166,7 +166,10 @@ class TradeFilterConfig:
             "C": 50.0,
         }
     )
-    min_grade_to_trade: str = "B+"              # was A → now B+ (A is unreachable after regime scaling)
+    min_grade_to_trade: str = "B"               # was B+ → B for SIMULATION burn-in (2026-05-11)
+                                                 # B+ rejected all live signals (prob cap at 0.41-0.44).
+                                                 # B allows trades to accumulate for tuner calibration.
+                                                 # Raise to B+ after 15+ trades confirm edge.
 
     # ── ADDITIONAL PRO FILTERS ──
     require_multi_tf_alignment: bool = True
@@ -701,7 +704,8 @@ class EnginePipelineConfig:
             "order_flow",
             "level",
             "institutional",
-            "multi_timeframe"
+            "multi_timeframe",
+            "volatility",     # ATR/VIX context — dynamically routed by V4 router
         ]
     )
 
@@ -712,7 +716,9 @@ class EnginePipelineConfig:
             "risk",
             "decay",
             "expiry_day",
-            "learning"
+            "learning",
+            "market",         # Overall market trend context (legacy meta-signal)
+            "sentiment",      # External sentiment context (low-weight meta-signal)
         ]
     )
 

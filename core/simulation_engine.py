@@ -81,6 +81,8 @@ class SimulatedTrade:
     filter_score: float = 0
     gates_passed: int = 0
     gates_total: int = 0
+    
+    instrument: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -250,28 +252,33 @@ class SimulationEngine:
         if hasattr(signal, 'session_phase') and signal.session_phase:
             session_str = signal.session_phase.value
 
-        # ── 🎲 REALISTIC SLIPPAGE SIMULATION ──
-        # Real markets never fill at the signal price.
-        # ±0.3% simulates: spread widening, latency, partial fills.
-        # This will expose strategies that only work on perfect fills.
-        slippage_factor = 1 + np.random.uniform(-0.003, 0.003)
-        realistic_entry = round(signal.entry_price * slippage_factor, 2)
-        slippage_pts = round(realistic_entry - signal.entry_price, 2)
+        # ── 🎲 REALISTIC SLIPPAGE SIMULATION (PHASE A) ──
+        quote = signal.metadata.get("quote")
+        instrument = signal.metadata.get("instrument", {})
+        
+        if quote and quote.ask > 0:
+            # We buy at the ASK price. Slippage is added on top of the spread.
+            slippage_factor = 1 + np.random.uniform(0.000, 0.003)
+            realistic_entry = round(quote.ask * slippage_factor, 2)
+            base_price = quote.ask
+        else:
+            self.logger.warning("Simulation fallback to Spot due to missing OptionQuote")
+            slippage_factor = 1 + np.random.uniform(-0.003, 0.003)
+            realistic_entry = round(signal.entry_price * slippage_factor, 2)
+            base_price = signal.entry_price
+            
+        slippage_pts = round(realistic_entry - base_price, 2)
         
         # ── P0-F: Adjust SL and Targets relative to Fill Price ──
-        # If SL is based on signal price instead of fill price, the risk model is off.
+        # Phase A: SL/TP are passed as prices based on premium. Calculate the distance.
         sl_dist = abs(signal.entry_price - signal.stop_loss)
         t1_dist = abs(signal.target_1 - signal.entry_price)
         t2_dist = abs(signal.target_2 - signal.entry_price)
         
-        if signal.direction == Direction.BULLISH:
-            adjusted_sl = round(realistic_entry - sl_dist, 2)
-            adjusted_t1 = round(realistic_entry + t1_dist, 2)
-            adjusted_t2 = round(realistic_entry + t2_dist, 2)
-        else:
-            adjusted_sl = round(realistic_entry + sl_dist, 2)
-            adjusted_t1 = round(realistic_entry - t1_dist, 2)
-            adjusted_t2 = round(realistic_entry - t2_dist, 2)
+        # Option Premium goes UP on a win
+        adjusted_sl = round(realistic_entry - sl_dist, 2)
+        adjusted_t1 = round(realistic_entry + t1_dist, 2)
+        adjusted_t2 = round(realistic_entry + t2_dist, 2)
 
         trade = SimulatedTrade(
             trade_id=trade_id,
@@ -280,7 +287,7 @@ class SimulationEngine:
             direction=signal.direction,
             confidence=signal.confidence,
             grade=filter_grade,
-            entry_price=realistic_entry,   # ✅ Slippage-adjusted
+            entry_price=realistic_entry,   # ✅ Slippage-adjusted Ask
             stop_loss=adjusted_sl,         # ✅ Slippage-adjusted
             target_1=adjusted_t1,          # ✅ Slippage-adjusted
             target_2=adjusted_t2,          # ✅ Slippage-adjusted
@@ -299,6 +306,7 @@ class SimulationEngine:
             filter_score=filter_score,
             gates_passed=gates_passed,
             gates_total=gates_total,
+            instrument=instrument,
             costs=costs_estimate,
         )
 
@@ -318,7 +326,7 @@ class SimulationEngine:
         return trade
 
     def update_open_trades(
-        self, current_price: float, snapshot: MarketSnapshot
+        self, current_price: float, snapshot: MarketSnapshot, data_manager=None
     ) -> List[Dict]:
         """
         Check all open sim trades for SL/TP hits.
@@ -331,24 +339,25 @@ class SimulationEngine:
             if trade.result != "OPEN":
                 continue
 
-            if trade.direction == Direction.BULLISH:
-                if current_price <= trade.stop_loss:
-                    self._close_trade(tid, current_price, "STOP_LOSS")
-                    closed.append(self.all_trades[-1].to_dict()
-                                  if self.all_trades else {})
-                elif trade.target_1 > 0 and current_price >= trade.target_1:
-                    self._close_trade(tid, trade.target_1, "TARGET_1")
-                    closed.append(self.all_trades[-1].to_dict()
-                                  if self.all_trades else {})
-            else:
-                if current_price >= trade.stop_loss:
-                    self._close_trade(tid, current_price, "STOP_LOSS")
-                    closed.append(self.all_trades[-1].to_dict()
-                                  if self.all_trades else {})
-                elif trade.target_1 > 0 and current_price <= trade.target_1:
-                    self._close_trade(tid, trade.target_1, "TARGET_1")
-                    closed.append(self.all_trades[-1].to_dict()
-                                  if self.all_trades else {})
+            eval_price = current_price
+            
+            # PHASE A: Option Premium Tracking
+            if data_manager and trade.instrument:
+                quote = data_manager.fetch_option_quote(
+                    trade.instrument.get("strike"), 
+                    trade.instrument.get("type"), 
+                    trade.instrument.get("expiry")
+                )
+                if quote and quote.bid > 0:
+                    eval_price = quote.bid # We sell at the BID price to close
+
+            # Option Premium goes UP on a win
+            if eval_price <= trade.stop_loss:
+                self._close_trade(tid, eval_price, "STOP_LOSS")
+                closed.append(self.all_trades[-1].to_dict() if self.all_trades else {})
+            elif trade.target_1 > 0 and eval_price >= trade.target_1:
+                self._close_trade(tid, eval_price, "TARGET_1")
+                closed.append(self.all_trades[-1].to_dict() if self.all_trades else {})
 
             # Time-based exit check (only for still-open trades)
             if tid in self.open_trades:

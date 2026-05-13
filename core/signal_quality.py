@@ -1,20 +1,29 @@
 """
 ============================================
-SIGNAL QUALITY GRADER v3 (Dominance-Aware)
+SIGNAL QUALITY GRADER v3.1 (Probability-Gated)
 
-Why: The old v2 grader used raw confidence
-     thresholds (85%, 75%) that are IMPOSSIBLE
-     to reach after regime scaling (~0.70x).
-     This version grades on relative edge
-     quality, not absolute probability.
+Why: The old v3 grader was driven purely by
+     confluence/dominance/alignment — it could
+     produce A+ with probability=0.36, which is
+     a grading calibration bug.
+
+Fix: Probability score now acts as a HARD CEILING
+     on the achievable grade.  No matter how good
+     the confluence/alignment, a weak probability
+     score caps the max grade:
+
+       prob >= 0.48  → no cap (let score decide)
+       prob >= 0.38  → max grade = B+
+       prob >= 0.30  → max grade = B
+       prob  < 0.30  → max grade = C
 
 Grading factors:
   1. Confluence ratio       (max 25 pts)
   2. Risk/Reward ratio      (max 20 pts)
-  3. Dominance percentage   (max 25 pts)  ← NEW
-  4. Directional alignment  (max 15 pts)  ← NEW
+  3. Dominance percentage   (max 25 pts)
+  4. Directional alignment  (max 15 pts)
   5. Regime alignment       (max 15 pts)
-  - Penalty: excessive warnings
+  - Penalty: excessive warnings, gap day w/o alignment
 ============================================
 """
 
@@ -108,21 +117,68 @@ class SignalQualityGrader:
         # Clamp to 0
         score = max(0, score)
 
-        # ── Assign Grade ──
+        # ── Raw Grade from score ──
         # A+: 90+ with alignment — elite
         # A:  75+ — strong setup
         # B+: 60+ — acceptable in trending regime
         # B:  45+ — marginal
         # C:  below 45 — too weak
         if score >= 90 and alignment:
-            return SignalGrade.A_PLUS
+            raw_grade = SignalGrade.A_PLUS
         elif score >= 75:
-            return SignalGrade.A
+            raw_grade = SignalGrade.A
         elif score >= 60:
-            return SignalGrade.B_PLUS if hasattr(SignalGrade, "B_PLUS") else SignalGrade.A
+            raw_grade = SignalGrade.B_PLUS if hasattr(SignalGrade, "B_PLUS") else SignalGrade.A
         elif score >= 45:
-            return SignalGrade.B
+            raw_grade = SignalGrade.B
         elif score >= 30:
-            return SignalGrade.C
+            raw_grade = SignalGrade.C
         else:
-            return SignalGrade.D
+            raw_grade = SignalGrade.D
+
+        # ── Probability Gate: Hard ceiling on grade ──
+        # Even if confluence/alignment is perfect, a weak probability score
+        # means the EDGE is not there.  Cap the grade accordingly.
+        #
+        # The dominant probability is read from signal metadata so this grader
+        # works with the full post-penalty, post-sigmoid probability score that
+        # compute_weighted_score() already produced.
+        #
+        # CALIBRATION NOTE (2026-05-11): Thresholds lowered for live data.
+        # Simulated data produced dominant_prob in 0.50-0.70 range.
+        # Live post-penalty, post-sigmoid probs concentrate in 0.38-0.50.
+        # Old thresholds capped every live signal at B, making B+ unreachable.
+        dominant_prob = meta.get("dominant_prob", 1.0)  # 1.0 = no data → no cap
+
+        # Grade ordering for cap comparison
+        _GRADE_ORDER = {
+            SignalGrade.A_PLUS: 5,
+            SignalGrade.A: 4,
+        }
+        if hasattr(SignalGrade, "B_PLUS"):
+            _GRADE_ORDER[SignalGrade.B_PLUS] = 3
+        _GRADE_ORDER[SignalGrade.B] = 2
+        _GRADE_ORDER[SignalGrade.C] = 1
+        _GRADE_ORDER[SignalGrade.D] = 0
+
+        def _apply_prob_cap(grade, cap_grade):
+            """Return the lower of grade and cap_grade."""
+            if _GRADE_ORDER.get(grade, 0) > _GRADE_ORDER.get(cap_grade, 0):
+                return cap_grade
+            return grade
+
+        if dominant_prob < 0.30:
+            # Probability too low — cap at C
+            final_grade = _apply_prob_cap(raw_grade, SignalGrade.C)
+        elif dominant_prob < 0.38:
+            # Weak probability — cap at B
+            final_grade = _apply_prob_cap(raw_grade, SignalGrade.B)
+        elif dominant_prob < 0.48:
+            # Below mid-strength — cap at B+
+            cap = SignalGrade.B_PLUS if hasattr(SignalGrade, "B_PLUS") else SignalGrade.B
+            final_grade = _apply_prob_cap(raw_grade, cap)
+        else:
+            # Probability strong enough — no cap
+            final_grade = raw_grade
+
+        return final_grade

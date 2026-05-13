@@ -15,7 +15,7 @@ dilution that kills the final score.
 """
 
 # ── AGENT WEIGHT MATRIX ──
-# All 18 active agents are listed explicitly.
+# All 18 active agents are listed and routed to exactly one phase.
 # Weights sum to ~1.0 (normalized by engine anyway).
 AGENT_WEIGHTS = {
     # ── Phase 1: Gatekeepers (structural) ──
