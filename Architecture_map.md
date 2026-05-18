@@ -1,6 +1,6 @@
 # 🏗️ Nifty Trading Bot — Architecture Map
 
-> **Updated**: 2026-05-10 | **Version**: v4.6.1 Production Hardened | **Mode**: SIMULATION
+> **Updated**: 2026-05-18 | **Version**: v4.7.0 Hybrid TSL Engine | **Mode**: SIMULATION
 > **Capital**: ₹1,00,000 | **Broker**: Dhan API | **18 Active AI Agents** (24 registered in `agents/`, 5 disabled via Graphify audit + `active_agents` config list)
 
 > [!CAUTION]
@@ -39,7 +39,7 @@ nifty-ai-system/                       # Root (1,120 lines main.py)
 │   └── config.py                      # 50 lines — broker credentials
 ├── core/                              # 28 engine files
 │   ├── decision_engine_v3.py          # 945 lines — AI brain (phase routing)
-│   ├── position_manager.py            # 1,481 lines — capital controller
+│   ├── position_manager.py            # ~1,646 lines — capital controller (with Hybrid TSL)
 │   ├── options_resolver.py            # Phase A — Option Strike/Instrument Builder
 │   ├── master_decision_engine.py      # 302 lines — single point of truth
 │   ├── simulation_engine.py           # 905 lines — paper trading
@@ -137,7 +137,7 @@ flowchart TD
 - **New in v4.6.1**: Deadman watchdog, candle-based dedup, trade frequency guard, broker reconciliation
 
 ### 2. `core/position_manager.py` — Capital Controller
-- **File**: [position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (1,481 lines)
+- **File**: [position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (~1,646 lines)
 - **Used by**: `main.py`, `master_decision_engine.py`, `telegram_controller.py`
 - **Affects**: Position sizing, SL/TP management, capital tracking, daily P&L
 - **If it breaks**: **Unlimited risk exposure** — positions could open without SL, wrong sizing, capital not tracked
@@ -261,8 +261,19 @@ The ~40% compute savings claim is estimated based on 5/23 agents skipped × aver
 - **Gate 4**: Close > prev_high (breakout) or close < prev_low (breakdown)
 - **Gates 5-7**: Safety filters (wick rejection, chase distance, direction match)
 
-### Exit Conditions (from `position_manager.py`)
-- **Stop Loss**: ATR × 1.5 multiplier (configurable)
+### Exit & Trailing Stop Loss (TSL) Logic (v4.7.0)
+The system uses a **Hybrid Trailing Stop Loss Engine** in `position_manager.py` (via `_compute_tsl`), eliminating fixed take-profit exits in favor of dynamic lifecycle management.
+
+**Core Mechanisms:**
+- **Ratchet-Only**: The TSL works off the *highest premium seen* since entry. It NEVER moves the stop downward.
+- **Phase Milestones**:
+  - `INITIAL`: Fixed SL below entry.
+  - `BREAKEVEN` (at +12%): SL slides to entry cost.
+  - `ACTIVE` (at +22%): Normal trailing begins.
+  - `TIGHTEN_1` (at +35%) and `TIGHTEN_2` (at +50%): Trail width compresses to lock deep profits.
+- **Additive Adjustments**: Adjusts the base trail width by combining `tsl_grade` and `tsl_regime` (e.g., A+ grade adds +2% width, Choppy regime deducts -2%). Hard clamps strictly enforce min (5%) and max (15%) widths.
+- **Idle Tightening (Theta Protection)**: If premium sets no new highs for 15 minutes, the trail tightens by 2% automatically.
+- **Exit Analytics**: Every exit reason (`SL_HIT_ACTIVE`, `SL_HIT_BREAKEVEN`, etc.) is tracked in `DailyStats` for system self-optimization.
 - **Target 1**: Entry + 2×SL distance → 50% partial close
 - **Target 2**: Entry + 3×SL distance → full close
 - **Theta Protection**: If trade hasn't moved 0.5R in 10 minutes → close

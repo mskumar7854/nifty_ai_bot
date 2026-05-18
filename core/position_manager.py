@@ -118,6 +118,16 @@ class OpenPosition:
     last_sl_price: float = 0
     last_sl_update_time: float = 0
 
+    # ── Hybrid TSL State ──
+    tsl_active: bool = False
+    tsl_breakeven_hit: bool = False
+    tsl_current_trail_pct: float = 0.0
+    tsl_highest_premium: float = 0.0           # Peak premium seen — the ratchet value
+    tsl_highest_premium_time: datetime = field(default_factory=datetime.now)  # For idle tightening
+    tsl_phase: str = "INITIAL"                 # INITIAL|BREAKEVEN|ACTIVE|TIGHTEN_1|TIGHTEN_2|IDLE_TIGHTEN
+    tsl_grade: str = "B"                       # Signal grade at entry (additive adjustment)
+    tsl_regime: str = "UNKNOWN"                # Regime at entry (additive adjustment)
+
     def update_pnl(self, current_price: float):
         """Update unrealized P&L"""
         self.current_price = current_price
@@ -151,6 +161,12 @@ class OpenPosition:
             "max_loss_seen": f"₹{self.max_adverse:,.0f}",
             "active": self.is_active,
             "partial_booked": self.partial_booked,
+            # ── TSL telemetry ──
+            "tsl_phase": self.tsl_phase,
+            "tsl_active": self.tsl_active,
+            "tsl_trail_pct": f"{self.tsl_current_trail_pct:.1f}%",
+            "tsl_peak_premium": f"₹{self.tsl_highest_premium:,.1f}",
+            "tsl_breakeven_hit": self.tsl_breakeven_hit,
         }
 
 
@@ -175,6 +191,7 @@ class DailyStats:
     max_drawdown: float = 0
     is_halted: bool = False
     halt_reason: str = ""
+    exit_reasons: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -191,6 +208,7 @@ class DailyStats:
             "slippage": f"₹{self.total_slippage:,.0f}",
             "drawdown": f"{self.max_drawdown:.2f}%",
             "halted": self.is_halted,
+            "exit_reasons": self.exit_reasons,
         }
 
     @property
@@ -543,6 +561,11 @@ class PositionManager:
         )
         final_lots = max(final_lots, self.config.min_lot_size)
 
+        # ── INITIAL DEPLOYMENT HARD CAP ──
+        # Not configurable. Hard-coded safety.
+        MAX_LOTS_CAP = 1
+        final_lots = min(final_lots, MAX_LOTS_CAP)
+
         # ── Capital check ──
         estimated_premium = premium_price
         capital_needed = estimated_premium * final_lots
@@ -661,7 +684,12 @@ class PositionManager:
             volatility_at_entry=size_params.get("volatility", 0),
             entry_type=signal.metadata.get("context", {}).get("entry_type", "AI"),
             last_sl_price=size_params["sl_price"],
-            last_sl_update_time=time.time()
+            last_sl_update_time=time.time(),
+            # ── TSL initial state ──
+            tsl_highest_premium=premium if premium > 0 else fill_price,
+            tsl_highest_premium_time=datetime.now(),
+            tsl_grade=signal.grade.value if hasattr(signal.grade, "value") else "B",
+            tsl_regime=signal.regime.value if hasattr(signal.regime, "value") else "UNKNOWN",
         )
 
         self.open_positions[position_id] = position
@@ -706,6 +734,29 @@ class PositionManager:
                 self.logger.warning(f"Position blocked: {size_params.get('reason')}")
                 return None
 
+            # ── Spread Explosion Filter ──
+            # Reject if bid-ask spread has blown out — signal may be technically
+            # valid but execution would destroy expected edge.
+            quote = getattr(signal, "metadata", {}).get("quote")
+            if quote and hasattr(quote, "ask") and hasattr(quote, "bid") and quote.ask > 0:
+                spread_abs = quote.ask - quote.bid
+                spread_pct = (spread_abs / quote.ask) * 100
+
+                max_spread_abs = getattr(
+                    getattr(self.settings, "alerts", None), "max_spread_abs", 8.0
+                )
+                max_spread_pct = getattr(
+                    getattr(self.settings, "alerts", None), "max_spread_pct", 6.0
+                )
+
+                if spread_abs > max_spread_abs or spread_pct > max_spread_pct:
+                    self.logger.warning(
+                        "🚫 [SPREAD EXPLOSION] Spread ₹%.2f (%.1f%%) exceeds limits "
+                        "(abs=₹%.1f, pct=%.1f%%). Trade blocked.",
+                        spread_abs, spread_pct, max_spread_abs, max_spread_pct
+                    )
+                    return None
+
             # ── Step 1: Place Entry Order ──
             qty = size_params["qty"]
             stop_loss_price = size_params["sl_price"]
@@ -717,6 +768,7 @@ class PositionManager:
             signal.symbol, qty, stop_loss_price
         )
 
+        start_time = time.time()
         try:
             entry_response = await self._place_order_async(
                 security_id=signal.security_id,
@@ -736,6 +788,7 @@ class PositionManager:
 
         # Extract order ID from response (fallback to uuid if missing)
         order_id = entry_response.get("data", {}).get("orderId", str(uuid.uuid4())[:8])
+        execution_delay_ms = int((time.time() - start_time) * 1000)
 
         fill = EntryResult(
             filled=True,
@@ -748,9 +801,26 @@ class PositionManager:
         )
 
         self.logger.info(
-            "Entry filled: %s @ %.2f (%d qty) | order_id=%s",
-            fill.symbol, fill.fill_price, fill.fill_qty, fill.order_id
+            "Entry filled: %s @ %.2f (%d qty) | order_id=%s | delay=%dms",
+            fill.symbol, fill.fill_price, fill.fill_qty, fill.order_id, execution_delay_ms
         )
+
+        # Log Execution Quality
+        try:
+            from performance_logger import PerformanceLogger
+            perf = PerformanceLogger()
+            spread = 0.0 # Will need level 2 data for real spread
+            slippage = fill.fill_price - signal.entry_price
+            perf.log_execution_quality(
+                trade_id=getattr(signal, "id", order_id),
+                signal_price=signal.entry_price,
+                fill_price=fill.fill_price,
+                slippage=slippage,
+                spread=spread,
+                delay_ms=execution_delay_ms
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to log execution quality: {e}")
 
         # ── Step 2: Record position locally IMMEDIATELY ──
         # Track position even if SL fails, so deadman/reconciliation catches it.
@@ -936,20 +1006,22 @@ class PositionManager:
             # ── Check Stop Loss ──
             if pos.direction == Direction.BULLISH:
                 if current_price <= pos.stop_loss:
+                    detailed_reason = f"SL_HIT_{pos.tsl_phase}"
                     actions.append({
                         "action": "CLOSE",
                         "position_id": pid,
-                        "reason": "STOP_LOSS",
+                        "reason": detailed_reason,
                         "price": current_price,
                         "pnl": pos.unrealized_pnl,
                     })
                     continue
             else:
                 if current_price >= pos.stop_loss:
+                    detailed_reason = f"SL_HIT_{pos.tsl_phase}"
                     actions.append({
                         "action": "CLOSE",
                         "position_id": pid,
-                        "reason": "STOP_LOSS",
+                        "reason": detailed_reason,
                         "price": current_price,
                         "pnl": pos.unrealized_pnl,
                     })
@@ -1043,40 +1115,133 @@ class PositionManager:
                 })
                 continue
 
-            # ── Trailing Stop ──
-            if pos.partial_booked and self.config.trail_remaining:
-                atr_trail = pos.original_stop_loss  # placeholder
-                if pos.direction == Direction.BULLISH:
-                    new_trail = current_price - abs(
-                        pos.entry_price - pos.original_stop_loss
-                    ) * self.config.trail_stop_atr_multiplier
-                    if new_trail > pos.trailing_stop:
-                        pos.trailing_stop = new_trail
-                        pos.stop_loss = max(
-                            pos.stop_loss, new_trail
-                        )
-                else:
-                    new_trail = current_price + abs(
-                        pos.original_stop_loss - pos.entry_price
-                    ) * self.config.trail_stop_atr_multiplier
-                    if new_trail < pos.trailing_stop:
-                        pos.trailing_stop = new_trail
-                        pos.stop_loss = min(
-                            pos.stop_loss, new_trail
-                        )
-                        
-            # ── API Throttling for SL Updates ──
-            now = time.time()
-            if abs(pos.stop_loss - pos.last_sl_price) >= 0.5 and (now - pos.last_sl_update_time) >= 2.0:
+            # ── Hybrid Trailing Stop Loss Engine ──
+            # Replaces the legacy stub that only activated after partial_booked.
+            # TSL is now independent of partial booking — they are separate systems.
+            # Uses premium-based ratchet with grade+regime additive adjustments.
+            if self.config.tsl_enabled:
+                # Use entry_premium for options (premium-based TSL),
+                # fallback to current_price for non-premium instruments.
+                current_premium = pos.entry_premium if pos.entry_premium > 0 else current_price
+                new_sl = self._compute_tsl(pos, current_premium)
+
+                if new_sl > pos.stop_loss:
+                    old_sl = pos.stop_loss
+                    pos.stop_loss = new_sl
+                    pos.trailing_stop = new_sl
+                    self.logger.info(
+                        f"TSL [{pos.tsl_phase}] {pid}: "
+                        f"SL {old_sl:.1f} → {new_sl:.1f} | "
+                        f"Peak: ₹{pos.tsl_highest_premium:.1f} | "
+                        f"Trail: {pos.tsl_current_trail_pct:.1f}% | "
+                        f"Grade: {pos.tsl_grade} | Regime: {pos.tsl_regime}"
+                    )
+
+            # ── API Throttling for SL Updates (unchanged) ──
+            # Emits MODIFY_SL action which the broker integration layer consumes.
+            # Minimum 2-second gap between broker SL modification calls.
+            sl_time = time.time()
+            if abs(pos.stop_loss - pos.last_sl_price) >= 0.5 and (sl_time - pos.last_sl_update_time) >= 2.0:
                 actions.append({
                     "action": "MODIFY_SL",
                     "position_id": pid,
-                    "price": pos.stop_loss
+                    "price": pos.stop_loss,
+                    "tsl_phase": pos.tsl_phase,
                 })
                 pos.last_sl_price = pos.stop_loss
-                pos.last_sl_update_time = now
+                pos.last_sl_update_time = sl_time
 
         return actions
+
+    def _compute_tsl(self, pos: "OpenPosition", current_premium: float) -> float:
+        """
+        Hybrid Trailing Stop Loss computation engine.
+
+        Determines the new SL price based on:
+          - Profit milestone phase (INITIAL → BREAKEVEN → ACTIVE → TIGHTEN_1 → TIGHTEN_2)
+          - Grade ADDITIVE adjustment (A+ +2%, C -2%)
+          - Regime ADDITIVE adjustment (trend +2%, chop -2%)
+          - Time-based idle tightening (no new high for 15min → -2%)
+
+        Design principles:
+          - ADDITIVE (not multiplicative) adjustments: prevents runaway 18%+ trails
+          - Hard floor (5%) and ceiling (15%) clamps on final trail width
+          - Ratchet: returned value NEVER decreases below pos.stop_loss
+          - Premium-based: operates on option premium, not index price
+        """
+        cfg = self.config
+        entry = pos.entry_premium if pos.entry_premium > 0 else pos.entry_price
+        now = datetime.now()
+
+        # ── Ratchet: track the highest premium ever seen for this position ──
+        if current_premium > pos.tsl_highest_premium:
+            pos.tsl_highest_premium = current_premium
+            pos.tsl_highest_premium_time = now  # Reset idle clock on new high
+
+        if entry <= 0:
+            return pos.stop_loss  # Guard: no valid entry reference
+
+        profit_pct = (pos.tsl_highest_premium - entry) / entry * 100
+
+        # ── Phase determination ──
+        if profit_pct >= cfg.tsl_tighten_2_trigger_pct:
+            pos.tsl_phase = "TIGHTEN_2"
+            base_trail = cfg.tsl_trail_pct_tighten_2
+            pos.tsl_active = True
+        elif profit_pct >= cfg.tsl_tighten_1_trigger_pct:
+            pos.tsl_phase = "TIGHTEN_1"
+            base_trail = cfg.tsl_trail_pct_tighten_1
+            pos.tsl_active = True
+        elif profit_pct >= cfg.tsl_activate_trigger_pct:
+            pos.tsl_phase = "ACTIVE"
+            base_trail = cfg.tsl_trail_pct_normal
+            pos.tsl_active = True
+        elif profit_pct >= cfg.tsl_breakeven_trigger_pct:
+            # Break-even: slide SL to entry price, no active trailing yet
+            pos.tsl_phase = "BREAKEVEN"
+            pos.tsl_breakeven_hit = True
+            new_sl = max(pos.entry_price, pos.stop_loss)  # ratchet
+            return round(new_sl, 1)
+        else:
+            pos.tsl_phase = "INITIAL"
+            return pos.stop_loss  # Hold original SL
+
+        # ── ADDITIVE grade adjustment ──
+        grade_adj = cfg.tsl_grade_adjustments.get(pos.tsl_grade, 0.0)
+
+        # ── ADDITIVE regime adjustment ──
+        regime_adj = cfg.tsl_regime_adjustments.get(pos.tsl_regime, 0.0)
+
+        adjusted_trail = base_trail + grade_adj + regime_adj
+
+        # ── Time-based idle tightening ──
+        # Theta decay silently erodes option premium when price stagnates.
+        # If no new premium high for threshold minutes, tighten trail
+        # proactively to lock remaining value before decay accelerates.
+        if cfg.tsl_idle_tighten_enabled and pos.tsl_highest_premium_time:
+            idle_minutes = (now - pos.tsl_highest_premium_time).total_seconds() / 60.0
+            if idle_minutes >= cfg.tsl_idle_minutes_threshold:
+                adjusted_trail -= cfg.tsl_idle_tighten_by_pct
+                if pos.tsl_phase not in ("TIGHTEN_1", "TIGHTEN_2", "IDLE_TIGHTEN"):
+                    pos.tsl_phase = "IDLE_TIGHTEN"
+                    self.logger.info(
+                        f"TSL IDLE_TIGHTEN {pos.position_id}: "
+                        f"No new premium high for {idle_minutes:.0f}min. "
+                        f"Trail tightened by {cfg.tsl_idle_tighten_by_pct}%"
+                    )
+
+        # ── Hard clamps (override all adjustments) ──
+        adjusted_trail = max(adjusted_trail, cfg.tsl_min_trail_pct)   # floor: 5%
+        adjusted_trail = min(adjusted_trail, cfg.tsl_max_trail_pct)   # ceiling: 15%
+        pos.tsl_current_trail_pct = adjusted_trail
+
+        # ── TSL price = peak_premium minus trail% ──
+        new_sl = pos.tsl_highest_premium * (1.0 - adjusted_trail / 100.0)
+
+        # Ratchet: NEVER lower the SL
+        new_sl = max(new_sl, pos.stop_loss)
+
+        return round(new_sl, 1)
 
     def close_position(
         self,
@@ -1212,6 +1377,9 @@ class PositionManager:
         self.total_capital += pnl
         self.weekly_pnl += pnl
         self.recent_pnls.append(pnl)
+        
+        # Track exit reason analytics
+        self.today_stats.exit_reasons[reason] = self.today_stats.exit_reasons.get(reason, 0) + 1
 
         if pnl > 0:
             self.today_stats.wins += 1

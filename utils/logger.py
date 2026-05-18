@@ -28,7 +28,7 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
 
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # Rich console handler (beautiful output)
+    # Rich console handler (beautiful output) - Terminal shows meaningful events only
     rich_handler = RichHandler(
         console=console,
         show_time=True,
@@ -36,26 +36,61 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
         markup=True,
         rich_tracebacks=True,
     )
-    rich_handler.setLevel(logging.DEBUG)
+    rich_handler.setLevel(logging.INFO)
 
-    # File handler
+    # File handler - Uses TimedRotatingFileHandler for daily log rotation
     import os
+    import gzip
+    import shutil
+    from logging.handlers import TimedRotatingFileHandler
+    
+    def gzip_namer(name):
+        return name + ".gz"
+        
+    def gzip_rotator(source, dest):
+        with open(source, "rb") as f_in:
+            with gzip.open(dest, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
+        os.remove(source)
+    
     log_dir = "/app/logs" if os.path.exists("/app") else "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
         
     log_file = os.path.join(log_dir, "nifty_ai.log")
     
-    file_handler = logging.FileHandler(
+    file_handler = TimedRotatingFileHandler(
         log_file,
-        encoding='utf-8'
+        when="midnight",
+        interval=1,
+        backupCount=14,
+        encoding="utf-8"
     )
+    file_handler.suffix = "%Y-%m-%d"
+    file_handler.namer = gzip_namer
+    file_handler.rotator = gzip_rotator
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     file_handler.setFormatter(file_formatter)
 
+    # Alerts-only file handler (WARNING+)
+    alerts_file = os.path.join(log_dir, "alerts.log")
+    alerts_handler = TimedRotatingFileHandler(
+        alerts_file,
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8"
+    )
+    alerts_handler.suffix = "%Y-%m-%d"
+    alerts_handler.namer = gzip_namer
+    alerts_handler.rotator = gzip_rotator
+    alerts_handler.setLevel(logging.WARNING)
+    alerts_handler.setFormatter(file_formatter)
+
     logger.addHandler(rich_handler)
     logger.addHandler(file_handler)
+    logger.addHandler(alerts_handler)
 
     return logger
 

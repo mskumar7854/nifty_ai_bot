@@ -14,6 +14,7 @@ import threading
 import signal as sig_module
 import sys
 import os
+from typing import Optional
 
 # Force UTF-8 Encoding on Windows to prevent Emoji/Rich logging crashes
 if sys.platform == 'win32':
@@ -104,6 +105,89 @@ def print_banner():
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
     """)
+
+
+
+# ══════════════════════════════════════════════════════════
+# 🩺 BROKER HEALTH MONITOR (v4.7)
+# Tracks live API responsiveness. Blocks trades during
+# degraded broker connectivity before money is committed.
+# ══════════════════════════════════════════════════════════
+
+class BrokerHealthMonitor:
+    """
+    Continuously probes broker API health and blocks trading
+    if connectivity degrades.
+
+    Tracks:
+        - api_latency_ms:         round-trip time of last API call
+        - last_successful_order:  timestamp of last confirmed order
+        - feed_delay_s:           age of the most recent market data tick
+        - is_healthy:             computed gate — False blocks new orders
+
+    Updated every `poll_interval_s` seconds by _run_broker_health_loop().
+    Checked synchronously by position_manager before every order.
+    """
+
+    def __init__(self, settings):
+        self.settings = settings
+        self._warn_ms  = getattr(settings.alerts, "broker_latency_warn_ms",  1500.0)
+        self._halt_ms  = getattr(settings.alerts, "broker_latency_halt_ms",  3000.0)
+        self.poll_interval_s: float = 15.0
+
+        self.api_latency_ms: float = 0.0
+        self.last_successful_order: Optional[float] = None  # epoch seconds
+        self.feed_delay_s: float = 0.0
+        self.consecutive_degraded: int = 0
+
+        self.is_healthy: bool = True
+        self.degraded_reason: str = ""
+
+    def record_order_success(self):
+        """Call this after every successful broker order placement."""
+        import time as _time
+        self.last_successful_order = _time.time()
+
+    def record_api_latency(self, latency_ms: float):
+        """Call this after every broker API round-trip."""
+        self.api_latency_ms = latency_ms
+
+        if latency_ms >= self._halt_ms:
+            self.consecutive_degraded += 1
+            self.degraded_reason = f"API latency {latency_ms:.0f}ms ≥ halt threshold {self._halt_ms:.0f}ms"
+            if self.consecutive_degraded >= 3:
+                self.is_healthy = False
+                logger.critical(
+                    "🔴 [BROKER HEALTH] DEGRADED — latency=%.0fms (×%d consecutive). "
+                    "New trades BLOCKED.", latency_ms, self.consecutive_degraded
+                )
+        elif latency_ms >= self._warn_ms:
+            logger.warning(
+                "⚠️ [BROKER HEALTH] High latency: %.0fms", latency_ms
+            )
+            self.consecutive_degraded = 0  # warn-only; don't count as halt
+        else:
+            # Healthy: reset counter and re-enable
+            if not self.is_healthy:
+                logger.info("✅ [BROKER HEALTH] Latency normalised (%.0fms). Trades re-enabled.", latency_ms)
+            self.consecutive_degraded = 0
+            self.is_healthy = True
+            self.degraded_reason = ""
+
+    def get_status(self) -> dict:
+        import time as _time
+        last_order_age = (
+            f"{_time.time() - self.last_successful_order:.0f}s ago"
+            if self.last_successful_order else "never"
+        )
+        return {
+            "healthy":             self.is_healthy,
+            "api_latency_ms":      round(self.api_latency_ms, 1),
+            "last_order":          last_order_age,
+            "feed_delay_s":        round(self.feed_delay_s, 1),
+            "consecutive_degraded": self.consecutive_degraded,
+            "degraded_reason":     self.degraded_reason,
+        }
 
 
 class NiftyAISystem:
@@ -198,6 +282,9 @@ class NiftyAISystem:
             settings.system_mode.mode == "SIMULATION"
         )
 
+        # ── 🩺 Broker Health Monitor (v4.7) ──
+        self.broker_health = BrokerHealthMonitor(settings)
+
         logger.info(
             f"v4.6.1 initialized ✓ | "
             f"{'SIMULATION' if self.is_simulation else 'LIVE'} mode"
@@ -225,19 +312,28 @@ class NiftyAISystem:
         # Store app reference in the bot for async sending
         self.telegram_bot.app = app
 
-        self.telegram_enabled = not self.is_simulation
+        # v3.7: Telegram is always initialized — even in SIMULATION mode.
+        # In SIM, we want signal notifications for observability (no real trades executed).
+        # Previously, Telegram was completely disabled in SIM which meant confirmed signals
+        # were silently swallowed after passing all 10 gates.
+        #
+        # Distinction:
+        #   telegram_enabled = True  → app initialized, alerts dispatched
+        #   is_simulation = True     → execution blocked downstream (PositionManager hard-lock)
+        self.telegram_enabled = True
 
-        if self.telegram_enabled:
-            try:
-                await app.initialize()
-                await app.start()
-                await app.updater.start_polling()
-                logger.info("📱 Telegram Async Polling Active")
-            except Exception as e:
-                logger.error("Telegram init failed: %s", e)
-                self.telegram_enabled = False
-        else:
-            logger.info("📱 Telegram disabled in SIMULATION mode")
+        try:
+            await app.initialize()
+            await app.start()
+            await app.updater.start_polling()
+            if self.is_simulation:
+                logger.info("📱 Telegram Active (SIMULATION mode — alerts only, no real execution)")
+            else:
+                logger.info("📱 Telegram Async Polling Active (LIVE mode)")
+        except Exception as e:
+            logger.error("Telegram init failed: %s", e)
+            self.telegram_enabled = False
+
 
         # 2. Wake up the Brain (Load memory from disk)
         await self.decision_engine.memory.boot()
@@ -265,6 +361,8 @@ class NiftyAISystem:
             logger.info("🎬 Powering up AI Execution Loop")
             # ── P0-C: Launch deadman watchdog as background task ──
             deadman_task = asyncio.create_task(self._deadman_watchdog())
+            # ── v4.7: Broker health polling loop ──
+            broker_health_task = asyncio.create_task(self._run_broker_health_loop())
 
             try:
                 while self.running:
@@ -299,7 +397,19 @@ class NiftyAISystem:
                             f"(>{LATENCY_CRIT_MS}ms threshold) — "
                             f"cycle #{self.cycle_count}"
                         )
-                    elif elapsed_ms > LATENCY_WARN_MS:
+                        self.error_count += 1
+                        
+                        # Abnormal Latency Circuit Breaker
+                        if not hasattr(self, '_consecutive_high_latency'):
+                            self._consecutive_high_latency = 0
+                        self._consecutive_high_latency += 1
+                        
+                        if self._consecutive_high_latency >= 3:
+                            self.halt_trading(f"CRITICAL: Abnormal Latency ({self._consecutive_high_latency}x > {LATENCY_CRIT_MS}ms)")
+                    else:
+                        self._consecutive_high_latency = 0
+
+                    if elapsed_ms <= LATENCY_CRIT_MS and elapsed_ms > LATENCY_WARN_MS:
                         logger.warning(
                             f"⚠️ HIGH LATENCY: {elapsed_ms:.0f}ms "
                             f"(>{LATENCY_WARN_MS}ms threshold) — "
@@ -313,7 +423,7 @@ class NiftyAISystem:
                         p95_idx = int(len(self._latency_history) * 0.95)
                         sorted_lat = sorted(self._latency_history)
                         p95_ms = sorted_lat[min(p95_idx, len(sorted_lat) - 1)]
-                        logger.info(
+                        logger.debug(
                             f"📊 [LATENCY] avg={avg_ms:.0f}ms | "
                             f"p95={p95_ms:.0f}ms | max={max_ms:.0f}ms | "
                             f"samples={len(self._latency_history)}"
@@ -328,6 +438,7 @@ class NiftyAISystem:
                 logger.info("Shutdown signal received")
             finally:
                 deadman_task.cancel()
+                broker_health_task.cancel()
                 await app.updater.stop()
                 await app.stop()
                 await app.shutdown()
@@ -643,11 +754,15 @@ class NiftyAISystem:
             signal.id = trade_id  # Attach to signal so exit logging can map it
             
             # ── PHASE A: INSTRUMENT RESOLUTION & PREMIUM ──
-            from core.options_resolver import OptionContractBuilder
+            from core.options_resolver import OptionContractBuilder, OptionExecutionTranslator
+            
+            # Use confidence and regime from signal
+            regime_val = signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
             instrument = OptionContractBuilder.resolve_instrument(
-                signal.direction.value, 
-                snapshot.price, 
-                signal.grade.name
+                direction=signal.direction.value, 
+                spot=snapshot.price, 
+                confidence=signal.confidence,
+                regime=regime_val
             )
             
             # Fetch live premium (Ask for buy)
@@ -657,9 +772,18 @@ class NiftyAISystem:
                 instrument["expiry"]
             )
             
+            # Translate Spot targets to Premium targets
+            premium_levels = OptionExecutionTranslator.translate_levels(signal, quote, instrument)
+            
             signal.metadata["instrument"] = instrument
             signal.metadata["quote"] = quote
-            logger.info(f"🎯 Resolved Instrument: {instrument['symbol']} | Premium: ₹{quote.ltp} (Ask: {quote.ask})")
+            signal.metadata["premium_levels"] = premium_levels
+            
+            logger.info(
+                f"🎯 Resolved {instrument['symbol']} ({instrument['moneyness']}) | "
+                f"Entry: ₹{premium_levels['premium_entry']} | "
+                f"SL: ₹{premium_levels['premium_sl']}"
+            )
             
             self.perf_logger.log_signal(log_entry)
 
@@ -769,7 +893,16 @@ class NiftyAISystem:
                 logger.warning("🛡️ SIMULATION MODE HARD LOCK: Real broker execution blocked.")
                 self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
                 return "simulated"
-            
+
+            # ── 🩺 Broker Health Gate ──
+            if hasattr(self, "broker_health") and not self.broker_health.is_healthy:
+                logger.critical(
+                    "🚫 [EXECUTE_SIGNAL] Broker health DEGRADED (%s). Trade blocked.",
+                    self.broker_health.degraded_reason
+                )
+                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+                return None
+
             # Sizing & Execution
             price = getattr(signal, "adjusted_entry", snapshot.price)
             size = self.position_manager.calculate_position_size(signal, price, snapshot.atr)
@@ -788,10 +921,56 @@ class NiftyAISystem:
             if pos:
                 logger.info(f"✅ [EXECUTE_SIGNAL] LIVE TRADE EXECUTED | {signal.signal_type.value} @ ₹{price:,.1f}")
                 self.execution_failures = 0 # Reset on success
+                if hasattr(self, "broker_health"):
+                    self.broker_health.record_order_success()
             else:
                 self.execution_failures += 1
                 logger.warning(f"⚠️ [EXECUTE_SIGNAL] Execution Failure [{self.execution_failures}]")
             return pos
+
+    # ───────────────────────────────────────────────────────────
+    # 🩺 BROKER HEALTH POLLING LOOP (v4.7)
+    # ───────────────────────────────────────────────────────────
+
+    async def _run_broker_health_loop(self) -> None:
+        """Background task: probes Dhan API every 15 s and feeds latency
+        into BrokerHealthMonitor. Skipped in simulation mode."""
+        if self.is_simulation:
+            logger.info("🩺 Broker health loop disabled in SIMULATION mode.")
+            return
+
+        while self.running:
+            try:
+                await asyncio.sleep(self.broker_health.poll_interval_s)
+                t0 = time.perf_counter()
+                try:
+                    from dhan_client import get_dhan_client
+                    dhan = get_dhan_client()
+                    await asyncio.wait_for(
+                        asyncio.to_thread(dhan.get_fund_limits),
+                        timeout=5.0
+                    )
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    self.broker_health.record_api_latency(latency_ms)
+                    # Feed staleness: compare against last data fetch
+                    _, snap = self.data_manager.get_latest_data()
+                    if snap:
+                        age_s = (datetime.now() - snap.timestamp).total_seconds()
+                        self.broker_health.feed_delay_s = age_s
+                        if age_s > 60:
+                            logger.warning(
+                                "⚠️ [BROKER HEALTH] Feed stale by %.0fs", age_s
+                            )
+                except asyncio.TimeoutError:
+                    latency_ms = 5000.0  # Treat timeout as 5s
+                    self.broker_health.record_api_latency(latency_ms)
+                except Exception as e:
+                    logger.warning("🩺 Broker health probe failed: %s", e)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Broker health loop error: %s", e)
+
 
     # ──────────────────────────────────────────────────────────
     # OPTIONS SENTIMENT (Phase-2 data fetch)
@@ -935,6 +1114,17 @@ class NiftyAISystem:
             status["risk"] = self.risk_manager.get_status_report()
             status["errors"] = self.error_count
             status["last_cycle"] = self.last_cycle_time
+            
+            # Latency Telemetry
+            lat = self._latency_history[-1] if hasattr(self, '_latency_history') and self._latency_history else 0
+            status["latency_ms"] = round(lat, 0)
+            status["latency_status"] = "CRITICAL" if lat > 800 else "WARNING" if lat > 500 else "NORMAL"
+            
+            # OI Health Telemetry
+            if hasattr(self, 'observer') and hasattr(self.observer, 'get_oi_health'):
+                status["oi_health"] = self.observer.get_oi_health()
+            else:
+                status["oi_health"] = {"rate": "100%", "latency": "Unknown", "status": "LIVE"}
             
             self.dashboard.update_status(status)
         except Exception as e:

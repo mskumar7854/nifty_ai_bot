@@ -229,18 +229,79 @@ class PositionConfig:
     max_daily_trades: int = 3
     max_open_positions: int = 1                 # was 2 → now 1
     max_same_direction: int = 1
-    min_time_between_trades: int = 180          # was 120 → now 180 (3 min)
+    min_time_between_trades: int = 300          # was 180 → now 300 (5 min)
 
     partial_profit_1_pct: float = 50.0
     partial_profit_2_pct: float = 30.0
     trail_remaining: bool = True
-    trail_stop_atr_multiplier: float = 1.0
+    trail_stop_atr_multiplier: float = 1.0  # legacy — superseded by Hybrid TSL below
 
     sl_type: str = "atr"
     sl_atr_multiplier: float = 1.5
     sl_fixed_points: float = 30.0
     sl_percentage: float = 2.0
     sl_move_to_cost_after_r1: bool = True
+
+    # ══════════════════════════════════════════
+    # HYBRID TSL CONFIG (Indian Weekly Options Tuned)
+    # ══════════════════════════════════════════
+    # Uses ADDITIVE (not multiplicative) grade + regime adjustments.
+    # Multiplicative stacking (e.g. 1.4 × 1.3) can produce 18%+ trails
+    # which give back huge profits on Nifty weekly options.
+    # Additive approach: base=10% + A+(+2%) + Trend(+2%) = 14% max.
+    # Hard clamps enforce floor and ceiling regardless of all adjustments.
+    # ══════════════════════════════════════════
+
+    tsl_enabled: bool = True
+
+    # ── Profit milestones (% of entry premium) ──
+    # Calibrated for Nifty weekly options noise level.
+    tsl_breakeven_trigger_pct: float = 12.0    # At +12%: SL → entry (capital protected)
+    tsl_activate_trigger_pct: float = 22.0     # At +22%: active trailing begins
+    tsl_tighten_1_trigger_pct: float = 35.0    # At +35%: trail tightens
+    tsl_tighten_2_trigger_pct: float = 50.0    # At +50%: tightest trail (lock max profits)
+
+    # ── Base trail widths (% of peak premium) ──
+    tsl_trail_pct_normal: float = 10.0         # Active phase default
+    tsl_trail_pct_tighten_1: float = 8.0       # After +35%
+    tsl_trail_pct_tighten_2: float = 5.5       # After +50%
+
+    # ── Grade-based ADDITIVE adjustments ──
+    # Positive = wider trail (let winner breathe)
+    # Negative = tighter trail (exit marginal signals quickly)
+    tsl_grade_adjustments: Dict = field(
+        default_factory=lambda: {
+            "A+": 2.0,   # +2% — elite setup, give it room
+            "A":  1.0,   # +1%
+            "B+": 0.0,   # Standard — no change
+            "B":  -1.0,  # -1% tighter
+            "C":  -2.0,  # -2% — exit quickly, marginal signal
+        }
+    )
+
+    # ── Regime-based ADDITIVE adjustments ──
+    tsl_regime_adjustments: Dict = field(
+        default_factory=lambda: {
+            "STRONG_TREND_UP":   2.0,   # +2% — trend days reward patience
+            "STRONG_TREND_DOWN": 2.0,
+            "BREAKOUT":          1.5,   # +1.5% — runners extend in breakouts
+            "WEAK_TREND_UP":     0.5,
+            "WEAK_TREND_DOWN":   0.5,
+            "RANGING":          -1.5,   # -1.5% — chop kills options fast
+            "VOLATILE_CHOPPY":  -2.0,   # -2% — reversals are violent
+        }
+    )
+
+    # ── Hard clamps (override all adjustments) ──
+    tsl_max_trail_pct: float = 15.0   # NEVER trail wider than 15% (prevents runaway)
+    tsl_min_trail_pct: float = 5.0    # NEVER trail tighter than 5% (prevents noise stops)
+
+    # ── Time-based idle tightening ──
+    # If premium makes no new high for N minutes: theta is eating the position.
+    # Tighten trail proactively to lock remaining value before decay.
+    tsl_idle_tighten_enabled: bool = True
+    tsl_idle_minutes_threshold: float = 15.0   # Stagnant for 15 min → tighten
+    tsl_idle_tighten_by_pct: float = 2.0       # Reduce trail by 2% (e.g. 10% → 8%)
 
 
 # ══════════════════════════════════════════
@@ -272,7 +333,7 @@ class ExitConfig:
     daily_target_pct: float = 3.0
     stop_after_daily_target: bool = True
 
-    stop_after_consecutive_losses: int = 2
+    stop_after_consecutive_losses: int = 3
     reduce_size_after_loss: bool = True
     loss_size_reduction_pct: float = 50.0
 
@@ -551,6 +612,17 @@ class AlertConfig:
     trading_mode: str = "AUTO"  # AUTO | SEMI_AUTO | MANUAL
     telegram_signal_expiry_seconds: int = 30
     max_slippage_pct_on_confirm: float = 0.2
+
+    # v4.7 Spread Explosion Filter
+    # Reject order if bid-ask spread exceeds this absolute value (₹)
+    # NIFTY ATM options: normal spread ~₹1-3; blowout = ₹8+
+    max_spread_abs: float = 8.0             # ₹ hard limit
+    max_spread_pct: float = 6.0             # % of ask — alternative gate
+
+    # v4.7 Broker Health Monitor
+    # Halt new trades if broker API latency exceeds this sustained threshold
+    broker_latency_halt_ms: float = 3000.0  # 3s single-call timeout = degraded
+    broker_latency_warn_ms: float = 1500.0  # 1.5s warn threshold
 
 
 @dataclass

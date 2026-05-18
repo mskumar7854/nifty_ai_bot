@@ -148,26 +148,85 @@ class TradeFilter:
                 })
                 return self._kill(signal, gates, "CHOP_ZONE_ACTIVE", 1, 10)
 
-        # ── GATE 1: Confidence (Grade-Aware Thresholds) ──
+        # ── GATE 1: Confidence (Grade + Context Aware Thresholds) ──
+        # v3.7: Base thresholds are grade-driven. The HIGH-CONVICTION relaxation
+        # applies to ALL grades when directional consensus is overwhelming.
+        #
+        # BASE FLOORS (static, no context):
+        #   A+: 40%   A: 45%   B+: 52%   B: 50%   C: cfg.min_signal_confidence
+        #
+        # HIGH-CONVICTION RELAXATION (applied when ALL of):
+        #   • Directional consensus ≥ 80% AND structural event (BOS/CHoCH), OR
+        #   • Directional consensus ≥ 90% (regardless of structure)
+        #   → floor drops to 35% for any grade.
+        #
+        # Rationale: a Grade B signal at 37% confidence with 6/6 agents unanimous
+        # and confirmed BOS/CHoCH is score-COMPRESSED by the regime penalty
+        # (SQUEEZE → 0.875 multiplier), not genuinely low quality. The base floor
+        # should not override a clear multi-agent structural event.
         conf = signal.confidence
         grade_str = getattr(signal.grade, "value", str(signal.grade)) if hasattr(signal, "grade") and signal.grade else "C"
-        
-        if grade_str == "A+":
-            min_conf = 40.0
-        elif grade_str == "A":
-            min_conf = 45.0
-        elif grade_str == "B+":
-            min_conf = 55.0
+
+        # ── Compute context signals ──
+        # CRITICAL: consensus must be calculated over DIRECTIONAL agents only.
+        # With 18 agents, 12 are often NEUTRAL (time_session, regime, learning,
+        # order_flow, institutional, etc.). Counting them in the denominator gives
+        # 6 BEARISH / 18 total = 33% — incorrectly below the 80% relaxation threshold.
+        # Correct: 6 BEARISH / 6 directional = 100% → relaxation fires.
+        _votes = signal.agent_votes or {}
+        _direction_val = signal.direction.value if signal.direction else "NEUTRAL"
+        _directional_votes = [
+            v for v in _votes.values()
+            if v.get("direction") in ("BULLISH", "BEARISH")
+        ]
+        _agree_count = sum(1 for v in _directional_votes if v.get("direction") == _direction_val)
+        _oppose_count = len(_directional_votes) - _agree_count
+        _total_directional = len(_directional_votes)
+        # Consensus = % of opinionated agents that agree with signal direction
+        _consensus_pct = (_agree_count / _total_directional * 100) if _total_directional > 0 else 0.0
+        _has_structural_event = any(
+            kw in w for w in (signal.warnings or [])
+            for kw in ("Break of Structure", "Change of Character", "BOS", "CHoCH")
+        )
+
+        # ── High-conviction context flags ──
+        # High-conviction: ≥80% directional agents agree AND structural break confirmed
+        # Strong-consensus: ≥90% directional agreement even without BOS/CHoCH
+        _high_conviction  = _consensus_pct >= 80.0 and _has_structural_event
+        _strong_consensus = _consensus_pct >= 90.0
+
+        # ── Grade-to-base-floor table ──
+        _grade_floors = {
+            "A+": 40.0,
+            "A":  45.0,
+            "B+": 52.0,
+            "B":  50.0,   # Explicit floor (was 80 via cfg catch-all — wrong)
+            "C":  60.0,
+        }
+        base_floor = _grade_floors.get(grade_str, self.cfg.min_signal_confidence)
+
+        # ── Apply high-conviction relaxation ──
+        if _high_conviction or _strong_consensus:
+            min_conf = 35.0   # Score compressed by regime penalty, not quality failure
+            self.logger.info(
+                f"[GATE 1] {grade_str} relaxed → {min_conf}%: "
+                f"directional={_total_directional} agree={_agree_count} oppose={_oppose_count} "
+                f"consensus={_consensus_pct:.0f}% structural={_has_structural_event}"
+            )
         else:
-            min_conf = self.cfg.min_signal_confidence
-            
+            min_conf = base_floor
+
         g1_pass = conf >= min_conf
         g1_score = min(100, conf)
         gates.append({
             "gate": "Confidence",
             "pass": g1_pass,
             "score": g1_score,
-            "detail": f"{conf:.1f}% (need {min_conf}%, Grade {grade_str})",
+            "detail": (
+                f"{conf:.1f}% (need {min_conf}%, Grade {grade_str}, "
+                f"consensus={_consensus_pct:.0f}%, "
+                f"structural={'yes' if _has_structural_event else 'no'})"
+            ),
         })
         total_score += g1_score * 0.20
         max_score += 20.0
@@ -176,6 +235,7 @@ class TradeFilter:
             return self._kill(signal, gates, "LOW_CONFIDENCE", 1, 10)
 
         # ── GATE 2: Confluence ──
+
         conf_score = 0.0
         if signal.confluence:
             conf_score = signal.confluence.confluence_ratio * 100
@@ -255,30 +315,87 @@ class TradeFilter:
 
         # ── GATE 6: Cost vs Breakeven (Premium Edge PEV) ──
         total_costs = cost_info.get("total_costs", 100) # Baseline costs
+        slippage_risk = cost_info.get("slippage_risk", "High" if "VOLATILE" in regime_info.get("regime", "") else "Normal")
+        
         p_win = signal.confidence / 100.0 if signal.confidence > 1 else signal.confidence
         p_loss = 1.0 - p_win
 
         target_pts = abs(signal.target_1 - signal.entry_price)
         stop_pts = abs(signal.entry_price - signal.stop_loss)
-        qty = max(signal.position_size, 50)
+        
+        # Avoid division by zero
+        if stop_pts == 0:
+            stop_pts = 1
 
+        reward_r = target_pts / stop_pts
+        loss_r = 1.0
+
+        expected_reward_r = p_win * reward_r
+        expected_loss_r = p_loss * loss_r
+
+        qty = max(signal.position_size, 50)
         pev_rupees = ((p_win * target_pts) - (p_loss * stop_pts)) * qty
         risk_rupees = stop_pts * qty
+        total_risk_cost = risk_rupees + total_costs
 
-        # Institutional Block: Trade is blocked unless PEV >= 1.2 * (Risk + Brokerage + Slippage)
-        g6_pass = pev_rupees >= 1.2 * (risk_rupees + total_costs)
-        g6_score = min(100, (pev_rupees / (risk_rupees + total_costs)) * 50 if (risk_rupees + total_costs) > 0 else 0)
+        pev_ratio = pev_rupees / total_risk_cost if total_risk_cost > 0 else 0.0
+
+        # Context-adaptive threshold logic
+        base_threshold = 0.25
+        regime_multiplier = 1.0
+        liquidity_multiplier = 1.0
+
+        regime_str = regime_info.get("regime", "UNKNOWN")
+        if "BREAKOUT" in regime_str or "VOLATILE" in regime_str:
+            regime_multiplier = 0.5  # Expand opportunity in high vol
+        elif "TREND" in regime_str:
+            regime_multiplier = 1.0
+        else:
+            regime_multiplier = 1.2  # Penalize chop/ranging
+
+        if slippage_risk == "High":
+            liquidity_multiplier = 1.2
+        elif slippage_risk == "Low":
+            liquidity_multiplier = 0.9
+
+        dynamic_pev_threshold = base_threshold * regime_multiplier * liquidity_multiplier
+
+        # Institutional Block: Trade is blocked unless PEV Ratio >= dynamic_pev_threshold
+        g6_pass = pev_ratio >= dynamic_pev_threshold
+        g6_score = min(100, (pev_ratio / dynamic_pev_threshold) * 50 if dynamic_pev_threshold > 0 else 0)
         
+        pev_breakdown = (
+            f"Win Probability : {p_win*100:.0f}%\n"
+            f"Expected Reward : {expected_reward_r:.2f}R\n"
+            f"Expected Loss   : {expected_loss_r:.2f}R\n"
+            f"Slippage Risk   : {slippage_risk}\n"
+            f"Final PEV       : {pev_ratio:.2f}\n"
+            f"Threshold       : {dynamic_pev_threshold:.2f}"
+        )
+
         gates.append({
             "gate": "Cost/Breakeven (PEV)",
             "pass": g6_pass,
             "score": g6_score,
-            "detail": f"PEV: ₹{pev_rupees:.0f} vs req ₹{1.2*(risk_rupees+total_costs):.0f}",
+            "detail": f"PEV: {pev_ratio:.2f} (Req: {dynamic_pev_threshold:.2f})",
+            "breakdown": pev_breakdown
         })
         total_score += g6_score * 0.10
         max_score += 10.0
 
         if not g6_pass:
+            # Shadow Trade tracking via detailed logging
+            self.logger.warning(
+                f"TRADE BLOCKED -> PEV_TOO_LOW\n"
+                f"--- PEV Breakdown ---\n{pev_breakdown}\n"
+                f"---------------------\n"
+                f"SHADOW TRACK: Monitoring outcome for meta-learning."
+            )
+            try:
+                signal.shadow_track = True
+                signal.shadow_reason = "PEV_TOO_LOW"
+            except Exception:
+                pass
             return self._kill(signal, gates, "PEV_TOO_LOW", 6, 10)
 
         # P2-C: Daily Limit was moved to Gate 0 (first check) to save compute.

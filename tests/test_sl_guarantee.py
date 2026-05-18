@@ -26,8 +26,7 @@ def manager():
         from core.position_manager import PositionManager
         
         settings = MagicMock()
-        db = MagicMock()
-        pm = PositionManager(settings, db)
+        pm = PositionManager(settings)
         
         # Patch the async wrapper directly so we can test the logic without real threads
         pm._place_order_async = AsyncMock()

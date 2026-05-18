@@ -42,7 +42,7 @@ class TimeSessionAgent(BaseAgent):
 
         ist = pytz.timezone('Asia/Kolkata')
         now = datetime.now(ist)
-        print("Current Time:", now)
+        self.logger.debug(f"Current Time: {now}")
         current_time = now.time()
         weekday = now.strftime("%A")
 

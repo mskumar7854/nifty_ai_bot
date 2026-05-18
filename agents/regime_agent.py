@@ -147,7 +147,7 @@ class RegimeAgent(BaseAgent):
         if len(df) < self.th.regime_lookback:
             return self._neutral_output("Insufficient data for regime detection")
 
-        df = df.tail(500).copy()
+        df = df.tail(200).copy()  # 200 rows stable for ADX(14)/BB(20)/EMA(50) — was 500 (wasted compute)
 
         close = df['close']
 

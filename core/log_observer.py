@@ -94,9 +94,15 @@ class LogObserver:
         if self.oi_total > 10:
             reliability = (self.oi_real / self.oi_total) * 100
             if reliability < 80:
-                # Log periodically so we don't spam
-                if self.oi_total % 20 == 0:
-                    logger.error(f"\U0001f6a8 OI UNRELIABLE ({reliability:.1f}%) — STRATEGY DEGRADED")
+                # Log periodically — every 100 cycles instead of 20 to reduce noise
+                if self.oi_total % 100 == 0:
+                    # v3.6: OI fallback architecture in decision_engine_v3 owns the response.
+                    # This observer is for passive reporting only — do NOT set strategy_degraded here.
+                    logger.warning(
+                        f"⚠️ [OI OBSERVER] OI real-data rate {reliability:.1f}% < 80% "
+                        f"({self.oi_real}/{self.oi_total} real) "
+                        f"— engine fallback active (weight redistributed, strategy continues)"
+                    )
 
     def _evaluate_edge(self):
         """3. Detect Bad R Structure (Negative Edge) with Context"""

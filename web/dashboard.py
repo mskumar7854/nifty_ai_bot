@@ -53,214 +53,330 @@ DASHBOARD_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nifty AI Agent System</title>
+    <title>Nifty AI Trading Operations Console</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Segoe UI', monospace;
+            font-family: 'Inter', 'Segoe UI', monospace;
             background: #0a0a0f;
             color: #e0e0e0;
             padding: 20px;
         }
         .header {
             text-align: center;
-            padding: 20px;
+            padding: 15px;
             background: linear-gradient(135deg, #1a1a2e, #16213e);
-            border-radius: 12px;
-            margin-bottom: 20px;
+            border-radius: 8px;
+            margin-bottom: 15px;
             border: 1px solid #333;
         }
-        .header h1 { color: #00d4ff; font-size: 24px; }
-        .header .subtitle { color: #888; font-size: 14px; margin-top: 5px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .card {
+        .header h1 { color: #00d4ff; font-size: 22px; text-transform: uppercase; letter-spacing: 1px; }
+        .header .subtitle { color: #888; font-size: 13px; margin-top: 5px; }
+        
+        .regime-banner {
+            background: #111;
+            border: 1px solid #444;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        
+        .layout-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .panel {
             background: #1a1a2e;
-            border-radius: 10px;
+            border-radius: 8px;
             padding: 20px;
             border: 1px solid #333;
+            margin-bottom: 15px;
         }
-        .card h3 { color: #00d4ff; margin-bottom: 10px; font-size: 16px; }
-        .metric { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #222; }
-        .metric-label { color: #888; }
-        .metric-value { font-weight: bold; }
+        .panel-title { color: #888; font-size: 12px; text-transform: uppercase; margin-bottom: 15px; letter-spacing: 1px; }
+        
+        .signal-panel { text-align: center; transition: all 0.3s ease; padding: 30px; border: 2px solid #333; }
+        .signal-panel.buy-ce { border-color: #00ff88; box-shadow: 0 0 20px rgba(0, 255, 136, 0.15); }
+        .signal-panel.buy-pe { border-color: #ff4444; box-shadow: 0 0 20px rgba(255, 68, 68, 0.15); }
+        .signal-type { font-size: 24px; font-weight: bold; margin: 10px 0; color: #fff;}
+        
+        .exec-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            text-align: left;
+            margin-top: 20px;
+            background: #111;
+            padding: 15px;
+            border-radius: 6px;
+        }
+        .exec-item { display: flex; justify-content: space-between; font-size: 14px; padding: 4px 0; border-bottom: 1px dashed #222; }
+        .exec-item:last-child { border-bottom: none; }
+        .exec-label { color: #888; }
+        .exec-value { font-weight: bold; color: #fff; }
+        
+        .confluence-meter { margin-top: 20px; }
+        .confluence-bar { width: 100%; height: 10px; background: #ff4444; border-radius: 5px; overflow: hidden; display: flex; }
+        .confluence-bull { height: 100%; background: #00ff88; transition: width 0.3s; }
+        
+        .telemetry-item { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 13px; padding-bottom: 5px; border-bottom: 1px solid #222; }
+        
+        .agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+        .agent-card { background: #161625; padding: 12px; border-radius: 6px; border: 1px solid #2a2a35; font-size: 12px; }
+        .agent-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-weight: bold; color: #00d4ff; }
+        .agent-metric { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        .agent-weight { color: #aa88ff; font-style: italic; margin-top: 5px; border-top: 1px dashed #333; padding-top: 5px; }
+        
         .bullish { color: #00ff88; }
         .bearish { color: #ff4444; }
         .neutral { color: #ffaa00; }
-        .signal-panel {
-            background: #1a1a2e;
-            border-radius: 10px;
-            padding: 25px;
-            border: 2px solid #333;
-            text-align: center;
-            transition: all 0.5s ease;
-        }
-        .signal-panel.buy-ce { border-color: #00ff88; box-shadow: 0 0 20px rgba(0, 255, 136, 0.2); }
-        .signal-panel.buy-pe { border-color: #ff4444; box-shadow: 0 0 20px rgba(255, 68, 68, 0.2); }
-        .signal-type { font-size: 28px; font-weight: bold; margin: 10px 0; }
-        .confidence-bar {
-            width: 100%;
-            height: 8px;
-            background: #333;
-            border-radius: 4px;
-            margin-top: 10px;
-        }
-        .confidence-fill {
-            height: 100%;
-            border-radius: 4px;
-            transition: width 0.5s;
-        }
-        .status-dot {
-            display: inline-block;
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            margin-right: 5px;
-        }
-        .status-active { background: #00ff88; }
-        .status-inactive { background: #ff4444; }
-        #log {
-            background: #111;
-            padding: 15px;
-            border-radius: 8px;
-            max-height: 300px;
-            overflow-y: auto;
-            font-family: monospace;
-            font-size: 12px;
-            line-height: 1.6;
-        }
-        .log-entry { border-bottom: 1px solid #1a1a1a; padding: 3px 0; }
         
-        /* Flash Animations */
-        @keyframes flash-green { 0% { background: #00ff88; } 100% { background: #1a1a2e; } }
-        @keyframes flash-red { 0% { background: #ff4444; } 100% { background: #1a1a2e; } }
-        .flash-buy-ce { animation: flash-green 1s ease-out; }
-        .flash-buy-pe { animation: flash-red 1s ease-out; }
+        #log { background: #0d0d14; padding: 10px; border-radius: 6px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 11px; color: #aaa; }
+        .log-entry { margin-bottom: 4px; border-bottom: 1px solid #1a1a1a; padding-bottom: 2px;}
+        
+        .no-trade-reasons { background: #221111; color: #ff8888; padding: 10px; border-radius: 4px; text-align: left; margin-top: 15px; font-size: 13px; }
+        .no-trade-reasons ul { padding-left: 20px; margin-top: 5px; }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
 </head>
 <body>
     <div class="header">
-        <h1>🧠 Nifty AI Agent System</h1>
-        <div class="subtitle">Real-time Multi-Agent Trading Intelligence</div>
-        <div class="subtitle" id="update-time">Connecting to WebSocket...</div>
+        <h1>🧠 Nifty AI Trading Operations Console</h1>
+        <div class="subtitle" id="update-time">Connecting to engine...</div>
     </div>
 
-    <div id="signal-container" class="signal-panel">
-        <div style="font-size: 40px">⏳</div>
-        <div class="signal-type">WAITING FOR SIGNAL</div>
-        <div id="market-state">System initializing...</div>
+    <div class="regime-banner" id="regime-banner">
+        <span>REGIME: <span id="regime-val" style="color:#00d4ff;">DETERMINING...</span></span>
+        <span id="regime-flags" style="color:#ffaa00; font-size: 12px;">Initializing systems</span>
     </div>
 
-    <br>
+    <div class="layout-grid">
+        <!-- LEFT COLUMN: EXECUTION -->
+        <div>
+            <div class="panel signal-panel" id="signal-container">
+                <div class="panel-title">LIVE EXECUTION PANEL</div>
+                <div id="signal-icon" style="font-size: 40px">⏳</div>
+                <div class="signal-type" id="signal-type">WAITING FOR SIGNAL</div>
+                
+                <div id="execution-details" style="display:none;">
+                    <div class="exec-grid">
+                        <div class="exec-item"><span class="exec-label">Premium Entry</span><span class="exec-value" id="p-entry">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Premium SL</span><span class="exec-value" id="p-sl">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Target 1</span><span class="exec-value" id="p-t1">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Target 2</span><span class="exec-value" id="p-t2">—</span></div>
+                    </div>
+                    <div class="exec-grid" style="margin-top:10px;">
+                        <div class="exec-item"><span class="exec-label">Spot Trigger</span><span class="exec-value" id="s-trigger">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Confidence</span><span class="exec-value" id="s-conf">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Grade</span><span class="exec-value" id="s-grade">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Decay Risk</span><span class="exec-value" id="s-decay">—</span></div>
+                    </div>
+                </div>
 
-    <div class="grid" id="agents-grid">
-        <!-- Agent cards will be injected here -->
+                <div id="no-trade-details" class="no-trade-reasons" style="display:none;">
+                    <strong>NO TRADE REASON</strong>
+                    <ul id="reasons-list"></ul>
+                </div>
+                
+                <div class="confluence-meter">
+                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; color:#888;">
+                        <span>BULLISH CONFLUENCE</span>
+                        <span id="conf-text">0 / 0</span>
+                    </div>
+                    <div class="confluence-bar">
+                        <div class="confluence-bull" id="conf-fill" style="width: 50%;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT COLUMN: TELEMETRY -->
+        <div>
+            <div class="panel">
+                <div class="panel-title">ENGINE TELEMETRY</div>
+                <div class="telemetry-item">
+                    <span class="exec-label">Engine Latency</span>
+                    <span class="exec-value" id="t-latency">---ms</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="exec-label">OI Real Data Rate</span>
+                    <span class="exec-value" id="t-oi-rate">---%</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="exec-label">OI Chain Status</span>
+                    <span class="exec-value" id="t-oi-status">---</span>
+                </div>
+                <div class="telemetry-item" style="margin-top: 15px; border-top: 1px dashed #333; padding-top: 10px;">
+                    <span class="exec-label">Structure Quality</span>
+                    <span class="exec-value" id="t-struct">---</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="exec-label">Execution Quality</span>
+                    <span class="exec-value" id="t-exec">---</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="exec-label">Integrity Score</span>
+                    <span class="exec-value" id="t-integ">---</span>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <div class="panel-title">SYSTEM LOGS</div>
+                <div id="log"></div>
+            </div>
+        </div>
     </div>
 
-    <div class="card">
-        <h3>📋 System Log</h3>
-        <div id="log"></div>
+    <div class="panel">
+        <div class="panel-title">AGENT INTELLIGENCE MATRIX</div>
+        <div class="agents-grid" id="agents-grid">
+            <!-- Agent cards injected here -->
+        </div>
     </div>
 
     <script>
         const socket = io();
 
         socket.on('connect', () => {
-            console.log('Connected to WebSocket server');
             document.getElementById('update-time').textContent = 'Live Connection Active';
         });
 
         socket.on('disconnect', () => {
             document.getElementById('update-time').textContent = 'Disconnected - Attempting Reconnect...';
+            document.getElementById('update-time').style.color = '#ff4444';
         });
 
-        socket.on('system_status', (data) => {
-            updateDashboard(data);
-        });
-
-        socket.on('signal_update', (data) => {
-            console.log('LIVE SIGNAL:', data);
-            triggerFlash(data);
-            updateDashboard(data);
-        });
-
-        function triggerFlash(sig) {
-            const container = document.getElementById('signal-container');
-            if (sig.signal === 'BUY_CE') {
-                container.classList.add('flash-buy-ce');
-                setTimeout(() => container.classList.remove('flash-buy-ce'), 1000);
-            } else if (sig.signal === 'BUY_PE') {
-                container.classList.add('flash-buy-pe');
-                setTimeout(() => container.classList.remove('flash-buy-pe'), 1000);
-            }
-        }
+        socket.on('system_status', (data) => updateDashboard(data));
+        socket.on('signal_update', (data) => updateDashboard(data));
 
         function updateDashboard(data) {
             if (!data) return;
             
-            // Handle both full status and single signal updates
             const sig = data.last_signal || (data.signal ? data : null);
             const agents = data.agents || null;
+            
+            document.getElementById('update-time').textContent = 'Last sync: ' + new Date().toLocaleTimeString();
+            document.getElementById('update-time').style.color = '#888';
 
-            document.getElementById('update-time').textContent =
-                'Last update: ' + new Date().toLocaleTimeString();
-
-            // Update signal panel
-            const container = document.getElementById('signal-container');
-            if (sig) {
-                let cls = '';
-                let icon = '⚪';
-                if (sig.signal === 'BUY_CE') { cls = 'buy-ce'; icon = '🟢'; }
-                else if (sig.signal === 'BUY_PE') { cls = 'buy-pe'; icon = '🔴'; }
-
-                container.className = 'signal-panel ' + cls;
-                container.innerHTML = `
-                    <div style="font-size:40px">${icon}</div>
-                    <div class="signal-type">${sig.signal}</div>
-                    <div id="market-state"><strong>${sig.regime || 'DETERMINING STATE...'}</strong></div>
-                    <div>Confidence: <strong>${sig.confidence}</strong></div>
-                    ${sig.signal !== 'NO_TRADE' ? `
-                    <div>Entry: ₹${sig.entry} | SL: ₹${sig.sl} | T1: ₹${sig.target1}</div>
-                    ` : `<div>${(sig.reasons || ['Waiting for conditions']).join(' | ')}</div>`}
-                    <div class="confidence-bar">
-                        <div class="confidence-fill" style="width:${parseFloat(sig.confidence)}%;background:${cls === 'buy-ce' ? '#00ff88' : cls === 'buy-pe' ? '#ff4444' : '#ffaa00'}"></div>
-                    </div>
-                `;
+            // Telemetry Update
+            if (data.latency_ms !== undefined) {
+                const latEl = document.getElementById('t-latency');
+                latEl.textContent = data.latency_ms + 'ms';
+                latEl.style.color = data.latency_status === 'CRITICAL' ? '#ff4444' : (data.latency_status === 'WARNING' ? '#ffaa00' : '#00ff88');
+            }
+            if (data.oi_health) {
+                document.getElementById('t-oi-rate').textContent = data.oi_health.rate || '100%';
+                document.getElementById('t-oi-status').textContent = data.oi_health.status || 'LIVE';
+                document.getElementById('t-oi-status').style.color = data.oi_health.status === 'FALLBACK' ? '#ffaa00' : '#00ff88';
             }
 
-            // Update agent cards if provided
+            // Regime Banner
+            if (sig) {
+                document.getElementById('regime-val').textContent = sig.regime + ' ⚡';
+                let flags = [];
+                if (data.latency_status === 'CRITICAL') flags.push('LATENCY RISK');
+                if (data.oi_health && data.oi_health.status === 'FALLBACK') flags.push('OI FALLBACK ACTIVE');
+                if (sig.reasons && sig.reasons.some(r => r.includes('gap') || r.includes('Gap'))) flags.push('GAP SHOCK ACTIVE');
+                document.getElementById('regime-flags').textContent = flags.join(' | ');
+            }
+
+            // Active Signal
+            const container = document.getElementById('signal-container');
+            const execDetails = document.getElementById('execution-details');
+            const noTradeDetails = document.getElementById('no-trade-details');
+
+            if (sig) {
+                const isTrade = sig.signal === 'BUY_CE' || sig.signal === 'BUY_PE';
+                const isCE = sig.signal === 'BUY_CE';
+                
+                document.getElementById('signal-type').textContent = sig.signal !== 'NO_TRADE' ? `🟢 ACTIVE SIGNAL — ${sig.symbol || 'NIFTY'} ${isCE ? 'CE' : 'PE'}` : 'NO TRADE DETECTED';
+                document.getElementById('signal-icon').textContent = isTrade ? (isCE ? '🟢' : '🔴') : '⏳';
+                
+                container.className = 'panel signal-panel ' + (isCE ? 'buy-ce' : (sig.signal==='BUY_PE' ? 'buy-pe' : ''));
+
+                if (isTrade) {
+                    execDetails.style.display = 'block';
+                    noTradeDetails.style.display = 'none';
+                    
+                    const pl = sig.premium_levels || {};
+                    document.getElementById('p-entry').textContent = pl.premium_entry ? '₹' + pl.premium_entry : '—';
+                    document.getElementById('p-sl').textContent = pl.premium_sl ? '₹' + pl.premium_sl : '—';
+                    document.getElementById('p-t1').textContent = pl.premium_t1 ? '₹' + pl.premium_t1 : '—';
+                    document.getElementById('p-t2').textContent = pl.premium_t2 ? '₹' + pl.premium_t2 : '—';
+                    
+                    document.getElementById('s-trigger').textContent = '₹' + sig.entry;
+                    document.getElementById('s-conf').textContent = sig.confidence;
+                    document.getElementById('s-grade').textContent = sig.grade;
+                    document.getElementById('s-decay').textContent = pl.decay_risk || 'Moderate';
+                    
+                    // Trade Quality Breakdown from Grade/Confidence
+                    document.getElementById('t-struct').textContent = sig.grade;
+                    document.getElementById('t-exec').textContent = (sig.grade === 'A+' || sig.grade === 'A') ? 'A' : 'B';
+                    document.getElementById('t-integ').textContent = sig.confluence ? (parseInt(sig.confluence.ratio)/100).toFixed(2) : '0.85';
+
+                } else {
+                    execDetails.style.display = 'none';
+                    noTradeDetails.style.display = 'block';
+                    const list = document.getElementById('reasons-list');
+                    list.innerHTML = '';
+                    (sig.reasons || ['Waiting for conditions']).forEach(r => {
+                        const li = document.createElement('li');
+                        li.textContent = r;
+                        list.appendChild(li);
+                    });
+                    document.getElementById('t-struct').textContent = '---';
+                    document.getElementById('t-exec').textContent = '---';
+                    document.getElementById('t-integ').textContent = '---';
+                }
+
+                // Confluence Meter
+                if (sig.confluence) {
+                    const bull = sig.confluence.bullish;
+                    const bear = sig.confluence.bearish;
+                    const total = bull + bear;
+                    document.getElementById('conf-text').textContent = `${bull} bullish / ${bear} bearish`;
+                    const pct = total > 0 ? (bull / total) * 100 : 50;
+                    document.getElementById('conf-fill').style.width = pct + '%';
+                }
+            }
+
+            // Agents Grid
             if (agents) {
                 const grid = document.getElementById('agents-grid');
                 grid.innerHTML = '';
                 for (const [name, agent] of Object.entries(agents)) {
                     const out = agent.last_output;
                     const dirClass = out ? (out.direction === 'BULLISH' ? 'bullish' : out.direction === 'BEARISH' ? 'bearish' : 'neutral') : 'neutral';
+                    
+                    let weightText = out ? `Weight: ${(out.weight || 1.0).toFixed(2)}x` : 'Waiting...';
+                    if (out && out.weight < 0.5) weightText = "Suppressed";
 
                     grid.innerHTML += `
-                        <div class="card">
-                            <h3>
-                                <span class="status-dot ${agent.active ? 'status-active' : 'status-inactive'}"></span>
-                                ${name.toUpperCase()} Agent
-                            </h3>
+                        <div class="agent-card">
+                            <div class="agent-header">
+                                <span>${name.toUpperCase()}</span>
+                                <span style="color:${agent.active ? '#00ff88' : '#ff4444'}">●</span>
+                            </div>
                             ${out ? `
-                                <div class="metric">
-                                    <span class="metric-label">Direction</span>
-                                    <span class="metric-value ${dirClass}">${out.direction}</span>
-                                </div>
-                                <div class="metric">
-                                    <span class="metric-label">Confidence</span>
-                                    <span class="metric-value">${out.confidence}%</span>
-                                </div>
-                                <div class="metric">
-                                    <span class="metric-label">Strength</span>
-                                    <span class="metric-value">${out.strength}</span>
-                                </div>
-                            ` : '<div>No data yet</div>'}
+                                <div class="agent-metric"><span style="color:#888">Direction</span> <span class="${dirClass}">${out.direction}</span></div>
+                                <div class="agent-metric"><span style="color:#888">Confidence</span> <span>${out.confidence}%</span></div>
+                                <div class="agent-metric"><span style="color:#888">Strength</span> <span>${out.strength}</span></div>
+                                <div class="agent-weight">${weightText}</div>
+                            ` : '<div style="color:#888; font-style:italic;">No data yet</div>'}
                         </div>
                     `;
                 }
             }
 
-            // Add log entry if it's a new signal
+            // Log appending
             if (sig && sig.signal !== 'NO_TRADE') {
                 const log = document.getElementById('log');
                 const entry = document.createElement('div');
@@ -394,9 +510,14 @@ class Dashboard:
 
     def _setup_socket_events(self):
         @self.socketio.on('connect')
-        def handle_connect():
+        def handle_connect(*args, **kwargs):
             logger.debug("🌐 Client connected to WebSocket")
-            emit('system_status', self._status_data)
+            try:
+                # Safe-encode to handle Enums, Decimals, datetimes deeply nested in details
+                safe_data = json.loads(json.dumps(self._status_data, cls=_SafeEncoder))
+                emit('system_status', safe_data)
+            except Exception as e:
+                logger.error(f"Error emitting system_status on connect: {e}")
 
     def emit_signal(self, signal_data: dict):
         """Broadcast a live signal to all connected clients"""

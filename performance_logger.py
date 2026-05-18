@@ -24,7 +24,8 @@ class PerformanceLogger:
                     "options_available", "options_sentiment", "options_score",
                     "max_pain_distance", "filter_passed", "trade_executed",
                     "entry_price", "exit_price", "pnl", "would_have_taken_without_filter",
-                    "exit_reason", "risk_reason", "ai_reason", "trade_id"
+                    "exit_reason", "risk_reason", "ai_reason", "trade_id",
+                    "signal_price", "fill_price", "slippage", "spread", "execution_delay_ms"
                 ])
 
     def log_signal(self, data: Dict[str, Any]):
@@ -49,9 +50,13 @@ class PerformanceLogger:
                 data.get("pnl"),
                 data.get("would_have_taken_without_filter"),
                 data.get("exit_reason"),
-                data.get("risk_reason"),
                 data.get("ai_reason"),
-                data.get("trade_id")
+                data.get("trade_id"),
+                data.get("signal_price"),
+                data.get("fill_price"),
+                data.get("slippage"),
+                data.get("spread"),
+                data.get("execution_delay_ms")
             ])
 
     def log_exit(self, trade_id: str, exit_price: float, pnl: float, reason: str):
@@ -68,3 +73,18 @@ class PerformanceLogger:
         exit_log_path = self.log_dir / f"exits_{datetime.now().strftime('%Y-%m-%d')}.json"
         with open(exit_log_path, 'a') as f:
             f.write(json.dumps(exit_data) + "\n")
+
+    def log_execution_quality(self, trade_id: str, signal_price: float, fill_price: float, slippage: float, spread: float, delay_ms: float):
+        """Update an existing trade log with execution quality details."""
+        exec_data = {
+            "timestamp": datetime.now().isoformat(),
+            "trade_id": trade_id,
+            "signal_price": signal_price,
+            "fill_price": fill_price,
+            "slippage": slippage,
+            "spread": spread,
+            "execution_delay_ms": delay_ms
+        }
+        exec_log_path = self.log_dir / f"executions_{datetime.now().strftime('%Y-%m-%d')}.json"
+        with open(exec_log_path, 'a') as f:
+            f.write(json.dumps(exec_data) + "\n")

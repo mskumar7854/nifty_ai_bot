@@ -57,7 +57,7 @@ class DataManager:
         self._oi_fetch_interval: float = 60.0  # seconds
 
         # Simulated state
-        self._sim_price = 22700.0
+        self._sim_price = 23400.0
         self._sim_trend = 1
         self._sim_vix = 13.5
 
@@ -175,15 +175,29 @@ class DataManager:
             dhan = get_dhan_client()
             instrument = self.settings.trading.instrument.upper()  # "NIFTY"
 
-            # Dhan option chain call — adjust expiry_date to nearest Thursday
+            # Dhan option chain call — find nearest THURSDAY expiry
+            # NIFTY weekly options expire on Thursday.
+            # (3 - weekday) % 7 gives days to Thursday, but returns 0 ON Thursday.
+            # On Thursday itself, we want THIS Thursday if before 3:30 PM,
+            # otherwise NEXT Thursday. Use `or 7` for safety after expiry.
             from datetime import date, timedelta
             today = date.today()
-            days_to_thursday = (3 - today.weekday()) % 7  # Thursday = 3
+            days_to_thursday = (3 - today.weekday()) % 7
+            if days_to_thursday == 0:
+                # On Thursday: check if market is still open (use next week after 16:00)
+                from datetime import datetime as _dt
+                if _dt.now().hour >= 16:
+                    days_to_thursday = 7
             expiry = today + timedelta(days=days_to_thursday)
             expiry_str = expiry.strftime("%Y-%m-%d")
 
             if self._api_security_id is None:
                 self._api_security_id = self._discover_nifty_id(dhan)
+
+            self.logger.debug(
+                f"OI Fetch: security_id={self._api_security_id} "
+                f"segment={self._api_exchange_segment} expiry={expiry_str}"
+            )
 
             response = dhan.option_chain(
                 under_security_id=self._api_security_id,
@@ -192,12 +206,39 @@ class DataManager:
             )
 
             if response.get('status') != 'success':
-                self.logger.debug(f"OI Fetch failed: {response.get('remarks')} - Falling back to simulation.")
-                return {}
+                # Log the FULL response on first failure to diagnose API issues
+                if not hasattr(self, '_oi_fail_logged'):
+                    self.logger.warning(
+                        f"⚠️ OI Fetch FAILED (first occurrence) | "
+                        f"security_id={self._api_security_id} | "
+                        f"segment={self._api_exchange_segment} | "
+                        f"expiry={expiry_str} | "
+                        f"status={response.get('status')} | "
+                        f"remarks={response.get('remarks')} | "
+                        f"full_response_keys={list(response.keys())}"
+                    )
+                    self._oi_fail_logged = True
+                else:
+                    self.logger.debug(f"OI Fetch failed: {response.get('remarks')}")
+                return {'data_source': DataSource.SIMULATED}
 
-            chain = response.get('data', {}).get('data', [])
+            # Dhan option_chain response can have different nesting structures
+            # Handle both: response['data']['data'] and response['data'] as list
+            raw_data = response.get('data', {})
+            if isinstance(raw_data, dict):
+                chain = raw_data.get('data', [])
+            elif isinstance(raw_data, list):
+                chain = raw_data
+            else:
+                chain = []
+
             if not chain:
-                return {}
+                self.logger.warning(
+                    f"⚠️ OI Fetch: API success but chain is EMPTY | "
+                    f"expiry={expiry_str} | data_type={type(raw_data).__name__} | "
+                    f"data_keys={list(raw_data.keys()) if isinstance(raw_data, dict) else 'N/A'}"
+                )
+                return {'data_source': DataSource.SIMULATED}
 
             total_ce_oi, total_pe_oi = 0.0, 0.0
             max_ce_oi, max_pe_oi = 0.0, 0.0
@@ -205,12 +246,12 @@ class DataManager:
             max_pain_strike = 0
 
             for row in chain:
-                ce = row.get('callOption', {})
-                pe = row.get('putOption', {})
-                strike = row.get('strikePrice', 0)
+                ce = row.get('callOption', row.get('ce', {}))
+                pe = row.get('putOption', row.get('pe', {}))
+                strike = row.get('strikePrice', row.get('strike_price', 0))
 
-                ce_oi = float(ce.get('openInterest', 0))
-                pe_oi = float(pe.get('openInterest', 0))
+                ce_oi = float(ce.get('openInterest', ce.get('oi', 0)))
+                pe_oi = float(pe.get('openInterest', pe.get('oi', 0)))
 
                 total_ce_oi += ce_oi
                 total_pe_oi += pe_oi
@@ -237,6 +278,7 @@ class DataManager:
 
             self._oi_cache = result
             self._oi_last_fetch = now
+            self._oi_fail_logged = False  # Reset so next failure gets logged
             self.logger.info(
                 f"🟢 REAL OI Fetched: CE={total_ce_oi/1e6:.1f}M | "
                 f"PE={total_pe_oi/1e6:.1f}M | PCR={pcr}"
@@ -244,7 +286,7 @@ class DataManager:
             return result
 
         except Exception as e:
-            self.logger.debug(f"⚠️ OI Fetch failed (using simulated): {e}")
+            self.logger.warning(f"⚠️ OI Fetch exception (using simulated): {e}")
             return {'data_source': DataSource.SIMULATED}
 
     def fetch_option_quote(self, strike: int, opt_type: str, expiry: str) -> "OptionQuote":
@@ -478,7 +520,7 @@ class DataManager:
             oi_data_source=DataSource.SIMULATED,  # P1.2: FLAG — not real data
         )
 
-        print("Current Price:", snapshot.price)
+        self.logger.debug(f"Snapshot price: {snapshot.price:.2f}")
         return snapshot
 
     def get_dataframe(self) -> pd.DataFrame:
@@ -506,7 +548,7 @@ class DataManager:
         noise = np.random.normal(0, 8)
         trend_component = self._sim_trend * np.random.uniform(1, 5)
         self._sim_price += trend_component + noise
-        self._sim_price = max(22600, min(22800, self._sim_price))
+        self._sim_price = max(23000, min(23800, self._sim_price))
 
         # VIX movement
         self._sim_vix += np.random.normal(0, 0.3)
@@ -552,7 +594,7 @@ class DataManager:
             noise = np.random.normal(0, 8)
             trend = np.random.choice([-1, 1]) * np.random.uniform(1, 4)
             price += trend + noise
-            price = max(22600, min(22800, price))
+            price = max(23000, min(23800, price))
 
             o = price + np.random.normal(0, 10)
             h = max(o, price) + abs(np.random.normal(0, 15))

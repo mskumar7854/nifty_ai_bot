@@ -296,15 +296,32 @@ class TelegramController:
         
         # 3. Broker Margin
         margin = self.data_manager.get_fund_limits()
-        
+
+        # 4. Broker Health
+        broker_h = getattr(self.system, "broker_health", None)
+        if broker_h:
+            bh = broker_h.get_status()
+            bh_emoji = "🟢 HEALTHY" if bh["healthy"] else "🔴 DEGRADED"
+            bh_str = (
+                f"\n🩺 <b>BROKER HEALTH:</b>\n"
+                f"  • Status:     {bh_emoji}\n"
+                f"  • API Lag:    {bh['api_latency_ms']:.0f}ms\n"
+                f"  • Last Order: {bh['last_order']}\n"
+                f"  • Feed Delay: {bh['feed_delay_s']:.0f}s\n"
+            )
+            if not bh["healthy"]:
+                bh_str += f"  • ⚠️ Reason: {bh['degraded_reason']}\n"
+        else:
+            bh_str = ""
+
         msg = (
-            f"📊 <b>SYSTEM STATUS v4.6.1</b>\n"
+            f"📊 <b>SYSTEM STATUS v4.7</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🤖 <b>Bot Mode:</b> {self.trading_mode}\n"
             f"🛡️ <b>Risk Guard:</b> {risk_emoji}\n"
-            f"⏸️ <b>Process:</b> {'PAUSED' if self.is_paused else 'RUNNING'}\n\n"
-            
-            f"💰 <b>CAPITAL & MARGIN:</b>\n"
+            f"⏸️ <b>Process:</b> {'PAUSED' if self.is_paused else 'RUNNING'}\n"
+            f"{bh_str}\n"
+            f"💰 <b>CAPITAL &amp; MARGIN:</b>\n"
             f"  • Margin Available: ₹{margin:,.0f}\n"
             f"  • {pnl_emoji} Today's PnL: ₹{risk['daily_pnl']:,.0f}\n"
             f"  • Limit Remaining: ₹{abs(risk['max_daily_loss']) - abs(risk['daily_pnl']):,.0f}\n\n"
@@ -320,6 +337,7 @@ class TelegramController:
             f"━━━━━━━━━━━━━━━━━━"
         )
         await update.message.reply_text(msg, parse_mode='HTML')
+
 
     async def kill_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Emergency Nuclear Button: Square Off + Clean Exit."""
@@ -470,15 +488,79 @@ class TelegramController:
         ])
 
         direction_emoji = "🟢" if signal.direction.value.upper() == "BUY" else "🔴"
+
+        # ── Risk Snapshot: pull live context for human operator ──
+        regime_str = signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
+        grade_str  = signal.grade.value  if hasattr(signal.grade,  "value") else str(signal.grade)
+        rr_str     = f"{signal.risk_reward_ratio:.1f}" if signal.risk_reward_ratio else "—"
+        dom_gap    = signal.metadata.get("dominance_gap", 0)
+        dom_str    = f"{dom_gap:.2f}" if dom_gap else "—"
+
+        # Live spread from quote in signal metadata
+        quote = signal.metadata.get("quote")
+        if quote and hasattr(quote, "ask") and hasattr(quote, "bid") and quote.ask > 0:
+            spread_val = quote.ask - quote.bid
+            spread_str = f"₹{spread_val:.1f}"
+            spread_pct = (spread_val / quote.ask * 100) if quote.ask else 0
+            spread_warn = " ⚠️ WIDE" if spread_pct > 5.0 else ""
+        else:
+            spread_str = "—"
+            spread_warn = ""
+
+        # Today's average slippage from performance logger
+        try:
+            from performance_logger import PerformanceLogger
+            import json, os
+            from pathlib import Path
+            from datetime import datetime as _dt
+            _log_path = Path("logs") / f"executions_{_dt.now().strftime('%Y-%m-%d')}.json"
+            _slippages = []
+            if _log_path.exists():
+                with open(_log_path) as _f:
+                    for _line in _f:
+                        try:
+                            _rec = json.loads(_line.strip())
+                            _slippages.append(abs(_rec.get("slippage", 0)))
+                        except Exception:
+                            pass
+            avg_slip_str = f"₹{sum(_slippages)/len(_slippages):.2f}" if _slippages else "no data"
+        except Exception:
+            avg_slip_str = "—"
+
+        premium_levels = signal.metadata.get("premium_levels", {})
+        p_entry = premium_levels.get("premium_entry", signal.entry_price)
+        p_sl = premium_levels.get("premium_sl", signal.stop_loss)
+        p_t1 = premium_levels.get("premium_t1", signal.target_1)
+        p_t2 = premium_levels.get("premium_t2", signal.target_2)
+        decay_risk = premium_levels.get("decay_risk", "Moderate")
+        decay_warn = " ⚠️" if decay_risk == "High" else ""
+
         text = (
-            f"{direction_emoji} <b>Signal Pending Approval</b>\n\n"
-            f"ID:        <code>{signal.id[:8]}</code>\n"
-            f"Symbol:    <b>{signal.symbol}</b>\n"
-            f"Direction: <b>{signal.direction.value.upper()}</b>\n"
-            f"Entry:     ₹{signal.entry_price:,.2f}\n"
-            f"SL:        ₹{signal.stop_loss:,.2f}\n"
-            f"Target:    ₹{signal.target_1:,.2f}\n"
-            f"Qty:       {signal.position_size}\n\n"
+            f"{direction_emoji} <b>⚡ TRADE CONFIRMATION REQUIRED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Signal:</b>     {signal.signal_type.value}\n"
+            f"<b>Symbol:</b>     {signal.symbol}\n"
+            f"<b>ID:</b>         <code>{signal.id[:8]}</code>\n\n"
+            f"📊 <b>SIGNAL QUALITY</b>\n"
+            f"  Grade:       <b>{grade_str}</b>\n"
+            f"  Confidence:  <b>{signal.confidence:.1f}%</b>\n"
+            f"  Dom. Score:  <b>{dom_str}</b>\n"
+            f"  Regime:      <b>{regime_str}</b>\n"
+            f"  R:R Ratio:   <b>{rr_str}</b>\n\n"
+            f"💰 <b>OPTION PREMIUM LEVELS</b>\n"
+            f"  Entry:   ₹{p_entry:,.1f}\n"
+            f"  SL:      ₹{p_sl:,.1f}\n"
+            f"  Target 1: ₹{p_t1:,.1f}\n"
+            f"  Target 2: ₹{p_t2:,.1f}\n"
+            f"  Qty:     {signal.position_size}\n\n"
+            f"🎯 <b>SPOT CONFIRMATION</b>\n"
+            f"  Spot Trigger: NIFTY {'>' if signal.direction.value == 'BULLISH' else '<'} {signal.entry_price:,.1f}\n"
+            f"  Spot SL:      {signal.stop_loss:,.1f}\n"
+            f"  Spot Target:  {signal.target_1:,.1f}\n\n"
+            f"🔬 <b>LIVE MARKET CHECK</b>\n"
+            f"  Spread:      <b>{spread_str}</b>{spread_warn}\n"
+            f"  Decay Risk:  <b>{decay_risk}</b>{decay_warn}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
             f"⏳ Expires in {self.settings.alerts.telegram_signal_expiry_seconds}s"
         )
 
@@ -505,27 +587,37 @@ class TelegramController:
 
     async def _notify_auto_signal(self, signal) -> None:
         direction_emoji = "🟢" if signal.direction.value.upper() == "BUY" else "🔴"
+        premium_levels = signal.metadata.get("premium_levels", {})
+        p_entry = premium_levels.get("premium_entry", signal.entry_price)
+        
         await self._send_admin_msg(
             f"{direction_emoji} <b>AUTO Trade Executed</b>\n\n"
             f"ID:        <code>{signal.id[:8]}</code>\n"
             f"Symbol:    <b>{signal.symbol}</b>\n"
             f"Direction: <b>{signal.direction.value.upper()}</b>\n"
-            f"Entry:     ₹{signal.entry_price:,.2f}\n"
+            f"Premium:   ₹{p_entry:,.1f}\n"
+            f"Spot Trigger: ₹{signal.entry_price:,.1f}\n"
             f"Qty:       {signal.position_size}\n"
         )
         logger.info("AUTO signal notified: %s", signal.id)
 
     async def _notify_manual_alert(self, signal) -> None:
         direction_emoji = "🟢" if signal.direction.value.upper() == "BUY" else "🔴"
+        premium_levels = signal.metadata.get("premium_levels", {})
+        p_entry = premium_levels.get("premium_entry", signal.entry_price)
+        p_sl = premium_levels.get("premium_sl", signal.stop_loss)
+        p_t1 = premium_levels.get("premium_t1", signal.target_1)
+        
         try:
             await self._send_admin_msg(
                 f"{direction_emoji} <b>Manual Alert</b>\n\n"
                 f"ID:        <code>{signal.id[:8]}</code>\n"
                 f"Symbol:    <b>{signal.symbol}</b>\n"
                 f"Direction: <b>{signal.direction.value.upper()}</b>\n"
-                f"Entry:     ₹{signal.entry_price:,.2f}\n"
-                f"SL:        ₹{signal.stop_loss:,.2f}\n"
-                f"Target:    ₹{signal.target_1:,.2f}\n"
+                f"Premium Entry: ₹{p_entry:,.1f}\n"
+                f"Premium SL:    ₹{p_sl:,.1f}\n"
+                f"Premium T1:    ₹{p_t1:,.1f}\n"
+                f"Spot Trigger:  ₹{signal.entry_price:,.1f}\n"
                 f"Qty:       {signal.position_size}\n\n"
                 f"ℹ️ No automatic execution — manual mode active."
             )

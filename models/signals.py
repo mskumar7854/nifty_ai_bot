@@ -90,6 +90,9 @@ class AgentOutput:
     is_blocker: bool = False       # if True, blocks all signals
     blocker_reason: str = ""
     sub_scores: Dict[str, float] = field(default_factory=dict)
+    
+    # v4 additions
+    weight: float = 1.0            # dynamic weight applied by router
 
     def get_clamped_confidence(self) -> float:
         """Standardizes confidence to 0.1 - 0.95 scale."""
@@ -106,6 +109,7 @@ class AgentOutput:
             "details": self.details,
             "warnings": self.warnings,
             "is_blocker": self.is_blocker,
+            "weight": self.weight,
         }
 
 
@@ -431,6 +435,8 @@ class Signal:
             },
             "reasons": self.reasons,
             "warnings": self.warnings,
+            "premium_levels": self.metadata.get("premium_levels", {}),
+            "symbol": getattr(self, "symbol", "")
         }
 
     def __str__(self) -> str:
@@ -448,6 +454,30 @@ class Signal:
                 f"   Agreeing          : {', '.join(conf.agreeing_agents[:5])}\n"
             )
 
+        # Premium Levels mapping
+        if "premium_levels" in self.metadata:
+            pl = self.metadata["premium_levels"]
+            levels_str = (
+                f"   Premium Entry : ₹{pl.get('premium_entry', 0):,.1f}\n"
+                f"   Premium SL    : ₹{pl.get('premium_sl', 0):,.1f}\n"
+                f"   Premium T1    : ₹{pl.get('premium_t1', 0):,.1f}\n"
+                f"   Premium T2    : ₹{pl.get('premium_t2', 0):,.1f}\n"
+                f"   Spot Trigger  : ₹{self.entry_price:,.1f}\n"
+                f"   Decay Risk    : {pl.get('decay_risk', 'Moderate')}\n"
+                f"   Qty           : {self.position_size}\n"
+                f"{'─'*60}\n"
+            )
+        else:
+            levels_str = (
+                f"   Entry      : ₹{self.entry_price:,.1f}\n"
+                f"   Stop Loss  : ₹{self.stop_loss:,.1f}\n"
+                f"   Target 1   : ₹{self.target_1:,.1f}\n"
+                f"   Target 2   : ₹{self.target_2:,.1f}\n"
+                f"   Target 3   : ₹{self.target_3:,.1f}\n"
+                f"   Qty        : {self.position_size}\n"
+                f"{'─'*60}\n"
+            )
+
         return (
             f"\n{'='*60}\n"
             f"{icon} SIGNAL: {self.signal_type.value}  |  "
@@ -459,13 +489,7 @@ class Signal:
             f"   Strength   : {self.strength.value}\n"
             f"   R:R Ratio  : {self.risk_reward_ratio:.1f}\n"
             f"{'─'*60}\n"
-            f"   Entry      : ₹{self.entry_price:,.1f}\n"
-            f"   Stop Loss  : ₹{self.stop_loss:,.1f}\n"
-            f"   Target 1   : ₹{self.target_1:,.1f}\n"
-            f"   Target 2   : ₹{self.target_2:,.1f}\n"
-            f"   Target 3   : ₹{self.target_3:,.1f}\n"
-            f"   Qty        : {self.position_size}\n"
-            f"{'─'*60}\n"
+            f"{levels_str}"
             f"{conf_str}"
             f"   Scores     : Primary={self.primary_score:.0f} "
             f"Confirm={self.confirmation_score:.0f} "

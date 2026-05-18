@@ -16,10 +16,23 @@ Fix: merge gap + regime into a SINGLE unified
 uncertainty multiplier before scoring. PEV
 (execution gate) is not further penalised.
 
+── v3.6 EXECUTION CALIBRATION ───────────────
+Added Market Participation Mode (MPM) layer:
+  DEFENSIVE   — original strict logic (loss cluster / gap shock)
+  BALANCED    — normal operations
+  AGGRESSIVE  — directional trend expansion confirmed
+
+Key calibration changes:
+  A. OI Fallback: unreliable OI redistributes weight; does NOT degrade strategy
+  B. Adaptive early-kill threshold: 0.18/0.20/0.25 based on MPM + trend strength
+  C. Trend Continuation Mode: one-sided market allows directional pass
+  D. Dynamic confidence gate: relaxes when momentum+structure align (not just gap decay)
+
 ⚠️ AI WARNING: core/decision_engine_v3.py
 Unified uncertainty factor MUST remain min(gap, regime) — NOT multiplied.
 Sigmoid normalization MUST run BEFORE grading.
 ThresholdTuner is ADVISORY — never blocks execution directly.
+MPM is READ-ONLY metadata — it adjusts thresholds, never halts execution.
 ============================================
 """
 
@@ -27,9 +40,28 @@ import os
 import math
 from typing import List, Optional, Dict
 from datetime import datetime
+from enum import Enum
 import time
 from time import perf_counter
 import uuid
+
+
+class MarketParticipationMode(Enum):
+    """
+    v3.6 Execution Calibration — Three-state execution mode.
+
+    DEFENSIVE:  OI degraded, loss cluster, gap shock, or regime uncertain.
+                Use original strict thresholds.
+    BALANCED:   Normal market conditions. Moderate filtering.
+    AGGRESSIVE: Trend regime confirmed + multi-agent alignment.
+                Lower thresholds to capture directional continuation.
+
+    Mode is computed at the start of Phase 5 and used ONLY to adjust
+    the early-kill and confidence thresholds — it never blocks trades.
+    """
+    DEFENSIVE  = "DEFENSIVE"
+    BALANCED   = "BALANCED"
+    AGGRESSIVE = "AGGRESSIVE"
 
 from models.signals import (
     Signal, SignalType, Direction, Strength, MarketSnapshot, AgentOutput
@@ -74,10 +106,16 @@ def _sigmoid_normalize(x: float, center: float = 0.55, sharpness: float = 8.0) -
 # Based on empirical observation of which agents consistently carry expectancy.
 # Higher = more weight when this agent fires. Range: 0.5 – 1.5
 # Do NOT edit until you have 50+ trade sample. Use log analysis to update.
+#
+# v3.7 ANTI-CONCENTRATION FIX:
+# structure was 1.30 × base_weight(0.15) = 0.195 effective weight = 22% of total budget.
+# That made a single counter-directional structure signal erase momentum + price_action.
+# Reduced structure to 1.05 and multi_timeframe to 1.15 to balance agent influence.
+# compute_weighted_score also applies a per-agent concentration cap (MAX_SINGLE_WEIGHT_SHARE).
 AGENT_RELIABILITY = {
-    "multi_timeframe": 1.40,   # VERY HIGH — aligns strongly with structure
-    "structure":       1.30,   # HIGH — cleanest signal source
-    "price_action":    1.25,   # HIGH — pure price mechanics
+    "multi_timeframe": 1.15,   # Was 1.40 — reduced to prevent single-agent dominance
+    "structure":       1.05,   # Was 1.30 — reduced; was 22% of weight budget alone
+    "price_action":    1.20,   # Slightly raised — direct price evidence, less noisy
     "momentum":        1.10,   # MODERATE-HIGH
     "regime":          1.10,   # STABLE base layer
     "level":           1.05,   # Levels add precision
@@ -94,6 +132,20 @@ AGENT_RELIABILITY = {
     "volatility":      0.90,
 }
 
+# ── OI Fallback Redistribution ──
+# When OI data is unreliable, its weight budget is redistributed to the
+# next-most reliable agents (momentum + structure + price_action).
+# This keeps the total weight budget constant while reducing OI's noisy
+# contribution instead of degrading the whole strategy.
+#
+# OI normal weight = 0.08 (from signal_weights.py)
+# Redistribution split: momentum=40%, structure=35%, price_action=25%
+_OI_FALLBACK_RECIPIENTS = {
+    "momentum":     0.40,
+    "structure":    0.35,
+    "price_action": 0.25,
+}
+
 class DecisionEngineV3:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -107,6 +159,16 @@ class DecisionEngineV3:
 
         # ── Mode detection — used for simulation-safe threshold relaxation ──
         self._is_simulation = os.getenv("SYSTEM_MODE", "SIMULATION").upper() == "SIMULATION"
+
+        # ── v3.6: Market Participation Mode tracker ──
+        self._current_mpm: MarketParticipationMode = MarketParticipationMode.BALANCED
+        self._mpm_reason: str = "initializing"
+
+        # ── v3.6: OI reliability tracker ──
+        # Maintained here (independent of LogObserver) so the engine can
+        # react within the same cycle rather than waiting for log emission.
+        self._oi_real_count: int = 0
+        self._oi_total_count: int = 0
 
         # ── 📓 Trade Opportunity Analytics (Shadow Journal) ──
         # Every blocked cycle is recorded here so we can audit which filters
@@ -295,7 +357,7 @@ class DecisionEngineV3:
         outputs = []
         outputs_dict = {}
 
-        self.logger.info("⚡ Engine v3 Cycle Started")
+        self.logger.debug("⚡ Engine v3 Cycle Started")
 
         # ── Resolve pending outcome labels ──
         # Update blocked setups with future price moves now that time has elapsed.
@@ -346,10 +408,21 @@ class DecisionEngineV3:
         # (which burns 200–400ms on contaminated data during opening volatility).
         gap_mult_now = self.gap_penalty_mgr.get_unified_penalty_multiplier()
         opening_gap_session = gap_mult_now < 0.80  # was 0.85 → 0.80 (shrinks suppression window ~15min)
+
+        # ── v3.8: Opening Auction Mode (9:15–9:25 IST) ──
+        # During the opening auction window, EMAs/VWAP/oscillators are contaminated.
+        # Only momentum, structure, and price_action provide usable signal.
+        _is_opening_auction = self._is_opening_auction()
+
+        # ── v3.8: High Conviction Exception Path ──
+        # Detects when gap suppression is blocking genuinely strong momentum.
+        # Allows partial bypass of gap penalties for elite setups.
+        _conviction_exception = False
+
         if opening_gap_session:
             gap_status = self.gap_penalty_mgr.get_status()
             self.logger.info(
-                f"⚠️ [OPENING GAP SESSION] gap_mult={gap_mult_now:.3f} < 0.85 | "
+                f"⚠️ [OPENING GAP SESSION] gap_mult={gap_mult_now:.3f} < 0.80 | "
                 f"Gap: {gap_status['gap_points']}pts ({gap_status['severity']}) | "
                 f"Deep validation will be SUPPRESSED this cycle."
             )
@@ -374,12 +447,12 @@ class DecisionEngineV3:
 
                 if cache_valid:
                     out = self._p1_cache[name]
-                    self.logger.info(f"[CACHE HIT] {name} | age={(now_ts-last_ts):.1f}s < TTL={ttl:.0f}s")
+                    self.logger.debug(f"[CACHE HIT] {name} | age={(now_ts-last_ts):.1f}s < TTL={ttl:.0f}s")
                 else:
                     start_p = perf_counter()
                     out = self.agents[name].run(df, snapshot)
                     latency = perf_counter() - start_p
-                    self.logger.info(f"Agent {name} latency = {latency:.3f}s")
+                    self.logger.debug(f"Agent {name} latency = {latency:.3f}s")
                     # Update cache
                     if ttl > 0:
                         self._p1_cache[name] = out
@@ -454,7 +527,7 @@ class DecisionEngineV3:
                 start_p = perf_counter()
                 out = self.agents[name].run(df, snapshot)
                 latency = perf_counter() - start_p
-                self.logger.info(f"Agent {name} latency = {latency:.3f}s")
+                self.logger.debug(f"Agent {name} latency = {latency:.3f}s")
                 
                 outputs.append(out)
                 outputs_dict[name] = out
@@ -485,13 +558,64 @@ class DecisionEngineV3:
         # trade samples we can never validate expectancy. Lowered to 0.18 in SIM
         # ONLY to allow statistically meaningful samples to accumulate. LIVE: 0.25.
         # ─────────────────────────────────────────────────────────────────────────
-        MIN_DOMINANT_THRESHOLD = 0.18 if self._is_simulation else 0.25
-        _early_buy, _early_sell = self.compute_weighted_score(outputs_dict, gap_mult)
+        # ── v3.6: OI Fallback Weight Redistribution ──────────────────────────────
+        # Check OI reliability. If unreliable, redistribute its weight budget to
+        # momentum/structure/price_action instead of degrading the whole strategy.
+        # This preserves total weight budget while neutralising noisy OI votes.
+        _oi_reliable = self._check_and_handle_oi_reliability(outputs_dict)
+
+        # ── v3.8: High Conviction Exception Check ─────────────────────────────────
+        # Before computing MPM, check if we have an exceptionally strong directional
+        # setup that should override gap-based DEFENSIVE mode.
+        # This catches: trend days, panic selloffs, runaway gap continuations.
+        _conviction_exception = self._check_high_conviction_exception(
+            outputs_dict, snapshot, gap_mult
+        )
+        _effective_gap_mult = gap_mult
+        if _conviction_exception and gap_mult < 0.80:
+            # Partially relax gap suppression — boost by 0.12 but cap at 0.85
+            _effective_gap_mult = min(0.85, gap_mult + 0.12)
+            self.logger.info(
+                f"🔥 [CONVICTION OVERRIDE] High conviction exception fired! "
+                f"gap_mult {gap_mult:.3f} → {_effective_gap_mult:.3f} | "
+                f"Allowing targeted participation in gap momentum."
+            )
+
+        # ── v3.6: Compute Market Participation Mode (MPM) ────────────────────────
+        # Must happen AFTER OI fallback so the score reflects redistributed weights.
+        # v3.8: Use _effective_gap_mult so conviction override affects MPM.
+        _early_buy, _early_sell = self.compute_weighted_score(outputs_dict, _effective_gap_mult)
+        mpm = self._compute_market_participation_mode(
+            outputs_dict, snapshot, _effective_gap_mult, _oi_reliable
+        )
+        self._current_mpm = mpm
+        self.logger.info(
+            f"[MPM] Mode={mpm.value} | reason={self._mpm_reason} | "
+            f"OI={'OK' if _oi_reliable else 'FALLBACK'}"
+            f"{' | 🔥 CONVICTION_OVERRIDE' if _conviction_exception else ''}"
+        )
+
+        # ── v3.6: Adaptive Early-Kill Threshold ───────────────────────────────────
+        # Static 0.25 rejected valid 0.22–0.24 setups that later worked.
+        # Now threshold is dynamically set based on Market Participation Mode:
+        #   AGGRESSIVE: 0.18 — trend confirmed, lower bar needed for continuation
+        #   BALANCED:   0.20 — moderate filtering (was 0.18 sim / 0.25 live)
+        #   DEFENSIVE:  0.25 — original strict logic, capital protection
+        # SIM always applies a -0.02 relaxation on top for sample accumulation.
+        # v3.8: During conviction override, use BALANCED threshold even if MPM=DEFENSIVE.
+        _SIM_RELAX = 0.02 if self._is_simulation else 0.0
+        if mpm == MarketParticipationMode.AGGRESSIVE:
+            MIN_DOMINANT_THRESHOLD = max(0.15, 0.18 - _SIM_RELAX)
+        elif mpm == MarketParticipationMode.BALANCED or _conviction_exception:
+            MIN_DOMINANT_THRESHOLD = max(0.15, 0.20 - _SIM_RELAX)
+        else:  # DEFENSIVE
+            MIN_DOMINANT_THRESHOLD = max(0.18, 0.25 - _SIM_RELAX)
+
         _early_dominant = max(_early_buy, _early_sell)
         if _early_dominant < MIN_DOMINANT_THRESHOLD:
             self.logger.info(
                 f"[⚡ EARLY KILL] Dominant score {_early_dominant:.3f} < {MIN_DOMINANT_THRESHOLD} "
-                f"({'SIM' if self._is_simulation else 'LIVE'} threshold) — "
+                f"(MPM={mpm.value}, {'SIM' if self._is_simulation else 'LIVE'}) — "
                 f"skipping deep validation (Buy={_early_buy:.3f} Sell={_early_sell:.3f})"
             )
             self._record_opportunity(
@@ -502,15 +626,17 @@ class DecisionEngineV3:
             )
             return self._no_trade_signal(
                 snapshot,
-                [f"Early Kill: dominant_score {_early_dominant:.3f} < {MIN_DOMINANT_THRESHOLD} (no edge)"],
+                [f"Early Kill: dominant_score {_early_dominant:.3f} < {MIN_DOMINANT_THRESHOLD} (MPM={mpm.value})"],
                 outputs_dict
             )
 
         # ─── PHASE 3: DYNAMIC CONFIRMATION (THE ROUTER) ───
         # Instead of calling the static list from settings, we ask the router what tools we need.
+        # v3.8: Pass conviction_exception so router can allow targeted deep validation.
         dynamic_phase_3_agents = self._get_dynamic_confirmation_route(
             outputs_dict, snapshot, core_confluence,
-            opening_gap_session=opening_gap_session
+            opening_gap_session=opening_gap_session,
+            conviction_exception=_conviction_exception
         )
         
         for name in self.settings.pipeline.phase_3_confirmation:
@@ -520,7 +646,7 @@ class DecisionEngineV3:
                     start_p = perf_counter()
                     out = self.agents[name].run(df, snapshot)
                     latency = perf_counter() - start_p
-                    self.logger.info(f"Agent {name} latency = {latency:.3f}s")
+                    self.logger.debug(f"Agent {name} latency = {latency:.3f}s")
                     
                     outputs.append(out)
                     outputs_dict[name] = out
@@ -543,7 +669,7 @@ class DecisionEngineV3:
                 start_p = perf_counter()
                 out = self.agents[name].run(df, snapshot)
                 latency = perf_counter() - start_p
-                self.logger.info(f"Agent {name} latency = {latency:.3f}s")
+                self.logger.debug(f"Agent {name} latency = {latency:.3f}s")
                 
                 outputs.append(out)
                 outputs_dict[name] = out
@@ -558,7 +684,9 @@ class DecisionEngineV3:
         # ─── PHASE 5: FINAL SYNTHESIS & PROBABILISTIC GRADING ───
         # 1. Compute Weighted Probability Matrix
         # regime_penalty here is the UNIFIED uncertainty factor (max-of-two, not compounded)
-        buy_prob, sell_prob = self.compute_weighted_score(outputs_dict, regime_penalty)
+        # v3.8: If conviction exception fired, use _effective_gap_mult for regime_penalty
+        _final_regime_penalty = min(_effective_gap_mult, regime_penalty) if _conviction_exception else regime_penalty
+        buy_prob, sell_prob = self.compute_weighted_score(outputs_dict, _final_regime_penalty)
 
         # Priority 3 Fix: Apply sigmoid normalization BEFORE grading.
         # Multiplicative penalties compress all scores into 0.48–0.62.
@@ -572,18 +700,39 @@ class DecisionEngineV3:
         # are dead/suppressed/missing data. That's NOT dominance — it's
         # incomplete information.
         #
-        # CALIBRATION NOTE (2026-05-11): Lowered MIN_ONESIDED_PROB from 0.35 → 0.25.
-        # On live directional markets (strong bearish/bullish trend), one side
-        # legitimately collapses. B=0.01, S=0.30 is genuine conviction, not broken data.
-        # The 0.25 floor still catches truly broken signals while allowing real setups.
+        # v3.6 TREND CONTINUATION MODE:
+        # In trending markets (AGGRESSIVE MPM), one-sided collapse is often
+        # GENUINE conviction — the losing side has no thesis. We allow it
+        # to pass if momentum + structure agents agree with the dominant side.
+        # This replaces the old binary block with a context-aware gate.
         #
-        # SIMULATION RELAXATION (2026-05-13): Relaxed to 0.20 in SIM mode.
-        # NIFTY post-gap sessions have structural one-sidedness by design.
-        # Without samples we can't validate if this gate saves or wastes money.
-        # LIVE keeps original 0.25 bar. Review after 30+ SIM trades.
+        # v3.8 GAP-ADAPTIVE THRESHOLDS:
+        # In DEFENSIVE mode, thresholds now scale with gap_mult instead of
+        # being static. A 177pt gap (gap_mult=0.65) drops the floor from
+        # 0.22 to ~0.14, letting real momentum signals through while still
+        # filtering noise. This prevents the integrity gate from killing
+        # valid gap-momentum trades that the early-kill already approved.
         MIN_SIDE_FLOOR = 0.05     # each side must show SOME participation
-        MIN_DOMINANT_PROB = 0.18 if self._is_simulation else 0.20  # relaxed in SIM
-        MIN_ONESIDED_PROB = 0.20 if self._is_simulation else 0.25  # relaxed in SIM
+        # Adjust onesided floor based on MPM:
+        #   AGGRESSIVE: 0.15 — trend continuation valid even if one side silent
+        #   BALANCED:   0.20 — moderate (same as old SIM threshold)
+        #   DEFENSIVE:  dynamic — scales with gap_mult (was static 0.22/0.25)
+        if mpm == MarketParticipationMode.AGGRESSIVE:
+            MIN_DOMINANT_PROB   = 0.15 if self._is_simulation else 0.17
+            MIN_ONESIDED_PROB   = 0.15 if self._is_simulation else 0.18
+        elif mpm == MarketParticipationMode.BALANCED:
+            MIN_DOMINANT_PROB   = 0.18 if self._is_simulation else 0.20
+            MIN_ONESIDED_PROB   = 0.20 if self._is_simulation else 0.22
+        else:  # DEFENSIVE
+            # v3.8: Scale with gap_mult — large gaps legitimately compress scores
+            _eff_gm = _effective_gap_mult  # includes conviction override if active
+            MIN_DOMINANT_PROB   = max(0.14, (0.20 if self._is_simulation else 0.22) * _eff_gm)
+            MIN_ONESIDED_PROB   = max(0.15, (0.22 if self._is_simulation else 0.25) * _eff_gm)
+            if _eff_gm < 0.90:
+                self.logger.info(
+                    f"[INTEGRITY] Gap-adaptive thresholds: gap_mult={_eff_gm:.3f} → "
+                    f"MIN_DOMINANT={MIN_DOMINANT_PROB:.3f} MIN_ONESIDED={MIN_ONESIDED_PROB:.3f}"
+                )
 
         if buy_prob < MIN_SIDE_FLOOR and sell_prob < MIN_SIDE_FLOOR:
             self._record_opportunity(
@@ -597,11 +746,23 @@ class DecisionEngineV3:
                 outputs_dict)
 
         if buy_prob < MIN_SIDE_FLOOR or sell_prob < MIN_SIDE_FLOOR:
-            # One side is collapsed — we're flying blind on that direction.
-            # Require a HIGHER dominant threshold to compensate for the info gap.
             dominant = max(buy_prob, sell_prob)
             collapsed_side = "BUY" if buy_prob < MIN_SIDE_FLOOR else "SELL"
-            if dominant < MIN_ONESIDED_PROB:
+
+            # v3.6 Trend Continuation Mode:
+            # Check if momentum + structure confirm the dominant direction.
+            # If so, one-sided collapse IS genuine conviction — allow continuation.
+            _trend_cont_pass = self._check_trend_continuation(
+                outputs_dict, buy_prob, sell_prob, mpm
+            )
+            if _trend_cont_pass:
+                self.logger.info(
+                    f"[TREND CONT] One-sided allowed: {collapsed_side} collapsed but "
+                    f"momentum+structure confirm dominant | MPM={mpm.value} | "
+                    f"B={buy_prob:.3f} S={sell_prob:.3f}"
+                )
+                # Don't block — fall through to probability floor
+            elif dominant < MIN_ONESIDED_PROB:
                 self._record_opportunity(
                     blocked_by=f"Signal Integrity: {collapsed_side} side collapsed",
                     buy_prob=buy_prob, sell_prob=sell_prob,
@@ -610,13 +771,15 @@ class DecisionEngineV3:
                 )
                 return self._no_trade_signal(snapshot,
                     [f"Signal Integrity: {collapsed_side} side collapsed "
-                     f"(B={buy_prob:.3f} S={sell_prob:.3f}, dominant={dominant:.3f} < {MIN_ONESIDED_PROB})"],
+                     f"(B={buy_prob:.3f} S={sell_prob:.3f}, dominant={dominant:.3f} < {MIN_ONESIDED_PROB}, "
+                     f"MPM={mpm.value})"],
                     outputs_dict)
-            # Still warn — this IS unusual even if dominant is high enough
-            self.logger.warning(
-                f"[INTEGRITY] One-sided signal ({collapsed_side}=0): B={buy_prob:.3f} S={sell_prob:.3f} "
-                f"(dominant={dominant:.3f} passes elevated floor {MIN_ONESIDED_PROB})"
-            )
+            else:
+                # Dominant is high enough but one side silent — warn only
+                self.logger.warning(
+                    f"[INTEGRITY] One-sided signal ({collapsed_side}=0): B={buy_prob:.3f} S={sell_prob:.3f} "
+                    f"(dominant={dominant:.3f} passes elevated floor {MIN_ONESIDED_PROB})"
+                )
 
         # ── Minimum Probability Floor (dominant side must have real substance) ──
         dominant_prob = max(buy_prob, sell_prob)
@@ -645,16 +808,72 @@ class DecisionEngineV3:
         # 3. Minimum Dominance Rule (Adaptive Edge Guard via Tuner)
         # Base thresholds come from the ThresholdTuner (self-adjusting).
         # In uncertain regime we relax by 0.01 to avoid lock-out.
+        # v3.6: In AGGRESSIVE MPM, also relax by 0.01 to allow trend continuation.
         live_gap, live_conf = self.tuner.get_thresholds()
-        adaptive_gap = live_gap if reg_conf >= 0.6 else max(live_gap - 0.01, 0.035)
+        _mpm_gap_relax = 0.01 if mpm == MarketParticipationMode.AGGRESSIVE else 0.0
+        adaptive_gap = max(
+            live_gap - _mpm_gap_relax - (0.01 if reg_conf < 0.6 else 0.0),
+            0.035
+        )
         gap = abs(buy_prob - sell_prob)
         if gap < adaptive_gap and direction != Direction.NEUTRAL:
-            return self._no_trade_signal(snapshot, [f"Minimum Dominance Rule (Gap: {gap:.3f} < {adaptive_gap:.2f}, regime: {reg_conf:.2f})"], outputs_dict)
+            return self._no_trade_signal(snapshot,
+                [f"Minimum Dominance Rule (Gap: {gap:.3f} < {adaptive_gap:.2f}, "
+                 f"regime: {reg_conf:.2f}, MPM={mpm.value})"],
+                outputs_dict)
 
-        # 4. Check Global Threshold (from tuner)
-        adaptive_confidence = live_conf if reg_conf >= 0.6 else max(live_conf - 0.13, 0.28)
+        # 4. Dynamic Confidence Gate
+        # ─────────────────────────────────────────────────────────────────
+        # v3.6 UPGRADE:
+        # Old: Relax ONLY when gap session is active (time-based).
+        # New: Relax based on THREE independent signals:
+        #   A. Gap decay (existing — time heals opening shock)
+        #   B. MPM=AGGRESSIVE — trend confirmed, conviction is real
+        #   C. Momentum+Structure alignment — price action says go
+        #
+        # Hard clamp at MIN_CONF_FLOOR (0.26) — never goes below that.
+        # Relaxations are ADDITIVE up to MAX_TOTAL_RELAX.
+        # ─────────────────────────────────────────────────────────────────
+        gap_status = self.gap_penalty_mgr.get_status()
+        gap_mins_elapsed = gap_status.get("minutes_since_open", 0.0)
+        gap_severity = gap_status.get("severity", "NONE")
+
+        # A. Gap-decay relaxation (same as before)
+        _gap_decay_relax = 0.0
+        if gap_severity != "NONE" and gap_mins_elapsed > 0:
+            _CONF_DECAY_K   = 0.020
+            _MAX_CONF_RELAX = 0.12
+            _gap_decay_relax = _MAX_CONF_RELAX * (1.0 - math.exp(-_CONF_DECAY_K * gap_mins_elapsed))
+
+        # B. MPM relaxation
+        _mpm_conf_relax = 0.0
+        if mpm == MarketParticipationMode.AGGRESSIVE:
+            _mpm_conf_relax = 0.07   # trend confirmed — lower bar is justified
+        elif mpm == MarketParticipationMode.BALANCED:
+            _mpm_conf_relax = 0.03
+
+        # C. Momentum+Structure alignment bonus
+        _struct_bonus = self._momentum_structure_alignment_bonus(outputs_dict, direction)
+
+        # Total relaxation (cap at 0.15 to prevent runaway loosening)
+        _total_relax = min(_gap_decay_relax + _mpm_conf_relax + _struct_bonus, 0.15)
+        adaptive_confidence = max(live_conf - _total_relax, 0.26)  # hard floor
+
+        # Fallback: uncertain regime relaxation (same as before)
+        if gap_severity == "NONE" and reg_conf < 0.6:
+            adaptive_confidence = max(adaptive_confidence - 0.03, 0.26)
+
+        if _total_relax > 0.005:
+            self.logger.info(
+                f"[CONF GATE] Dynamic relax: live_conf={live_conf:.3f} - "
+                f"gap_decay={_gap_decay_relax:.3f} - mpm={_mpm_conf_relax:.3f} - "
+                f"struct={_struct_bonus:.3f} = adaptive={adaptive_confidence:.3f} "
+                f"(MPM={mpm.value})"
+            )
+
         if confidence < adaptive_confidence:
-            reason = f"Low Confidence Gate ({confidence:.2f} < {adaptive_confidence:.2f}, regime: {reg_conf:.2f})"
+            reason = (f"Low Confidence Gate ({confidence:.2f} < {adaptive_confidence:.2f}, "
+                      f"regime: {reg_conf:.2f}, MPM={mpm.value}, gap_elapsed: {gap_mins_elapsed:.0f}min)")
             return self._no_trade_signal(snapshot, [reason], outputs_dict)
             
         final_confluence = self.scorer.score(outputs)
@@ -723,7 +942,7 @@ class DecisionEngineV3:
         )
 
         # ── Intelligence Breakdown Log ──
-        self.logger.info(
+        self.logger.debug(
             f"🧠 [PROBABILITY] Signal: {signal_type.value} | "
             f"Score: {confidence:.2f} | "
             f"Buy: {buy_prob:.2f} | "
@@ -836,9 +1055,367 @@ class DecisionEngineV3:
         self.recent_signals[fingerprint] = now_ts
 
         self._record_signal(signal)
-        self.logger.signal(f"\n✅ A+ TRADE FOUND! {signal}")
+        # We no longer print the raw signal here.
+        # Instrument resolution (Spot -> Option Premium) happens in main.py, 
+        # and AlertManager handles the final formatted console output.
 
         return signal
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # v3.6 EXECUTION CALIBRATION HELPERS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _check_and_handle_oi_reliability(
+        self, outputs_dict: Dict[str, "AgentOutput"]
+    ) -> bool:
+        """
+        OI Fallback Architecture (v3.6 Change A)
+
+        Instead of flagging the ENTIRE strategy as degraded when OI is
+        unreliable, we redistribute OI's weight budget to the next-best
+        agents (momentum, structure, price_action) so the weight matrix
+        stays balanced and the score remains meaningful.
+
+        Returns True if OI is reliable, False if fallback was applied.
+
+        Note: OI reliability check is skipped in SIMULATION mode because
+        simulated OI data is expected and acceptable (not a failure state).
+        """
+        # Simulated mode — never flag OI as unreliable
+        if self._is_simulation:
+            return True
+
+        # Check OI data source from the agent output
+        oi_out = outputs_dict.get("oi")
+        if oi_out is None:
+            return True  # OI agent not active this cycle — not a failure
+
+        oi_abstained = oi_out.details.get("abstained", False)
+        if not oi_abstained:
+            self._oi_real_count += 1
+        self._oi_total_count += 1
+
+        # v3.8: Extended warmup grace period for SMALL_CAPITAL / live modes.
+        # At startup, the OI API hasn't had time to populate the cache.
+        # Forcing DEFENSIVE MPM on the first 10 cycles creates a dead zone
+        # where the engine cannot trade at all. Extended to 30 samples.
+        _oi_warmup = 30 if os.getenv("SYSTEM_MODE", "").upper() in ("SMALL_CAPITAL", "SCALED") else 10
+        if self._oi_total_count < _oi_warmup:
+            return True
+
+        reliability = (self._oi_real_count / self._oi_total_count)
+
+        # Reliable enough — no redistribution needed
+        if reliability >= 0.80:
+            return True
+
+        # OI unreliable — redistribute its weight budget
+        oi_base_weight = AGENT_WEIGHTS.get("oi", 0.08)
+        oi_reliability_mult = AGENT_RELIABILITY.get("oi", 0.75)
+        oi_budget = oi_base_weight * oi_reliability_mult  # ~0.06
+
+        # Mark the OI output as neutral (zero-contribution) via details flag
+        # so compute_weighted_score sees it as neutral and doesn't count it.
+        # We can't mutate confidence directly, so we use a sentinel in details.
+        oi_out.details["_oi_fallback_active"] = True
+
+        # Redistribute to recipient agents that are present in outputs_dict
+        for recipient, share in _OI_FALLBACK_RECIPIENTS.items():
+            if recipient in outputs_dict:
+                bonus = oi_budget * share
+                existing_w = AGENT_WEIGHTS.get(recipient, 0.05)
+                # Apply the bonus transiently in the agent details so
+                # compute_weighted_score can pick it up via the fallback weight key.
+                outputs_dict[recipient].details["_oi_fallback_weight_bonus"] = (
+                    outputs_dict[recipient].details.get("_oi_fallback_weight_bonus", 0.0)
+                    + bonus
+                )
+
+        if self._oi_total_count % 20 == 0:
+            self.logger.warning(
+                f"⚠️ [OI FALLBACK] OI reliability={reliability:.1%} < 80% — "
+                f"weight redistributed to momentum/structure/price_action. "
+                f"Strategy NOT degraded. (n={self._oi_total_count})"
+            )
+        return False
+
+    def _compute_market_participation_mode(
+        self,
+        outputs_dict: Dict[str, "AgentOutput"],
+        snapshot: "MarketSnapshot",
+        gap_mult: float,
+        oi_reliable: bool,
+    ) -> "MarketParticipationMode":
+        """
+        Market Participation Mode (MPM) — v3.6 Three-state execution classifier.
+
+        DEFENSIVE triggers if ANY of:
+          1. OI is unreliable (live mode only) — data quality issue
+          2. Gap shock active (gap_mult < 0.80) — opening chaos
+          3. Memory is tilted (consecutive losses >= 3) — tilt protection
+          4. Regime confidence very low (< 0.45) — structural uncertainty
+
+        AGGRESSIVE triggers if ANY ONE of these qualifying conditions:
+          A. STRONG_TREND (UP or DOWN) + ≥3/5 core agents aligned + gap_mult ≥ 0.85
+          B. WEAK_TREND + ≥4/5 core agents aligned (tighter consensus requirement)
+          C. BREAKOUT regime + momentum confirms breakout direction
+          D. SQUEEZE + momentum expanding (ATR ≥ 1.3× min) + ≥3/5 core agents agree
+             (squeeze breakouts are where intraday edge often exists)
+
+        v3.7: Expanded AGGRESSIVE triggers so the engine can participate
+        in WEAK_TREND, BREAKOUT, and momentum-driven SQUEEZE conditions
+        — not just STRONG_TREND which is rare intraday.
+
+        BALANCED: everything else (the safe default).
+        """
+        # ── DEFENSIVE checks (highest priority — capital protection) ──
+        if not oi_reliable and not self._is_simulation:
+            self._mpm_reason = "OI unreliable (live mode)"
+            return MarketParticipationMode.DEFENSIVE
+
+        # v3.8: Gap shock check now respects conviction override.
+        # If _effective_gap_mult was boosted by the conviction exception,
+        # the system can be BALANCED instead of hard DEFENSIVE.
+        if gap_mult < 0.80:
+            self._mpm_reason = f"Gap shock active (gap_mult={gap_mult:.3f})"
+            return MarketParticipationMode.DEFENSIVE
+
+        if self.memory.is_tilted or self.memory.current_streak <= -3:
+            self._mpm_reason = "Memory tilted / loss cluster"
+            return MarketParticipationMode.DEFENSIVE
+
+        regime_out = outputs_dict.get("regime")
+        reg_conf_val = regime_out.get_clamped_confidence() if regime_out else 1.0
+        if reg_conf_val < 0.45:
+            self._mpm_reason = f"Regime confidence too low ({reg_conf_val:.2f})"
+            return MarketParticipationMode.DEFENSIVE
+
+        # ── AGGRESSIVE checks ── (ANY one path qualifies) ──
+        regime_val = regime_out.details.get("regime", "UNKNOWN") if regime_out else "UNKNOWN"
+        core_agents = ["momentum", "structure", "price_action", "multi_timeframe", "level"]
+
+        # Helper: count core agents agreeing with a direction
+        def _core_agree(direction: Direction) -> int:
+            return sum(
+                1 for a in core_agents
+                if a in outputs_dict and outputs_dict[a].direction == direction
+            )
+
+        # Path A: Strong trend + 3+/5 aligned
+        if regime_val in ("STRONG_TREND_UP", "STRONG_TREND_DOWN") and gap_mult >= 0.85:
+            trend_dir = Direction.BULLISH if "UP" in regime_val else Direction.BEARISH
+            agree = _core_agree(trend_dir)
+            if agree >= 3:
+                self._mpm_reason = f"Path-A Strong trend ({regime_val}) + {agree}/5 core aligned"
+                return MarketParticipationMode.AGGRESSIVE
+
+        # Path B: Weak trend + tighter consensus (4+/5)
+        if regime_val in ("WEAK_TREND_UP", "WEAK_TREND_DOWN") and gap_mult >= 0.85:
+            trend_dir = Direction.BULLISH if "UP" in regime_val else Direction.BEARISH
+            agree = _core_agree(trend_dir)
+            if agree >= 4:  # Require higher bar for weaker trend
+                self._mpm_reason = f"Path-B Weak trend ({regime_val}) + {agree}/5 core aligned (high bar)"
+                return MarketParticipationMode.AGGRESSIVE
+
+        # Path C: Breakout + momentum confirms
+        if regime_val == "BREAKOUT" and gap_mult >= 0.85:
+            mom_out = outputs_dict.get("momentum")
+            struct_out = outputs_dict.get("structure")
+            if mom_out is not None and mom_out.direction != Direction.NEUTRAL:
+                breakout_dir = mom_out.direction
+                agree = _core_agree(breakout_dir)
+                if agree >= 3:
+                    self._mpm_reason = f"Path-C BREAKOUT + momentum confirms + {agree}/5 core aligned"
+                    return MarketParticipationMode.AGGRESSIVE
+
+        # Path D: Squeeze with expanding momentum (breakout imminent)
+        # ATR expanding means energy is releasing — directional conviction likely
+        if regime_val == "SQUEEZE" and gap_mult >= 0.85:
+            min_atr = getattr(self.settings.trade_filter, "min_atr_for_trade", 50)
+            atr_expanding = snapshot.atr >= min_atr * 1.3
+            if atr_expanding:
+                mom_out = outputs_dict.get("momentum")
+                if mom_out is not None and mom_out.direction != Direction.NEUTRAL:
+                    squeeze_dir = mom_out.direction
+                    agree = _core_agree(squeeze_dir)
+                    if agree >= 3:
+                        self._mpm_reason = (
+                            f"Path-D SQUEEZE breakout: ATR={snapshot.atr:.0f} ≥ 1.3× min "
+                            f"+ {agree}/5 core aligned {squeeze_dir.value}"
+                        )
+                        return MarketParticipationMode.AGGRESSIVE
+
+        # ── Default ──
+        self._mpm_reason = f"Normal conditions (regime={regime_val}, gap_mult={gap_mult:.3f})"
+        return MarketParticipationMode.BALANCED
+
+    def _check_trend_continuation(
+        self,
+        outputs_dict: Dict[str, "AgentOutput"],
+        buy_prob: float,
+        sell_prob: float,
+        mpm: "MarketParticipationMode",
+    ) -> bool:
+        """
+        Trend Continuation Mode gate (v3.6 Change C).
+
+        When one side of the signal has collapsed (near zero), this function
+        determines if the collapse is GENUINE directional conviction rather
+        than broken/missing data.
+
+        Returns True (allow continuation) only when ALL of:
+          1. MPM is AGGRESSIVE (trend is confirmed from multiple angles)
+          2. Momentum agent agrees with the dominant direction
+          3. Structure agent agrees with the dominant direction (if active)
+
+        In BALANCED or DEFENSIVE mode, this always returns False — the normal
+        elevated-floor check applies unchanged.
+        """
+        # Trend continuation only makes sense in AGGRESSIVE mode
+        if mpm != MarketParticipationMode.AGGRESSIVE:
+            return False
+
+        dominant_direction = Direction.BULLISH if buy_prob >= sell_prob else Direction.BEARISH
+
+        # Momentum must agree
+        mom_out = outputs_dict.get("momentum")
+        if mom_out is None or mom_out.direction != dominant_direction:
+            return False
+
+        # Structure must agree if it was run this cycle
+        struct_out = outputs_dict.get("structure")
+        if struct_out is not None and struct_out.direction != dominant_direction:
+            return False
+
+        # Both momentum (and structure if present) confirm — allow continuation
+        return True
+
+    def _momentum_structure_alignment_bonus(
+        self,
+        outputs_dict: Dict[str, "AgentOutput"],
+        direction: Direction,
+    ) -> float:
+        """
+        Confidence gate bonus (v3.6 Change D).
+
+        Returns an additional relaxation amount (0.0–0.05) for the confidence
+        gate when momentum AND structure agents both confirm the dominant
+        direction AND their confidence is high (>= 65%).
+
+        This is a BONUS on top of the gap-decay and MPM relaxations.
+        Maximum contribution: 0.05 (small, surgical, evidence-driven).
+        """
+        if direction == Direction.NEUTRAL:
+            return 0.0
+
+        bonus = 0.0
+
+        mom_out = outputs_dict.get("momentum")
+        struct_out = outputs_dict.get("structure")
+
+        mom_confirms = (
+            mom_out is not None
+            and mom_out.direction == direction
+            and mom_out.get_clamped_confidence() >= 0.65
+        )
+        struct_confirms = (
+            struct_out is not None
+            and struct_out.direction == direction
+            and struct_out.get_clamped_confidence() >= 0.60
+        )
+
+        if mom_confirms and struct_confirms:
+            bonus = 0.05   # Both agree with conviction — clear trend
+        elif mom_confirms:
+            bonus = 0.02   # Momentum alone confirms — partial credit
+        elif struct_confirms:
+            bonus = 0.02   # Structure alone confirms — partial credit
+
+        return bonus
+
+    def _check_high_conviction_exception(
+        self,
+        outputs_dict: Dict[str, "AgentOutput"],
+        snapshot: "MarketSnapshot",
+        gap_mult: float,
+    ) -> bool:
+        """
+        v3.8 High Conviction Exception Path.
+
+        Detects when gap suppression is blocking genuinely strong momentum
+        that professional engines should trade (trend days, panic selloffs,
+        runaway gap continuations).
+
+        Returns True when ALL conditions are met:
+          1. gap_mult < 0.85 (gap suppression is active)
+          2. ≥3 directional agents agree on the same direction
+          3. Momentum agent has STRONG confidence (≥ 0.70)
+          4. ATR is expanding (≥ 1.5× min_atr threshold)
+          5. Price action agent confirms the direction (if active)
+
+        When True, the caller partially relaxes gap_mult by +0.12 (cap 0.85).
+        This is NOT a full bypass — it's a targeted relaxation for elite setups.
+        """
+        # Only relevant when gap suppression is actually hurting
+        if gap_mult >= 0.85:
+            return False
+
+        # Momentum must be STRONG and directional
+        mom_out = outputs_dict.get("momentum")
+        if mom_out is None or mom_out.direction == Direction.NEUTRAL:
+            return False
+        if mom_out.get_clamped_confidence() < 0.70:
+            return False
+
+        dominant_dir = mom_out.direction
+
+        # ATR must be expanding (confirms real move, not noise)
+        min_atr = getattr(self.settings.trade_filter, "min_atr_for_trade", 50)
+        if snapshot.atr < min_atr * 1.5:
+            return False
+
+        # Count directional agents agreeing with momentum
+        directional_agents = ["momentum", "structure", "price_action", "market", "level"]
+        agree_count = sum(
+            1 for name in directional_agents
+            if name in outputs_dict and outputs_dict[name].direction == dominant_dir
+        )
+
+        if agree_count < 3:
+            return False
+
+        # Price action must not contradict (if active)
+        pa_out = outputs_dict.get("price_action")
+        if pa_out is not None and pa_out.direction != Direction.NEUTRAL:
+            if pa_out.direction != dominant_dir:
+                return False
+
+        self.logger.info(
+            f"🔥 [HIGH CONVICTION] Exception conditions met: "
+            f"{agree_count}/5 agents agree {dominant_dir.value} | "
+            f"momentum_conf={mom_out.get_clamped_confidence():.2f} | "
+            f"ATR={snapshot.atr:.1f} (≥{min_atr*1.5:.1f}) | "
+            f"gap_mult={gap_mult:.3f}"
+        )
+        return True
+
+    def _is_opening_auction(self) -> bool:
+        """
+        v3.8 Opening Auction Mode detector.
+
+        Returns True during 9:15–9:25 IST when:
+          - EMAs/VWAP are contaminated (insufficient candles)
+          - Oscillator signals (RSI, Stochastic) are meaningless
+          - Mean reversion logic will produce false signals
+          - Only momentum bursts and structural breaks are tradeable
+
+        Used by the router to gate which agents contribute to scoring.
+        """
+        import pytz
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        current_time = now.time()
+        from datetime import time as dt_time
+        return dt_time(9, 15) <= current_time < dt_time(9, 25)
 
     def _get_dynamic_confirmation_route(
         self,
@@ -846,6 +1423,7 @@ class DecisionEngineV3:
         snapshot: MarketSnapshot,
         core_confluence,
         opening_gap_session: bool = False,
+        conviction_exception: bool = False,
     ) -> List[str]:
         """
         🧠 V4 DYNAMIC ROUTING ENGINE
@@ -857,6 +1435,11 @@ class DecisionEngineV3:
           - Deep validation agents (institutional, order_flow, delta_gamma)
             run on contaminated data -- they add latency and noise, not signal.
           - ONLY allow them if an extraordinary momentum burst is visible.
+
+        conviction_exception=True (v3.8):
+          - High conviction override fired — 3+ agents agree + momentum STRONG
+          - Allow targeted deep validation (OI + volatility) even during gap session
+          - Still skip institutional / order_flow (contaminated at open)
         """
         route = set()
 
@@ -872,7 +1455,8 @@ class DecisionEngineV3:
         # --- 2. OPENING GAP SESSION GUARD ------------------------------------
         # During opening volatility, deep validation adds latency not signal.
         # Only run lightweight agents.  Deep validation is blocked unless
-        # we see an extreme momentum condition (ATR burst >= 3x normal).
+        # we see an extreme momentum condition (ATR burst >= 3x normal)
+        # OR the conviction exception has fired (v3.8).
         # ---------------------------------------------------------------------
         if opening_gap_session:
             self.logger.info(
@@ -881,15 +1465,26 @@ class DecisionEngineV3:
             )
             # Only route to lightweight, time-independent tools
             route.update(["trap", "level"])
+
+            # v3.8: Conviction exception allows targeted validation
+            if conviction_exception:
+                self.logger.info(
+                    "[FIRE] [ROUTER] Conviction override active during gap session — "
+                    "allowing OI + volatility for directional confirmation."
+                )
+                route.add("oi")
+                route.add("volatility")
+
             # Extreme momentum burst exception: ATR >= 3x normal
-            if snapshot.atr > self.settings.trade_filter.min_atr_for_trade * 3.0:
+            elif snapshot.atr > self.settings.trade_filter.min_atr_for_trade * 3.0:
                 self.logger.info(
                     "[FIRE] [ROUTER] Exceptional ATR burst during opening gap -- "
                     "allowing targeted deep validation (momentum + OI only)."
                 )
                 route.add("volatility")
                 # Do NOT add institutional/order_flow/delta_gamma -- still too noisy
-            self.logger.info(f"[ROUTE] V4 Opening-Gap Route: {list(route)}")
+
+            self.logger.debug(f"[ROUTE] V4 Opening-Gap Route: {list(route)}")
             return list(route)
 
         # --- 3. MEMORY-AWARE ROUTING (Survival Mode) ---
@@ -974,7 +1569,7 @@ class DecisionEngineV3:
         if not route:
             route.update(["oi", "multi_timeframe"])
 
-        self.logger.info(f"[ROUTE] V4 Dynamic Route Selected: {list(route)}")
+        self.logger.debug(f"[ROUTE] V4 Dynamic Route Selected: {list(route)}")
         return list(route)
 
     def compute_weighted_score(self, agent_outputs: Dict[str, AgentOutput], regime_penalty: float = 1.0):
@@ -983,7 +1578,16 @@ class DecisionEngineV3:
         - Standardizes confidence to 0.1-0.95 clamping
         - Handles 'NO_TRADE' neutral pressure
         - Normalizes by total_weight_used for true probability
+        - v3.6: Respects OI fallback weight suppression + redistribution
+        - v3.7: Per-agent concentration cap (no single agent > MAX_SINGLE_WEIGHT_SHARE of budget)
         """
+        # ── v3.7: Anti-concentration cap ──────────────────────────────────────
+        # Prevents a single agent from holding >18% of the total weight budget.
+        # First pass: compute raw weights so we can calculate total and apply cap.
+        # This is a two-pass approach to avoid unbounded single-agent influence.
+        # ------------------------------------------------------------------
+        MAX_SINGLE_WEIGHT_SHARE = 0.18  # no agent may hold more than 18% of total
+
         buy_score = 0.0
         sell_score = 0.0
         total_weight_used = 0.0
@@ -993,22 +1597,47 @@ class DecisionEngineV3:
         if learning_ag and hasattr(learning_ag, "get_agent_profit_factors"):
             agent_pfs = learning_ag.get_agent_profit_factors()
 
+        # ── Pass 1: compute all raw weights ──
+        raw_weights: Dict[str, float] = {}
         for name, output in agent_outputs.items():
-            weight = AGENT_WEIGHTS.get(name, 0.02)  # Standard low weight for unlisted
-
-            # ── Agent Reliability Adjustment ──
-            # Multiply base weight by empirical reliability score.
-            # High-signal agents (multi_timeframe, structure) get more pull.
-            # Noisy agents (trap, oi in sim mode) are discounted.
+            weight = AGENT_WEIGHTS.get(name, 0.02)
             reliability = AGENT_RELIABILITY.get(name, 1.0)
             weight *= reliability
 
-            # Phase 4: Agent Degradation Kill-Switch
+            if output.details.get("_oi_fallback_active", False):
+                weight = 0.0
+
+            bonus = output.details.get("_oi_fallback_weight_bonus", 0.0)
+            weight += bonus
+
             if name in agent_pfs and agent_pfs[name] < 1.0:
                 weight = 0.0
-                self.logger.warning(f"🔇 Agent {name} squelched. PF < 1.0 ({agent_pfs[name]:.2f})")
 
             weight *= regime_penalty
+            raw_weights[name] = max(weight, 0.0)
+
+        raw_total = sum(raw_weights.values())
+
+        # ── Pass 2: apply concentration cap + accumulate scores ──
+        for name, output in agent_outputs.items():
+            # Clean up fallback bonus (consumed in pass 1 check; pop here)
+            output.details.pop("_oi_fallback_weight_bonus", None)
+
+            weight = raw_weights[name]
+
+            # Anti-concentration cap: if this agent holds > MAX_SINGLE_WEIGHT_SHARE of total,
+            # trim it down. Excess weight is NOT redistributed (it simply lowers total).
+            if raw_total > 0:
+                share = weight / raw_total
+                if share > MAX_SINGLE_WEIGHT_SHARE:
+                    weight = raw_total * MAX_SINGLE_WEIGHT_SHARE
+                    self.logger.debug(
+                        f"[WEIGHT CAP] {name}: share={share:.1%} > {MAX_SINGLE_WEIGHT_SHARE:.0%} "
+                        f"— capped from {raw_weights[name]:.4f} to {weight:.4f}"
+                    )
+            
+            output.weight = weight
+
             total_weight_used += weight
 
             conf = output.get_clamped_confidence()
@@ -1020,10 +1649,15 @@ class DecisionEngineV3:
             # Neutral/NO_TRADE adds 0 to score but counts toward total_weight
             # which naturally dilutes the final probability (as it should).
 
+            # Log if a squelched agent is encountered during pass 2
+            if name in agent_pfs and agent_pfs[name] < 1.0 and raw_weights[name] == 0:
+                self.logger.warning(f"🔇 Agent {name} squelched. PF < 1.0 ({agent_pfs[name]:.2f})")
+
         if total_weight_used == 0:
             return 0.0, 0.0
 
         return buy_score / total_weight_used, sell_score / total_weight_used
+
 
     def _no_trade_signal(self, snapshot: MarketSnapshot, reasons: List[str], outputs: Dict[str, AgentOutput]) -> Signal:
         all_warnings = []

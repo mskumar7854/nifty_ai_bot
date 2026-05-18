@@ -126,10 +126,20 @@ class AlertManager:
         table.add_row("Confidence", f"[bold]{signal.confidence:.1f}%[/]")
         table.add_row("Strength", signal.strength.value)
         table.add_row("", "")
-        table.add_row("Entry", f"₹{signal.entry_price:,.1f}")
-        table.add_row("Stop Loss", f"₹{signal.stop_loss:,.1f}")
-        table.add_row("Target 1", f"₹{signal.target_1:,.1f}")
-        table.add_row("Target 2", f"₹{signal.target_2:,.1f}")
+        
+        if "premium_levels" in signal.metadata:
+            p_levels = signal.metadata["premium_levels"]
+            table.add_row("Premium Entry", f"₹{p_levels.get('premium_entry', 0):,.1f}")
+            table.add_row("Premium SL", f"₹{p_levels.get('premium_sl', 0):,.1f}")
+            table.add_row("Premium T1", f"₹{p_levels.get('premium_t1', 0):,.1f}")
+            table.add_row("Spot Trigger", f"₹{signal.entry_price:,.1f}")
+            table.add_row("Decay Risk", f"{p_levels.get('decay_risk', 'Moderate')}")
+        else:
+            table.add_row("Entry", f"₹{signal.entry_price:,.1f}")
+            table.add_row("Stop Loss", f"₹{signal.stop_loss:,.1f}")
+            table.add_row("Target 1", f"₹{signal.target_1:,.1f}")
+            table.add_row("Target 2", f"₹{signal.target_2:,.1f}")
+            
         table.add_row("Qty", str(signal.position_size))
         table.add_row("", "")
 
