@@ -77,6 +77,14 @@ class OpenPosition:
     
     symbol: str = "NIFTY"
     security_id: str = ""
+    intent_id: str = ""
+    
+    # Execution Metrics (P0.5)
+    entry_bid: float = 0.0
+    entry_ask: float = 0.0
+    quote_age_ms: float = 0.0
+    spread_pct_entry: float = 0.0
+    slippage_entry: float = 0.0
 
     # Prices
     current_price: float = 0
@@ -312,6 +320,14 @@ class PositionManager:
     def record_heartbeat(self) -> None:
         """Called by main loop every cycle to prove liveness."""
         self._last_heartbeat_time = time.time()
+        # Write for independent watchdog process
+        try:
+            import json, os
+            os.makedirs("data", exist_ok=True)
+            with open("data/heartbeat.json", "w") as f:
+                json.dump({"last_heartbeat": self._last_heartbeat_time}, f)
+        except Exception as e:
+            self.logger.error(f"Failed to write heartbeat file: {e}")
 
     # ══════════════════════════════════════
     # CORE: CAN WE TRADE?
@@ -657,15 +673,28 @@ class PositionManager:
         position_id = getattr(signal, "id", None)
         if not position_id:
             position_id = str(uuid.uuid4())[:8]
+            
+        quote = getattr(signal, "metadata", {}).get("quote")
+        entry_bid = quote.bid if quote else 0.0
+        entry_ask = quote.ask if quote else 0.0
+        quote_age_ms = (datetime.now() - getattr(quote, 'timestamp', datetime.now())).total_seconds() * 1000 if quote else 0.0
+        spread_pct_entry = quote.spread_pct if quote else 0.0
+        slippage_entry = fill_price - entry_ask if entry_ask > 0 and signal.direction.value.upper() == "BUY" else entry_bid - fill_price
 
         position = OpenPosition(
             position_id=position_id,
+            intent_id=getattr(signal, "intent_id", ""),
             entry_time=datetime.now(),
             signal_type=signal.signal_type,
             direction=signal.direction,
             symbol=signal.symbol,
             security_id=signal.security_id or "",
             entry_price=fill_price,
+            entry_bid=entry_bid,
+            entry_ask=entry_ask,
+            quote_age_ms=quote_age_ms,
+            spread_pct_entry=spread_pct_entry,
+            slippage_entry=slippage_entry,
             current_price=fill_price,
             stop_loss=size_params["sl_price"],
             original_stop_loss=size_params["sl_price"],
@@ -1307,9 +1336,49 @@ class PositionManager:
                 f"Hold: {hold_duration:.1f}min"
             )
 
+            # ── P0.5: Exact Net P&L Calculation ──
+            try:
+                from core.economics import CostEngine
+                costs = CostEngine.calculate_costs(
+                    entry_price=pos.entry_price,
+                    exit_price=exit_price,
+                    qty=pos.qty,
+                    direction=pos.direction.value.upper()
+                )
+                
+                exec_metrics = {
+                    "holding_seconds": hold_duration * 60,
+                    "mfe": pos.max_favorable,
+                    "mae": pos.max_adverse,
+                    "realized_r_multiple": (costs["net_pnl"] / (abs(pos.entry_price - pos.original_stop_loss) * pos.qty)) if abs(pos.entry_price - pos.original_stop_loss) > 0 else 0,
+                    "entry_bid": pos.entry_bid,
+                    "entry_ask": pos.entry_ask,
+                    "entry_fill": pos.entry_price,
+                    "exit_fill": exit_price,
+                    "spread_pct_entry": pos.spread_pct_entry,
+                    "quote_age_ms": pos.quote_age_ms,
+                    "slippage_entry": pos.slippage_entry,
+                    "exit_bid": 0.0, "exit_ask": 0.0, "spread_pct_exit": 0.0, "slippage_exit": 0.0
+                }
+                
+                if getattr(pos, "intent_id", ""):
+                    CostEngine.save_trade_economics(
+                        db_path=self.config.db_path if hasattr(self.config, "db_path") else "data/trading_v4.db",
+                        intent_id=pos.intent_id,
+                        costs=costs,
+                        execution_metrics=exec_metrics
+                    )
+                
+                net_pnl = costs["net_pnl"]
+                total_pnl = net_pnl  # Override legacy PnL with Net PnL!
+            except Exception as e:
+                self.logger.error(f"CostEngine failure: {e}")
+                net_pnl = total_pnl
+
             result = {
                 "type": "full",
                 "pnl": total_pnl,
+                "net_pnl": net_pnl,
                 "reason": reason,
                 "hold_minutes": hold_duration,
                 "entry": pos.entry_price,

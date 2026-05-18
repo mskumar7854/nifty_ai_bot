@@ -61,6 +61,91 @@ class DBManager:
             )
             """)
             
+            # 3. OMS Orders Table (P0.3)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                intent_id TEXT NOT NULL UNIQUE,
+                broker_order_id TEXT,
+                broker_sl_order_id TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                qty INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                requested_price REAL,
+                avg_fill_price REAL,
+                stop_loss_price REAL,
+                filled_qty INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+
+            # 4. OMS Order Events (P0.3) - Append-only audit log
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS order_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                intent_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                old_state TEXT,
+                new_state TEXT,
+                payload_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """)
+
+            # 5. OMS Position Snapshots (P0.3)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS position_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT,
+                symbol TEXT,
+                qty INTEGER,
+                unrealized_pnl REAL,
+                realized_pnl REAL,
+                stop_loss REAL,
+                snapshot_time TEXT NOT NULL
+            )
+            """)
+            # 6. Trade Economics (P0.5) - Exact costs and execution drift
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS trade_economics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                intent_id TEXT NOT NULL UNIQUE,
+                gross_pnl REAL,
+                net_pnl REAL,
+                
+                spread_cost REAL,
+                slippage_cost REAL,
+                
+                brokerage REAL,
+                stt REAL,
+                gst REAL,
+                sebi_charges REAL,
+                stamp_duty REAL,
+                
+                holding_seconds REAL,
+                mfe REAL,
+                mae REAL,
+                
+                realized_r_multiple REAL,
+                
+                entry_bid REAL,
+                entry_ask REAL,
+                entry_fill REAL,
+                exit_bid REAL,
+                exit_ask REAL,
+                exit_fill REAL,
+                
+                spread_pct_entry REAL,
+                spread_pct_exit REAL,
+                quote_age_ms REAL,
+                slippage_entry REAL,
+                slippage_exit REAL
+            )
+            """)
+            
             # Dynamic schema migration for existing DBs
             columns = [
                 ("execution_status", "TEXT DEFAULT 'pending'"),
@@ -82,6 +167,48 @@ class DBManager:
             except Exception:
                 pass
                 
+            # 7. Decision Snapshots (P0.6) - Full cycle truth archive for deterministic replay
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS decision_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL UNIQUE,
+                snapshot_hash TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+
+                signal_id TEXT,
+                intent_id TEXT,
+
+                regime TEXT,
+                market_phase TEXT,
+                spot_price REAL,
+                vix REAL,
+
+                selected_option TEXT,
+                bid REAL,
+                ask REAL,
+                spread_pct REAL,
+                quote_age_ms REAL,
+
+                weighted_score REAL,
+                buy_score REAL,
+                sell_score REAL,
+                confidence REAL,
+                grade TEXT,
+
+                threshold_snapshot_json TEXT,
+                agent_outputs_json TEXT,
+                gate_results_json TEXT,
+                filter_stats_json TEXT,
+                market_context_json TEXT,
+
+                final_decision TEXT,
+                rejection_reason TEXT,
+
+                system_version TEXT DEFAULT 'v4.6.1',
+                strategy_version TEXT DEFAULT 'v3'
+            )
+            """)
+
             await db.commit()
         logger.info("📦 SQLite Database connected and verified (v4.6.1 Hardened).")
 

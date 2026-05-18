@@ -1,7 +1,7 @@
 # 🏗️ Nifty Trading Bot — Architecture Map
 
-> **Updated**: 2026-05-18 | **Version**: v4.7.0 Hybrid TSL Engine | **Mode**: SIMULATION
-> **Capital**: ₹1,00,000 | **Broker**: Dhan API | **18 Active AI Agents** (24 registered in `agents/`, 5 disabled via Graphify audit + `active_agents` config list)
+> **Updated**: 2026-05-18 | **Version**: v4.7.0 + P0.5/P0.6 Hardened | **Mode**: SIMULATION
+> **Capital**: ₹1,00,000 | **Broker**: Dhan API | **18 Active AI Agents**
 
 > [!CAUTION]
 > This system controls REAL MONEY in LIVE mode. Every modification to 🚨 Critical files
@@ -50,6 +50,9 @@ nifty-ai-system/                       # Root (1,120 lines main.py)
 │   ├── slippage_model.py             # 378 lines — cost/slippage modeling
 │   ├── gap_penalty_manager.py        # 218 lines — ATR-normalised gap decay
 │   ├── log_observer.py               # 199 lines — intraday intelligence
+│   ├── oms.py                         # P0.3 — Persistent OMS state machine (WAL, event-sourced)
+│   ├── economics.py                   # P0.5 — CostEngine: exact net P&L (STT, brokerage, GST, etc.)
+│   ├── snapshot.py                    # P0.6 — Decision snapshot writer (SHA-256 fingerprinting)
 │   ├── system_fingerprint.py         # 98 lines — runtime state snapshot for replay
 │   └── ... (16 more core modules)
 ├── models/                            # Data models
@@ -71,7 +74,9 @@ nifty-ai-system/                       # Root (1,120 lines main.py)
 ├── data/                              # Runtime: logs, DB, state files
 ├── dhan_client.py                    # 197 lines — broker singleton (sim-guarded)
 ├── options_analyzer.py               # 308 lines — OI/PCR/max-pain filter
-├── main.py                           # 1,120 lines — system orchestrator
+├── main.py                           # ~1,465 lines — system orchestrator
+├── replay.py                         # P0.6 — Deterministic replay CLI
+├── watchdog.py                       # P0.3 — Independent risk supervisor
 ├── Dockerfile                        # Python 3.11-slim, IST timezone
 └── docker-compose.yml                # Healthcheck, volume mounts, restart:always
 ```
@@ -89,13 +94,19 @@ flowchart TD
     C --> D["Signal Quality Grader\n(core/signal_quality.py)"]
     D --> E["10-Gate Trade Filter\n(core/trade_filter.py)"]
     E --> F["Options Hard Filter\n(options_analyzer.py)"]
-    F --> G["Master Decision Engine\n(core/master_decision_engine.py)"]
-    G --> H["Position Manager\n(core/position_manager.py)"]
+    F --> SNAP["📸 Decision Snapshot\n(core/snapshot.py)"]
+    SNAP --> G["Master Decision Engine\n(core/master_decision_engine.py)"]
+    SNAP --> REJECT["Shadow Journal\n(rejected signals → DB)"]
+    G --> OMS["OMS Intent\n(core/oms.py)"]
+    OMS --> H["Position Manager\n(core/position_manager.py)"]
+    H --> COST["Cost Engine\n(core/economics.py)"]
+    COST --> DB[("trading_v4.db\ntrade_economics")]
     H --> I["Dhan Broker API\n(dhan_client.py)"]
     G --> J["Telegram Alert\n(core/telegram_controller.py)"]
     G --> K["LogObserver Agent\n(core/log_observer.py)"]
     C --> L["Threshold Tuner\n(core/threshold_tuner.py)"]
     C --> M["Gap Penalty Manager\n(core/gap_penalty_manager.py)"]
+    WD["Watchdog\n(watchdog.py)"] -.->|Supervisor| H
 
     style A fill:#1a1a2e,color:#e0e0ff
     style G fill:#8b0000,color:#fff
@@ -104,6 +115,10 @@ flowchart TD
     style K fill:#2e8b57,color:#fff
     style L fill:#4a148c,color:#fff
     style M fill:#4a148c,color:#fff
+    style SNAP fill:#0d47a1,color:#fff
+    style OMS fill:#e65100,color:#fff
+    style COST fill:#1b5e20,color:#fff
+    style WD fill:#4a0000,color:#fff
 ```
 
 ### Data Flow (Real File Names)
@@ -666,110 +681,110 @@ Track with the **Log Observer**:
 
 ---
 
-## 🔮 Next Frontier (Post Burn-In)
+## 🏆 Engine Maturity Matrix (as of P0.6)
 
-Once the burn-in passes, the system transitions from **documentation quality** to **runtime quality**. The remaining frontier:
+| Layer | Status | Files |
+|-------|--------|-------|
+| Signal Generation | ✅ Advanced | `decision_engine_v3.py`, `agents/*.py` |
+| Execution Realism | ✅ Strong | `position_manager.py`, `options_resolver.py` |
+| OMS Lifecycle | ✅ Strong | `core/oms.py`, `trading_v4.db:orders` |
+| Watchdog Supervision | ✅ Strong | `watchdog.py` |
+| Crash Recovery | ✅ Strong Foundation | `_reconcile_broker_positions()` |
+| Event-Sourced Economics | ✅ Strong | `core/economics.py`, `trading_v4.db:trade_economics` |
+| Execution Telemetry | ✅ Strong | `OpenPosition` execution metrics fields |
+| Audit / Version Lineage | ✅ Strong | OMS `order_events` payloads |
+| Decision Snapshots | ✅ Strong | `core/snapshot.py`, `trading_v4.db:decision_snapshots` |
+| Deterministic Replay | ✅ Strong | `replay.py` CLI (show, latest, date, verify, regression, simulate) |
+| Shadow Journal (Rejected Signals) | ✅ Strong | Saved alongside approved snapshots |
+| Replay Integrity Validation | ✅ Strong | SHA-256 recompute + MATCH/DRIFT/INVALID/VERSION_MISMATCH classification |
+| Replay Sandbox Mode | ✅ Strong | `replay.py simulate` — threshold drift detection |
+| Analytics Intelligence Layer | ✅ Strong | `analytics.py` — all 5 analyses implemented |
+| Meta-Learning / ML | ⛔ Not Yet | Requires 50+ trades + P1 statistical confidence |
 
-### 1. Startup Topology Validation
-The system now has **4 layers** of boot-time integrity checks:
-- ✅ **Agent count assertion** (`EXPECTED_ACTIVE_AGENT_COUNT = 18`) — `AssertionError` if count drifts
-- ✅ **Phase routing integrity** — `RuntimeError` if phase lists reference agents not in `active_agents` (**fail-fast**)
-- ✅ **Duplicate agent detection** — `RuntimeError` if same agent appears in multiple phases (**fail-fast**)
-- ✅ **Unrouted agent detection** — `RuntimeError` if agents loaded but not routed to any phase (**fail-fast**)
+---
+
+## 🔮 Next Frontier (P1 — Analytics Intelligence)
+
+✅ **IMPLEMENTED** — `analytics.py` provides all 5 analysis types. Requires 50+ closed trades for statistical significance.
+
+| Feature | Status | Command |
+|---------|--------|---------|
+| Rejected signal expectancy | ✅ Done | `python analytics.py expectancy --by regime` |
+| Regime-bucketed expectancy | ✅ Done | `python analytics.py expectancy --by regime` |
+| MFE/MAE trade path analytics | ✅ Done | `python analytics.py mfe-mae` |
+| Spread bucket analytics | ✅ Done | `python analytics.py expectancy --by spread_bucket` |
+| Execution quality scoring | ✅ Done | `python analytics.py execution` |
+| Agent contribution scoring | ✅ Done | `python analytics.py agents` |
+| Daily summary | ✅ Done | `python analytics.py summary` |
+
+**Only after 50+ closed trades with statistically significant edge** should P2 (adaptive ML/meta-learning) begin.
+
+---
+
+## 🛠️ Replay CLI Reference
+
+```bash
+# Replay and verify a specific decision (shows integrity check)
+python replay.py show --snapshot-id SNAP_20260518_101530_123456
+
+# Replay last 5 decisions
+python replay.py latest --n 5
+
+# All decisions on a date
+python replay.py date --date 2026-05-18
+
+# Only rejected signals on a date (Shadow Journal)
+python replay.py date --date 2026-05-18 --decision REJECTED
+
+# Integrity audit: recompute all hashes (detects corruption/serialization drift)
+python replay.py verify --last-n 500
+
+# Verify a single snapshot
+python replay.py verify --snapshot-id SNAP_20260518_101530_123456
+
+# Regression summary: decision distribution + grade/regime breakdown
+python replay.py regression --last-n 100
+
+# Sandbox: detect threshold drift between stored and current engine
+python replay.py simulate --snapshot-id SNAP_20260518_101530_123456
+```
+
+Outcome classifications: `MATCH` / `DRIFT` / `PARTIAL_DRIFT` / `INVALID` / `VERSION_MISMATCH`
+
+Replay uses **only frozen snapshot data** — never current market state or config.
+
+---
+
+## 📊 Analytics CLI Reference
+
+```bash
+# Full intelligence summary (P&L, counts, cost summary)
+python analytics.py summary
+
+# Rejected vs accepted expectancy by regime
+python analytics.py expectancy --by regime
+
+# Expectancy by spread bucket (detects spread-drag erosion)
+python analytics.py expectancy --by spread_bucket
+
+# Expectancy by signal grade (validates grading system)
+python analytics.py expectancy --by grade
+
+# Expectancy by hour (detects time-of-day edge patterns)
+python analytics.py expectancy --by hour
+
+# MFE/MAE trade path analytics (exit efficiency, TSL quality)
+python analytics.py mfe-mae
+
+# Execution quality scoring (spread + slippage + quote freshness)
+python analytics.py execution
+
+# Agent contribution analysis (correlation: win score vs loss score)
+python analytics.py agents
+```
 
 > [!NOTE]
-> Orphaned phase refs and duplicate registrations now **hard-fail startup** (`RuntimeError`), not just warn. Trading systems should prefer "fail closed" over "run partially broken" — especially around execution topology that affects confluence math.
+> All analytics commands are read-only queries against `trading_v4.db`.
+> They can be run while the engine is live without any interference.
 
-Remaining TODO:
-- Assert no unexpected agent modules in `sys.modules` (scan for `agents.*`)
-
-### 2. Runtime Snapshot Fingerprinting
-**Status: ✅ IMPLEMENTED** in `core/system_fingerprint.py` (98 lines)
-
-Every signal now carries a `metadata["fingerprint"]` containing:
-- Active agent count and config hash (SHA-256 of weights + thresholds)
-- Current regime classification and gap penalty state
-- Adaptive threshold values at decision time
-- System mode (`SIMULATION` / `SMALL_CAPITAL` / `SCALED`)
-
-The config hash enables **regression detection**: if the hash changes between burn-in sessions, the system configuration has drifted. The fingerprint is captured with a 1-second cache TTL to avoid recomputing every cycle.
-
-Next step: attach fingerprint to gate rejection logs (currently only on approved signals).
-
-### 3. Incident Replay Capability
-With fingerprinting in place, the remaining pieces for full deterministic replay are:
-- Snapshot signal inputs (OHLCV + snapshot state) per cycle
-- Snapshot agent outputs (direction, confidence, details)
-- Snapshot gate decisions (which gates passed/failed and why)
-- Snapshot adaptive thresholds (tuner state at decision time)
-- Snapshot regime state and gap penalty state
-
-This allows any trade to be replayed exactly as it happened, which becomes critical once adaptive thresholds and dynamic routing make the system non-deterministic across runs.
-- **Status**: Not implemented. Priority increases once live capital is deployed.
-
-### 3. Regime Stability Diagnostics
-Expand regime monitoring beyond simple classification into stability metrics:
-
-| Metric | Purpose |
-|--------|---------|
-| Regime persistence (% consecutive candles same) | Detect classifier oscillation |
-| Regime transition frequency (transitions/hour) | Detect over-sensitivity |
-| Average regime duration (minutes) | Detect unstable classifier |
-| Trade expectancy grouped by regime stability | Detect noisy routing |
-
-### 4. Regime-Adaptive Uncertainty Interpretation
-**Status:** Not implemented. Next architectural frontier after burn-in completes.
-
-The current signal gates use **global thresholds** (e.g., `MIN_ONESIDED_PROB = 0.25`) regardless of market regime. This works as a first correction but is fundamentally incomplete — the same signal topology means different things in different regimes:
-
-| Regime | One-Sided Dominance | High Disagreement |
-|--------|--------------------|--------------------|
-| **Trend** | GOOD — directional conviction | Acceptable — price discovery |
-| **Mean Reversion** | SUSPICIOUS — potential trap | Normal — regime uncertainty |
-| **Gap Expansion** | Expected — momentum phase | Acceptable — settlement |
-| **Low Vol Chop** | Noise — no real edge | NOISE — reject aggressively |
-
-Implementation approach:
-- Read regime classification from `regime` agent output
-- Multiply gate thresholds by a regime-specific scaling factor
-- Trending regime → relax one-sided gates, tighten disagreement gates
-- Choppy regime → tighten all gates (current behavior)
-- This is where **institutional-quality signal arbitration** emerges
-
-### 5. Live Calibration Record (2026-05-11)
-**Status:** ✅ IMPLEMENTED — Awaiting 3-day burn-in validation.
-
-Recalibrated all scoring gates from simulated-data assumptions to live-market behavior:
-
-| Parameter | Old Value | New Value | File |
-|-----------|-----------|-----------|------|
-| Early Kill threshold | 0.35 | **0.25** | `decision_engine_v3.py:461` |
-| One-Sided Prob floor | 0.35 | **0.25** | `decision_engine_v3.py:547` |
-| Prob cap → C | < 0.35 | **< 0.30** | `signal_quality.py:171` |
-| Prob cap → B | < 0.45 | **< 0.38** | `signal_quality.py:174` |
-| Prob cap → B+ | < 0.55 | **< 0.48** | `signal_quality.py:177` |
-| min_grade_to_trade | B+ | **B** | `settings.py:169` |
-| Gap decay constant | 0.025 | **0.040** | `gap_penalty_manager.py:42` |
-| Opening gap session | < 0.85 | **< 0.80** | `decision_engine_v3.py:323` |
-| Regime cache TTL | 60s | **90s** | `decision_engine_v3.py:260` |
-| Structure cache TTL | 30s | **45s** | `decision_engine_v3.py:261` |
-
-> [!WARNING]
-> **V4 BURN-IN COMMENCED (2026-05-11):**
-> Burn-in validation was reset because the simulation engine transitioned from Spot Nifty index price ("synthetic futures") to **live option premiums**. Win rates, PnL, and expectancy metrics are now tracking non-linear option mechanics (bid/ask spreads, premium decay). All metrics must be proven under these realistic execution constraints before capital deployment.
-
-### 6. Execution Realism Phase
-**Status:** ✅ Phase A Complete (Plumbing & Simulation Realism) — Phase B (Delta/IV Alpha) pending.
-
-The AI intelligence layer generates high-validity directional signals, which are now correctly routed through an execution abstraction layer.
-
-**The Implementation Bridge:**
-1. **Instrument Resolution (`core/options_resolver.py`):** The engine uses `OptionContractBuilder` to dynamically convert a `BUY_CE` signal into a concrete instrument (e.g., `NIFTY 24400 CE`) completely separate from the decision engine.
-2. **Premium Pricing (`models/signals.py OptionQuote`):** Sizing and executions utilize the specific option's live premium (LTP, Bid, Ask) fetched from the broker API via `DataManager.fetch_option_quote()`. Sizing is calculated dynamically based on premium risk, not Spot points.
-3. **Non-Linear Simulation (`core/simulation_engine.py`):** The simulator tracks the option's actual premium movement to record PnL. **Entry fills use the Ask price, and Exit fills use the Bid price**, enforcing realistic spread mechanics and punishing illiquid strike selections.
-
-*Phase B will focus on Delta-aware strike selection (e.g. using ATM vs OTM based on Signal Quality).*
-> - Grade distribution shows B+ is achievable (≥ 30% of signals)
->
-> Bad trades poison adaptive systems. More trades ≠ better calibration.
-
+---

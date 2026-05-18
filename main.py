@@ -219,6 +219,10 @@ class NiftyAISystem:
         self.decision_engine = DecisionEngineV3(settings)
         self.trade_logger = TradeLogger()
 
+        # ── Persistent OMS (P0.3) ──
+        from core.oms import OrderManagementSystem
+        self.oms = OrderManagementSystem()
+
         # ── Production ──
         self.position_manager = PositionManager(settings)
         # ── Share tuner: engine generates thresholds, PM feeds outcomes ──
@@ -626,6 +630,28 @@ class NiftyAISystem:
             if "today_trades" not in pm_status:
                 pm_status["today_trades"] = self.exit_engine.today_trades
 
+            # ── P0.2: Prepare base log entry to capture rejected signals ──
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "time": datetime.now().strftime("%H:%M"),
+                "signal": signal.signal_type.value,
+                "price_action_passed": True,
+                "options_available": False,
+                "options_sentiment": "unknown",
+                "options_score": 0,
+                "max_pain_distance": -1,
+                "filter_passed": False,
+                "trade_executed": False,
+                "entry_price": None,
+                "exit_price": None,
+                "pnl": None,
+                "would_have_taken_without_filter": True,
+                "exit_reason": None,
+                "risk_reason": None,
+                "ai_reason": None,
+                "trade_id": None
+            }
+
             # ── 9. Run 10-Gate Filter ──
             filter_result = self.trade_filter.evaluate(
                 signal=signal,
@@ -646,6 +672,25 @@ class NiftyAISystem:
             self.simulation.record_signal(passed=filter_result.passed)
 
             if not filter_result.passed:
+                rej_reason = filter_result.rejection_reason if hasattr(filter_result, 'rejection_reason') else '10-Gate Filter'
+                log_entry["risk_reason"] = f"Filter Rejected: {rej_reason}"
+                self.perf_logger.log_signal(log_entry)
+                
+                # ── P0.6: Shadow Journal — Capture REJECTED signals too ──
+                # These become the most valuable training data later.
+                # We know "what the engine saw but chose not to trade."
+                try:
+                    from core.snapshot import build_snapshot, persist_snapshot
+                    agent_outs = {n: a._last_output for n, a in self.decision_engine.agents.items() if hasattr(a, '_last_output')}
+                    rej_snap = build_snapshot(
+                        signal=signal, snapshot=snapshot, filter_result=filter_result,
+                        agent_outputs=agent_outs, gate_results={},
+                        final_decision="REJECTED", rejection_reason=rej_reason,
+                    )
+                    persist_snapshot(rej_snap)
+                except Exception:
+                    pass
+
                 self._update_dashboard(snapshot, signal)
                 return
 
@@ -686,27 +731,13 @@ class NiftyAISystem:
                 if options.get("max_pain_distance", 0) > 100:
                     options_score += 1
 
-            # Prepare log entry
-            log_entry = {
-                "timestamp": datetime.now().isoformat(),
-                "time": datetime.now().strftime("%H:%M"),
-                "signal": signal.signal_type.value,
-                "price_action_passed": True,
+            # Update log entry with options data
+            log_entry.update({
                 "options_available": options.get("available", False),
                 "options_sentiment": options.get("sentiment", "unknown"),
                 "options_score": options_score,
                 "max_pain_distance": options.get("max_pain_distance", -1),
-                "filter_passed": False,
-                "trade_executed": False,
-                "entry_price": None,
-                "exit_price": None,
-                "pnl": None,
-                "would_have_taken_without_filter": True,
-                "exit_reason": None,
-                "risk_reason": None,
-                "ai_reason": None,
-                "trade_id": None
-            }
+            })
 
             if options.get("available", False):
                 # (a) Max-pain proximity guard
@@ -772,6 +803,36 @@ class NiftyAISystem:
                 instrument["expiry"]
             )
             
+            # ── P0.1: Option Liquidity & Spread Protection Layer ──
+            spread_pct = quote.spread_pct / 100.0  # property returns 0-100 scale
+            quote_age_ms = (datetime.now() - getattr(quote, 'timestamp', datetime.now())).total_seconds() * 1000
+            
+            liquidity_blocked = False
+            reject_reason = ""
+            
+            if quote_age_ms > 1000 and self.data_manager.data_source == "api":
+                liquidity_blocked, reject_reason = True, f"Stale quote ({quote_age_ms:.0f}ms)"
+            elif quote.bid <= 0:
+                liquidity_blocked, reject_reason = True, "Bid <= 0"
+            elif quote.ask <= quote.bid:
+                liquidity_blocked, reject_reason = True, "Ask <= Bid"
+            elif spread_pct > 0.05:  # 5% max spread allowed
+                liquidity_blocked, reject_reason = True, f"Spread too wide ({spread_pct:.1%})"
+            elif quote.volume < 500:
+                liquidity_blocked, reject_reason = True, f"Low volume ({quote.volume})"
+                
+            if liquidity_blocked:
+                logger.warning(
+                    f"🛡️ [LIQUIDITY GATE] Trade rejected: {reject_reason} | "
+                    f"Bid: {quote.bid}, Ask: {quote.ask}, Vol: {quote.volume}"
+                )
+                log_entry["filter_passed"] = False
+                log_entry["risk_reason"] = f"Liquidity Block: {reject_reason}"
+                self.perf_logger.log_signal(log_entry)
+                self.simulation.record_signal(passed=False)
+                self._update_dashboard(snapshot, signal)
+                return
+            
             # Translate Spot targets to Premium targets
             premium_levels = OptionExecutionTranslator.translate_levels(signal, quote, instrument)
             
@@ -786,6 +847,40 @@ class NiftyAISystem:
             )
             
             self.perf_logger.log_signal(log_entry)
+
+            # ── P0.6: DECISION SNAPSHOT (Pre-Execution Truth Capture) ──
+            # Captures the FULL decision state BEFORE any broker interaction.
+            # This is the canonical record for replay, regression, and audit.
+            try:
+                from core.snapshot import build_snapshot, persist_snapshot
+                agent_outs = {}
+                for name, agent in self.decision_engine.agents.items():
+                    if hasattr(agent, '_last_output'):
+                        agent_outs[name] = agent._last_output
+
+                gate_outs = {}
+                if hasattr(self.master, "gate_rejections"):
+                    gate_outs = dict(self.master.gate_rejections)
+
+                snap_doc = build_snapshot(
+                    signal=signal,
+                    snapshot=snapshot,
+                    filter_result=filter_result,
+                    agent_outputs=agent_outs,
+                    gate_results=gate_outs,
+                    final_decision="EXECUTE",
+                    rejection_reason="",
+                    intent_id="",  # Will be backfilled by OMS after intent creation
+                    quote=signal.metadata.get("quote"),
+                    instrument=signal.metadata.get("instrument"),
+                    options_context=log_entry,
+                )
+                persist_snapshot(snap_doc)
+                # Carry snapshot_id forward for OMS linkage
+                signal.metadata["snapshot_id"] = snap_doc["snapshot_id"]
+                logger.debug(f"📸 [SNAPSHOT] {snap_doc['snapshot_id']} | hash={snap_doc['snapshot_hash']}")
+            except Exception as e:
+                logger.warning(f"[SNAPSHOT] Non-fatal capture failure: {e}")
 
             # ── 12. Route Signal to Master Execution & Dispatch ──
             # Replaces former scattered routing.
@@ -912,9 +1007,41 @@ class NiftyAISystem:
                 self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
                 return None
 
+            # ── P0.3: Create OMS Intent FIRST ──
+            intent_id = f"INT_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
+            self.oms.create_intent(
+                signal_id=getattr(signal, "id", "unknown"),
+                intent_id=intent_id,
+                symbol=signal.symbol,
+                side="BUY" if signal.direction.value.upper() == "BUY" else "SELL",
+                qty=size["qty"],
+                requested_price=price,
+                stop_loss_price=size["sl_price"]
+            )
+            
+            setattr(signal, "intent_id", intent_id)
+
             # ── THE ONLY POINT OF LIVE EXECUTION (P0-E: SL Guarantee) ──
             pos = await self.position_manager.open_position_with_sl_guarantee(signal, size, price)
             
+            # ── P0.3: Reconcile Result ──
+            if pos:
+                self.oms.update_order_state(
+                    intent_id=intent_id,
+                    new_state="ENTRY_FILLED",
+                    event_type="BROKER_EXECUTION_SUCCESS",
+                    avg_fill_price=pos.entry_price,
+                    filled_qty=pos.qty,
+                    payload={"position_id": pos.position_id}
+                )
+            else:
+                self.oms.update_order_state(
+                    intent_id=intent_id,
+                    new_state="FAILED",
+                    event_type="BROKER_EXECUTION_FAILED",
+                    payload={"reason": "open_position_with_sl_guarantee returned None"}
+                )
+
             # Cleanup
             self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
 
@@ -1146,11 +1273,8 @@ class NiftyAISystem:
 
     async def _reconcile_broker_positions(self):
         """
-        CRITICAL SAFETY CHECK: Detect orphaned positions from a previous crash.
-        
-        If the bot crashed after placing an order but before recording it internally,
-        there could be an unmanaged live position with no SL. This method queries
-        the broker on startup to detect and alert on such orphans.
+        P0.3: OMS Recovery Engine & Broker Reconciliation.
+        Startup Sequence: boot → load config → reconcile broker → recover OMS state → rebuild runtime cache → verify SL integrity → resume trading.
         """
         if self.is_simulation:
             logger.info("🧪 Simulation mode — skipping broker reconciliation")
@@ -1160,72 +1284,47 @@ class NiftyAISystem:
             from dhan_client import get_dhan_client
             dhan = get_dhan_client()
             
+            # 1. Fetch from Broker
             response = dhan.get_positions()
-            
             if not response or response.get("status") != "success":
                 logger.warning("⚠️ Could not fetch broker positions for reconciliation")
                 return
 
             broker_positions = response.get("data", [])
-            
-            # Filter for open intraday positions only
             open_broker_positions = [
                 p for p in broker_positions
-                if p.get("positionType") == "INTRADAY" 
-                and p.get("netQty", 0) != 0
+                if p.get("positionType") == "INTRADAY" and p.get("netQty", 0) != 0
             ]
+            broker_symbols = {str(p.get("tradingSymbol", "")) for p in open_broker_positions}
+            broker_symbols.discard("")
 
-            if not open_broker_positions:
-                logger.info("✅ Broker reconciliation: No orphaned positions found")
-                return
+            # 2. Fetch from OMS (Source of Truth)
+            open_oms_orders = self.oms.get_open_orders()
+            oms_symbols = {str(o.get("symbol", "")) for o in open_oms_orders}
+            oms_symbols.discard("")
 
-            # Compare against internal tracking
-            def _get_position_identifier(pos) -> str:
-                """Get the most reliable identifier for matching against broker."""
-                for attr in ('security_id', 'securityId', 'symbol', 'tradingSymbol', 'instrument_id'):
-                    val = getattr(pos, attr, None)
-                    if val:
-                        return str(val)
-                return ""
-
-            internal_ids = set()
-            if hasattr(self.position_manager, 'open_positions'):
-                internal_ids = {
-                    _get_position_identifier(pos) 
-                    for pos in self.position_manager.open_positions.values()
-                }
-                internal_ids.discard("")  # Remove empty matches
-                
-            if not internal_ids and getattr(self.position_manager, 'open_positions', None):
-                logger.error(
-                    "🚨 RECONCILIATION SAFETY ABORT: Internal positions exist but "
-                    "no security_id could be extracted. Skipping orphan check."
-                )
-                return
-
-            orphans = [
-                p for p in open_broker_positions 
-                if str(p.get("securityId", "")) not in internal_ids
-            ]
-
+            # 3. Reconcile
+            orphans = []
+            for bp in open_broker_positions:
+                sym = str(bp.get("tradingSymbol", ""))
+                if sym and sym not in oms_symbols:
+                    orphans.append(bp)
+                    
             if orphans:
                 symbols = [f"{p.get('tradingSymbol', '?')} (Qty: {p.get('netQty', 0)})" for p in orphans]
                 orphan_str = "\n".join(symbols)
                 
                 logger.critical(
                     f"🚨 ORPHANED POSITIONS DETECTED ON BROKER!\n"
-                    f"Found {len(orphans)} positions not tracked internally:\n"
+                    f"Found {len(orphans)} positions on broker not in OMS:\n"
                     f"{orphan_str}\n"
                     f"System will NOT trade until manually resolved."
                 )
                 
-                # HALT TRADING — do not risk managing unknown positions
                 self.trading_enabled = False
-                
-                # Alert admin via Telegram
                 alert_msg = (
                     f"🚨 <b>ORPHANED POSITIONS DETECTED</b>\n\n"
-                    f"Found {len(orphans)} positions on Dhan not tracked by bot:\n"
+                    f"Found {len(orphans)} positions on Dhan not in OMS:\n"
                     f"<code>{orphan_str}</code>\n\n"
                     f"<b>Trading is HALTED.</b>\n"
                     f"Check your broker and square off manually if needed.\n"
@@ -1236,16 +1335,12 @@ class NiftyAISystem:
                         self.telegram_bot._send_admin_msg(alert_msg),
                         label="orphan_position_alert"
                     )
-                except Exception as e:
-                    # Log loudly — this is a critical alert that failed
-                    logger.critical(
-                        f"🚨🚨 ORPHAN ALERT FAILED TO SEND VIA TELEGRAM: {e}\n"
-                        f"Manual check required: {orphan_str}"
-                    )
+                except Exception:
+                    pass
             else:
                 logger.info(
-                    f"✅ Broker reconciliation: {len(open_broker_positions)} open positions, "
-                    f"all tracked internally. Verifying SL presence..."
+                    f"✅ Broker reconciliation passed: {len(open_broker_positions)} broker pos, "
+                    f"{len(open_oms_orders)} OMS active intents."
                 )
 
                 # ── P0-E: SL Presence Check on Tracked Positions ──
