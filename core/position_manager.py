@@ -1362,8 +1362,11 @@ class PositionManager:
                 }
                 
                 if getattr(pos, "intent_id", ""):
+                    import os as _os
+                    _mode = _os.getenv("SYSTEM_MODE", "SIMULATION")
+                    _econ_db = "data/trading_v4_live.db" if _mode != "SIMULATION" else "data/trading_v4_sim.db"
                     CostEngine.save_trade_economics(
-                        db_path=self.config.db_path if hasattr(self.config, "db_path") else "data/trading_v4.db",
+                        db_path=_econ_db,
                         intent_id=pos.intent_id,
                         costs=costs,
                         execution_metrics=exec_metrics

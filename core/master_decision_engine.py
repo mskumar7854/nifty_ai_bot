@@ -126,6 +126,11 @@ class MasterDecisionEngine:
         
         from collections import defaultdict
         self.gate_rejections = defaultdict(int)
+        
+        # ── Log throttle: suppress repetitive steady-state messages ──
+        # key = gate_id, value = last reason logged
+        # A message is only logged again if the REASON changes (e.g. time advances)
+        self._throttled_log: dict = {}
 
     # ── PUBLIC API ────────────────────────────────────────────────
     def approve(
@@ -152,7 +157,7 @@ class MasterDecisionEngine:
         passed: List[str] = []
         now = datetime.now()
 
-        def _block(gate: str, reason: str) -> ApprovalResult:
+        def _block(gate: str, reason: str, throttle: bool = False) -> ApprovalResult:
             self._total_blocks += 1
             self.gate_rejections[gate] += 1
             result = ApprovalResult(
@@ -162,20 +167,59 @@ class MasterDecisionEngine:
                 gates_failed=[gate],
             )
             self._last_result = result
-            logger.warning(f"🚫 [{gate}] {reason}")
+            # Throttled gates only log when the reason changes (prevents log spam)
+            if throttle:
+                if self._throttled_log.get(gate) != reason:
+                    logger.warning(f"🚫 [{gate}] {reason}")
+                    self._throttled_log[gate] = reason
+            else:
+                logger.warning(f"🚫 [{gate}] {reason}")
             return result
 
         def _ok(gate: str):
             passed.append(gate)
 
         # ── G0: Probabilistic Intelligence Gate (2026-04-09) ───────
-        # This is our new 'Intelligence' gate. If the weighted score 
-        # is too low, we stop immediately.
+        # When a CRITICAL or MAJOR gap is active, indicators (EMA, VWAP,
+        # momentum) are contaminated by overnight distortion. We respond by
+        # raising the minimum confidence threshold, NOT by blocking trading
+        # outright. This forces the engine to require stronger conviction
+        # before entering during indicator-contaminated market opens.
         sig_obj = ctx.get("signal_obj")
         score = sig_obj.weighted_score if sig_obj else ctx.get("weighted_score", 1.0)
         
-        if score < MIN_CONFIDENCE:
-            return _block("G0_PROBABILITY", f"Scored {score:.2f} < {MIN_CONFIDENCE} (Insufficient probabilistic edge)")
+        effective_min_confidence = MIN_CONFIDENCE
+        gap_mgr = ctx.get("gap_manager")
+        if gap_mgr is not None:
+            status = gap_mgr.get_status()
+            severity = status.get("severity", "NONE")
+            current_penalty_pct = status.get("current_penalty_pct", 0.0)
+            if severity == "CRITICAL" and current_penalty_pct > 5.0:
+                # CRITICAL gap (>1 ATR): require 25% more confidence
+                # Decays naturally as the gap penalty melts away
+                boost = MIN_CONFIDENCE * 0.25 * (current_penalty_pct / 40.0)
+                effective_min_confidence = round(MIN_CONFIDENCE + boost, 3)
+                logger.debug(
+                    f"[G0] CRITICAL gap active ({current_penalty_pct:.1f}% penalty) — "
+                    f"confidence threshold raised: {MIN_CONFIDENCE:.3f} → {effective_min_confidence:.3f}"
+                )
+            elif severity == "MAJOR" and current_penalty_pct > 10.0:
+                # MAJOR gap (>0.95 ATR): require 15% more confidence
+                boost = MIN_CONFIDENCE * 0.15 * (current_penalty_pct / 30.0)
+                effective_min_confidence = round(MIN_CONFIDENCE + boost, 3)
+                logger.debug(
+                    f"[G0] MAJOR gap active ({current_penalty_pct:.1f}% penalty) — "
+                    f"confidence threshold raised: {MIN_CONFIDENCE:.3f} → {effective_min_confidence:.3f}"
+                )
+
+        if score < effective_min_confidence:
+            return _block(
+                "G0_PROBABILITY",
+                f"Scored {score:.2f} < {effective_min_confidence:.3f} "
+                f"(gap-adjusted threshold, severity={ctx.get('gap_manager', None) and gap_mgr.get_status().get('severity', 'NONE')})"
+                if effective_min_confidence > MIN_CONFIDENCE
+                else f"Scored {score:.2f} < {MIN_CONFIDENCE} (Insufficient probabilistic edge)"
+            )
         _ok("G0_PROBABILITY")
 
         # ── G1: Signal whitelist ──────────────────────────────────
@@ -187,7 +231,12 @@ class MasterDecisionEngine:
         # ── G2: Trading hours ─────────────────────────────────────
         time_ok, time_msg = self._check_trading_hours(now)
         if not time_ok:
-            return _block("G2_HOURS", time_msg)
+            # Throttle: market-close, pre-open, and weekend messages repeat
+            # every single cycle and bury real log events. Log once per message.
+            return _block("G2_HOURS", time_msg, throttle=True)
+        else:
+            # Clear throttle when market reopens so next close logs fresh
+            self._throttled_log.pop("G2_HOURS", None)
         _ok("G2_HOURS")
 
         # ── G3: Core risk_manager kill switch (v4.6.1) ───────────

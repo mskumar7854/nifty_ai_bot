@@ -223,6 +223,22 @@ class NiftyAISystem:
         from core.oms import OrderManagementSystem
         self.oms = OrderManagementSystem()
 
+        # ── DB Identity Assertion ──
+        # OMS and DBManager MUST target the same SQLite file.
+        # A mismatch means the orders table was never initialized in the OMS file,
+        # reconciliation reads from a ghost DB, and replay datasets are fragmented.
+        # This assertion is the canonical protection against future silent divergence.
+        _db_manager_path = self.decision_engine.memory.db.db_path
+        _oms_path = self.oms.db_path
+        if _oms_path != _db_manager_path:
+            raise RuntimeError(
+                f"DB_IDENTITY_MISMATCH: OMS targets '{_oms_path}' but "
+                f"DBManager targets '{_db_manager_path}'. "
+                f"All components must use the same SQLite file. "
+                f"Check SYSTEM_MODE env var and _resolve_db_path() in core/oms.py."
+            )
+        logger.info(f"✅ DB_IDENTITY_VERIFIED — OMS + DBManager → {_oms_path}")
+
         # ── Production ──
         self.position_manager = PositionManager(settings)
         # ── Share tuner: engine generates thresholds, PM feeds outcomes ──
@@ -521,6 +537,7 @@ class NiftyAISystem:
             pre_check = self.master.approve(
                 "BUY_CE",   # signal type doesn't matter for pre-cycle gate
                 context={
+                    "gap_manager": getattr(self.decision_engine, "gap_penalty_manager", None),
                     "discipline_context": {
                         "daily_target_hit": self.exit_engine.daily_target_hit,
                         "consecutive_losses": getattr(self.exit_engine, "consecutive_losses", 0),
@@ -604,6 +621,9 @@ class NiftyAISystem:
             master_result = self.master.approve(
                 signal_type_str,
                 context={
+                    "signal_obj": signal,
+                    "weighted_score": signal.weighted_score,
+                    "gap_manager": getattr(self.decision_engine, "gap_penalty_manager", None),
                     "discipline_context": {
                         "daily_target_hit": self.exit_engine.daily_target_hit,
                         "consecutive_losses": getattr(self.exit_engine, "consecutive_losses", 0),
@@ -682,10 +702,19 @@ class NiftyAISystem:
                 try:
                     from core.snapshot import build_snapshot, persist_snapshot
                     agent_outs = {n: a._last_output for n, a in self.decision_engine.agents.items() if hasattr(a, '_last_output')}
+                    _gap_mgr = getattr(self.decision_engine, "gap_penalty_manager", None)
+                    _gap_status = _gap_mgr.get_status() if _gap_mgr else {}
+                    _gap_ctx = {
+                        "gap_penalty_active": _gap_mgr.is_active() if _gap_mgr else False,
+                        "gap_penalty_multiplier": _gap_status.get("multiplier", 1.0),
+                        "gap_severity":  _gap_status.get("severity", "NONE"),
+                        "gap_points":    _gap_status.get("gap_points", 0.0),
+                    }
                     rej_snap = build_snapshot(
                         signal=signal, snapshot=snapshot, filter_result=filter_result,
                         agent_outputs=agent_outs, gate_results={},
                         final_decision="REJECTED", rejection_reason=rej_reason,
+                        gap_context=_gap_ctx,
                     )
                     persist_snapshot(rej_snap)
                 except Exception:
@@ -862,6 +891,16 @@ class NiftyAISystem:
                 if hasattr(self.master, "gate_rejections"):
                     gate_outs = dict(self.master.gate_rejections)
 
+                # Build gap context: capture the live gap state at this exact moment
+                _gap_mgr = getattr(self.decision_engine, "gap_penalty_manager", None)
+                _gap_status = _gap_mgr.get_status() if _gap_mgr else {}
+                _gap_ctx = {
+                    "gap_penalty_active":    _gap_mgr.is_active() if _gap_mgr else False,
+                    "gap_penalty_multiplier": _gap_status.get("multiplier", 1.0),
+                    "gap_severity":          _gap_status.get("severity", "NONE"),
+                    "gap_points":            _gap_status.get("gap_points", 0.0),
+                }
+
                 snap_doc = build_snapshot(
                     signal=signal,
                     snapshot=snapshot,
@@ -874,6 +913,7 @@ class NiftyAISystem:
                     quote=signal.metadata.get("quote"),
                     instrument=signal.metadata.get("instrument"),
                     options_context=log_entry,
+                    gap_context=_gap_ctx,
                 )
                 persist_snapshot(snap_doc)
                 # Carry snapshot_id forward for OMS linkage

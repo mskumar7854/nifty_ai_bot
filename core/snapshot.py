@@ -31,7 +31,15 @@ logger = logging.getLogger("snapshot")
 SYSTEM_VERSION = "v4.6.1"
 STRATEGY_VERSION = "v3"
 
-DB_PATH = "data/trading_v4.db"
+
+def _resolve_db_path() -> str:
+    """Mirror DBManager and OMS path routing. All three must use the same file."""
+    import os
+    mode = os.getenv("SYSTEM_MODE", "SIMULATION")
+    return "data/trading_v4_live.db" if mode != "SIMULATION" else "data/trading_v4_sim.db"
+
+
+_DB_PATH = _resolve_db_path()  # Evaluated once at import time; consistent per process lifetime.
 
 
 def _normalize_for_hash(d: dict) -> str:
@@ -57,6 +65,8 @@ def build_snapshot(
     quote=None,
     instrument: dict = None,
     options_context: dict = None,
+    gap_context: dict = None,      # NEW (P1): gap penalty state at decision time
+    approval_context: dict = None, # NEW (P1): effective confidence threshold from master gate
 ) -> dict:
     """
     Construct a self-contained, immutable decision snapshot.
@@ -92,6 +102,26 @@ def build_snapshot(
         "options_context": options_context or {},
     }
 
+    # ── Gap penalty context (NEW P1) ──
+    # Captures what the gap penalty was doing at the exact moment of this decision.
+    # This is CRITICAL for replay explainability: without it, a rejected signal
+    # during a CRITICAL gap day cannot be distinguished from a normal-day rejection.
+    _gap_ctx = gap_context or {}
+    gap_penalty_active    = bool(_gap_ctx.get("gap_penalty_active", False))
+    gap_penalty_multiplier = float(_gap_ctx.get("gap_penalty_multiplier", 1.0))
+    gap_severity          = str(_gap_ctx.get("gap_severity", "NONE"))
+    gap_points            = float(_gap_ctx.get("gap_points", 0.0))
+
+    # ── Effective confidence threshold (NEW P1) ──
+    # Captures what threshold was actually used by G0 (may be > MIN_CONFIDENCE on gap days).
+    # Without this field, replaying a gap-day snapshot against the current engine
+    # could not distinguish "failed standard threshold" from "failed gap-adjusted threshold".
+    _approval_ctx = approval_context or {}
+    effective_confidence_threshold = float(
+        _approval_ctx.get("effective_min_confidence",
+        _approval_ctx.get("confidence_min", getattr(filter_result, "confidence_min", 0.0) or 0.0))
+    )
+
     body = {
         "timestamp": ts,
         "signal_id": str(getattr(signal, "id", "")),
@@ -121,6 +151,12 @@ def build_snapshot(
         "market_context_json": market_context,
         "final_decision": final_decision,
         "rejection_reason": rejection_reason,
+        # ── P1: Decision causality fields ──
+        "effective_confidence_threshold": effective_confidence_threshold,
+        "gap_penalty_active": gap_penalty_active,
+        "gap_penalty_multiplier": gap_penalty_multiplier,
+        "gap_severity": gap_severity,
+        "gap_points": gap_points,
         "system_version": SYSTEM_VERSION,
         "strategy_version": STRATEGY_VERSION,
     }
@@ -134,13 +170,27 @@ def build_snapshot(
     }
 
 
-def persist_snapshot(snap: dict, db_path: str = DB_PATH) -> bool:
+def persist_snapshot(snap: dict, db_path: str = None) -> bool:
     """Write the snapshot to SQLite. Non-blocking, non-fatal."""
+    db_path = db_path or _DB_PATH
     try:
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")  # Performance: snapshots can afford async durability
+        conn.execute("PRAGMA synchronous=NORMAL;")  # Snapshots can afford async durability
         with conn:
+            # Schema migration: add P1 causality columns to existing DBs
+            for col, col_type in [
+                ("effective_confidence_threshold", "REAL DEFAULT 0.0"),
+                ("gap_penalty_active",             "INTEGER DEFAULT 0"),
+                ("gap_penalty_multiplier",          "REAL DEFAULT 1.0"),
+                ("gap_severity",                    "TEXT DEFAULT 'NONE'"),
+                ("gap_points",                      "REAL DEFAULT 0.0"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE decision_snapshots ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass  # Column already exists
+
             conn.execute(
                 """
                 INSERT OR IGNORE INTO decision_snapshots (
@@ -152,6 +202,8 @@ def persist_snapshot(snap: dict, db_path: str = DB_PATH) -> bool:
                     threshold_snapshot_json, agent_outputs_json, gate_results_json,
                     filter_stats_json, market_context_json,
                     final_decision, rejection_reason,
+                    effective_confidence_threshold, gap_penalty_active,
+                    gap_penalty_multiplier, gap_severity, gap_points,
                     system_version, strategy_version
                 ) VALUES (
                     ?, ?, ?,
@@ -162,6 +214,7 @@ def persist_snapshot(snap: dict, db_path: str = DB_PATH) -> bool:
                     ?, ?, ?,
                     ?, ?,
                     ?, ?,
+                    ?, ?, ?, ?, ?,
                     ?, ?
                 )
                 """,
@@ -179,6 +232,11 @@ def persist_snapshot(snap: dict, db_path: str = DB_PATH) -> bool:
                     json.dumps(snap["filter_stats_json"], default=str),
                     json.dumps(snap["market_context_json"], default=str),
                     snap["final_decision"], snap["rejection_reason"],
+                    snap.get("effective_confidence_threshold", 0.0),
+                    int(snap.get("gap_penalty_active", False)),
+                    snap.get("gap_penalty_multiplier", 1.0),
+                    snap.get("gap_severity", "NONE"),
+                    snap.get("gap_points", 0.0),
                     snap["system_version"], snap["strategy_version"],
                 ),
             )

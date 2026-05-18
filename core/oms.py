@@ -6,13 +6,30 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger("oms")
 
+
+def _resolve_db_path() -> str:
+    """
+    Resolve the canonical DB path matching DBManager's mode-aware routing.
+    OMS MUST use the same file as DBManager — they share the same schema.
+    
+    DBManager uses:
+      data/trading_v4_live.db  when SYSTEM_MODE != SIMULATION
+      data/trading_v4_sim.db   otherwise
+    """
+    import os
+    mode = os.getenv("SYSTEM_MODE", "SIMULATION")
+    return "data/trading_v4_live.db" if mode != "SIMULATION" else "data/trading_v4_sim.db"
+
+
 class OrderManagementSystem:
     """
     Persistent Order State Machine (OMS).
     Manages the lifecycle of an order to prevent in-memory state loss.
     """
-    def __init__(self, db_path: str = "data/trading_v4.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        # If caller provides a path, use it. Otherwise resolve from SYSTEM_MODE env.
+        # This ensures OMS always targets the SAME file as DBManager.
+        self.db_path = db_path or _resolve_db_path()
         
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path)

@@ -1,6 +1,6 @@
 # 🏗️ Nifty Trading Bot — Architecture Map
 
-> **Updated**: 2026-05-18 | **Version**: v4.7.0 + P0.5/P0.6 Hardened | **Mode**: SIMULATION
+> **Updated**: 2026-05-18 | **Version**: v4.8.0 — DB Identity Hardened | **Mode**: SMALL_CAPITAL
 > **Capital**: ₹1,00,000 | **Broker**: Dhan API | **18 Active AI Agents**
 
 > [!CAUTION]
@@ -525,12 +525,37 @@ flowchart LR
 - **File**: [settings.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/config/settings.py) — `InstrumentConfig` dataclass
 - **Fix**: Security IDs in `InstrumentConfig.security_id_map`. Overridable via env vars `NIFTY_SECURITY_ID` and `BANKNIFTY_SECURITY_ID`.
 
-### 11. ⚠️ PARTIAL — Simulated OI/Greeks Data in Live Mode
+### 11. ✅ FIXED — OMS / DBManager DB Path Mismatch (2026-05-18)
+- **File**: [core/oms.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/oms.py)
+- **Root Cause**: `OMS` defaulted to `data/trading_v4.db` (hardcoded), but `DBManager` routes to `data/trading_v4_sim.db` or `data/trading_v4_live.db` based on `SYSTEM_MODE`. The `orders` table **was never initialized** in the OMS's DB file because `DBManager.initialize()` ran on a different path. Result: `Failed to fetch open orders: no such table: orders`.
+- **Fix**: `OMS.__init__` now calls `_resolve_db_path()` which mirrors `DBManager`'s `SYSTEM_MODE` routing. OMS and DBManager now always target the same file.
+
+### 12. ✅ FIXED — Market-Close Log Spam (2026-05-18)
+- **File**: [core/master_decision_engine.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/master_decision_engine.py)
+- **Root Cause**: `_check_trading_hours()` returned a rejection reason every cycle after 15:20, and `_block(G2_HOURS, ...)` logged it unconditionally. After close, this generated thousands of identical log lines per hour, burying real events.
+- **Fix**: `_block()` now accepts a `throttle=True` flag. When throttled, it only logs if the `reason` string changes from the previous log for that gate. The `G2_HOURS` gate uses `throttle=True` — so "Market closing buffer" logs exactly **once** per session transition.
+
+### 13. ✅ FIXED — Gap Severity Not Affecting Confidence Gate (2026-05-18)
+- **File**: [core/master_decision_engine.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/master_decision_engine.py) + [main.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/main.py)
+- **Root Cause**: Despite `GapPenaltyManager` correctly detecting CRITICAL (177pt) gaps, the confidence gate (G0) used a static `MIN_CONFIDENCE` threshold regardless. Gap severity only affected score scaling, not the entry bar.
+- **Fix**: G0 now reads `gap_manager.get_status()` from the approval `context`. On CRITICAL gap (>40% initial penalty): threshold raised by up to **25%**. On MAJOR gap (>10% current penalty): up to **15%**. The boost is proportional to remaining penalty and decays naturally as the gap penalty melts — so the entry bar automatically normalises by ~10:15 AM with no manual intervention needed.
+
+### 14. ✅ FIXED — CostEngine DB Path Mismatch (2026-05-18)
+- **File**: [core/position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (line 1364)
+- **Root Cause**: `CostEngine.save_trade_economics()` was called with a fallback of `self.config.db_path if hasattr(...) else "data/trading_v4.db"`. Since `PositionConfig` has no `db_path` field, this always silently resolved to the hardcoded `data/trading_v4.db` — a **third different DB file**, causing `trade_economics` records to be written to a file that was never schema-initialized. This was the same class of bug as the OMS path mismatch.
+- **Fix**: Replaced with the same `SYSTEM_MODE`-aware inline resolution: `data/trading_v4_live.db` or `data/trading_v4_sim.db`. All three components (DBManager, OMS, CostEngine) now write to the **exact same path**.
+
+### 15. ✅ FIXED — DB Identity Assertion Startup Guard (2026-05-18)
+- **File**: [main.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/main.py) (`NiftyAISystem.__init__`)
+- **What it does**: At every startup, `__init__` asserts that `OMS.db_path == DBManager.db_path`. If they diverge (e.g. due to a future env var misconfiguration or code change), the system raises `RuntimeError: DB_IDENTITY_MISMATCH` before any market data is fetched. This converts a silent, hard-to-diagnose state fragmentation bug into an immediate, loud startup failure.
+- **Validation**: Running `python -c "from core.oms import _resolve_db_path as o; from core.snapshot import _resolve_db_path as s; print(o() == s())"` returns `True` across SIMULATION and SMALL_CAPITAL/LIVE modes.
+
+### 16. ⚠️ PARTIAL — Simulated OI/Greeks Data in Live Mode
 - **File**: [data_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/data_manager.py)
 - **Current State**: Real OI ✅ ACTIVE when `DATA_SOURCE=api`. `DataSource.SIMULATED` flag set on fallback. Agents abstain in LIVE mode when data is simulated.
 - **Remaining Gap**: Greeks/VIX data still simulated. Abstaining means weaker decisions (missing context), not wrong decisions.
 
-### 12. ⚠️ PARTIAL — Simulation Bias — Execution Reality Untested
+### 17. ⚠️ PARTIAL — Simulation Bias — Execution Reality Untested
 - **Severity**: Medium (invisible until live)
 - **Mitigated by**: ±0.3% slippage simulation, SL/target adjustment relative to fill price, cost modeling via `SlippageModel` (378 lines)
 - **Still untested**: Real API latency (200-500ms), partial fills, Dhan rejection handling, option spread widening during volatility
