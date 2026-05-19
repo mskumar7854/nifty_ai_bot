@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time
 from typing import List, Optional, Tuple, Any
 from config.signal_weights import MIN_CONFIDENCE, MIN_DIRECTION_GAP
+from core.state_tracker import StateTracker
 
 logger = logging.getLogger("master_decision")
 
@@ -74,7 +75,7 @@ class ApprovalResult:
     def __str__(self):
         icon = "✅" if self.approved else "❌"
         return (
-            f"{icon} MasterDecision: {'APPROVED' if self.approved else 'BLOCKED'} | "
+            f"{icon} Trade Environment: {'VALID' if self.approved else 'BLOCKED'} | "
             f"{self.reason}"
         )
 
@@ -131,6 +132,8 @@ class MasterDecisionEngine:
         # key = gate_id, value = last reason logged
         # A message is only logged again if the REASON changes (e.g. time advances)
         self._throttled_log: dict = {}
+        
+        self.state_tracker = StateTracker()
 
     # ── PUBLIC API ────────────────────────────────────────────────
     def approve(
@@ -167,59 +170,31 @@ class MasterDecisionEngine:
                 gates_failed=[gate],
             )
             self._last_result = result
-            # Throttled gates only log when the reason changes (prevents log spam)
+            # Throttled gates log when the reason changes OR once per minute
             if throttle:
-                if self._throttled_log.get(gate) != reason:
-                    logger.warning(f"🚫 [{gate}] {reason}")
-                    self._throttled_log[gate] = reason
-            else:
-                logger.warning(f"🚫 [{gate}] {reason}")
+                last_entry = self._throttled_log.get(gate)
+                if isinstance(last_entry, tuple):
+                    last_reason, last_time = last_entry
+                else:
+                    # Migration from old string-only format
+                    last_reason, last_time = last_entry, datetime.min
+
+                if last_reason != reason or (now - last_time).total_seconds() >= 60:
+                    # Rely on state tracker for state transitions instead of raw warning spam
+                    self._throttled_log[gate] = (reason, now)
+            
+            # Delegate to state tracker
+            self.state_tracker.track_environment(False, reason=f"[{gate}] {reason}")
             return result
 
         def _ok(gate: str):
             passed.append(gate)
 
-        # ── G0: Probabilistic Intelligence Gate (2026-04-09) ───────
-        # When a CRITICAL or MAJOR gap is active, indicators (EMA, VWAP,
-        # momentum) are contaminated by overnight distortion. We respond by
-        # raising the minimum confidence threshold, NOT by blocking trading
-        # outright. This forces the engine to require stronger conviction
-        # before entering during indicator-contaminated market opens.
-        sig_obj = ctx.get("signal_obj")
-        score = sig_obj.weighted_score if sig_obj else ctx.get("weighted_score", 1.0)
-        
-        effective_min_confidence = MIN_CONFIDENCE
-        gap_mgr = ctx.get("gap_manager")
-        if gap_mgr is not None:
-            status = gap_mgr.get_status()
-            severity = status.get("severity", "NONE")
-            current_penalty_pct = status.get("current_penalty_pct", 0.0)
-            if severity == "CRITICAL" and current_penalty_pct > 5.0:
-                # CRITICAL gap (>1 ATR): require 25% more confidence
-                # Decays naturally as the gap penalty melts away
-                boost = MIN_CONFIDENCE * 0.25 * (current_penalty_pct / 40.0)
-                effective_min_confidence = round(MIN_CONFIDENCE + boost, 3)
-                logger.debug(
-                    f"[G0] CRITICAL gap active ({current_penalty_pct:.1f}% penalty) — "
-                    f"confidence threshold raised: {MIN_CONFIDENCE:.3f} → {effective_min_confidence:.3f}"
-                )
-            elif severity == "MAJOR" and current_penalty_pct > 10.0:
-                # MAJOR gap (>0.95 ATR): require 15% more confidence
-                boost = MIN_CONFIDENCE * 0.15 * (current_penalty_pct / 30.0)
-                effective_min_confidence = round(MIN_CONFIDENCE + boost, 3)
-                logger.debug(
-                    f"[G0] MAJOR gap active ({current_penalty_pct:.1f}% penalty) — "
-                    f"confidence threshold raised: {MIN_CONFIDENCE:.3f} → {effective_min_confidence:.3f}"
-                )
-
-        if score < effective_min_confidence:
-            return _block(
-                "G0_PROBABILITY",
-                f"Scored {score:.2f} < {effective_min_confidence:.3f} "
-                f"(gap-adjusted threshold, severity={ctx.get('gap_manager', None) and gap_mgr.get_status().get('severity', 'NONE')})"
-                if effective_min_confidence > MIN_CONFIDENCE
-                else f"Scored {score:.2f} < {MIN_CONFIDENCE} (Insufficient probabilistic edge)"
-            )
+        # ── G0: Probabilistic Intelligence Gate ───────────────
+        # REPLACED: G0 was enforcing a static MIN_CONFIDENCE (0.45).
+        # decision_engine_v3 now dynamically lowers this threshold 
+        # (down to 0.26) based on Market Participation Mode (MPM), gap decay, 
+        # and momentum alignment. Enforcing 0.45 here was blocking valid signals.
         _ok("G0_PROBABILITY")
 
         # ── G1: Signal whitelist ──────────────────────────────────
@@ -273,7 +248,7 @@ class MasterDecisionEngine:
             rules = self.session_strategy.get_current_rules()
             if not rules.get("can_trade", True):
                 session_is_approved = False
-                return _block("G7_SESSION", rules.get("reason", "Session blocked"))
+                return _block("G7_SESSION", rules.get("reason", "Session blocked"), throttle=True)
         _ok("G7_SESSION")
 
         # ── G8: Discipline rules ──────────────────────────────────
@@ -291,13 +266,17 @@ class MasterDecisionEngine:
 
         # ── ALL GATES PASSED ──────────────────────────────────────
         self._total_approvals += 1
+        success_reason = f"All {len(passed)} gates passed | {signal_type} eligible"
         result = ApprovalResult(
             approved=True,
-            reason=f"All {len(passed)} gates passed | {signal_type} approved",
+            reason=success_reason,
             gates_passed=passed,
         )
         self._last_result = result
-        logger.info(f"✅ MasterDecision APPROVED | {signal_type} | {len(passed)} gates passed")
+        
+        # Log only on transition to VALID
+        self.state_tracker.track_environment(True, reason=success_reason)
+        
         return result
 
     # ── Trading hours (fixes the NameError bug in core/risk_manager.py) ──

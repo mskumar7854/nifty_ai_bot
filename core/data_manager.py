@@ -20,6 +20,8 @@ from utils.indicators import (
 from utils.logger import get_logger
 from config.settings import Settings
 from dhan_client import get_dhan_client
+from core.regime_classifier import RegimeClassifier
+from core.regime_state_manager import RegimeStateManager
 
 
 class DataManager:
@@ -69,6 +71,12 @@ class DataManager:
         self.cached_atr: Optional[float] = None
         self.cached_vwap_tp_sum: float = 0.0
         self.cached_vwap_vol_sum: float = 0.0
+
+        # Phase 1: Market Regime Classifier (Wrapped with Hysteresis)
+        self.regime_classifier = RegimeStateManager(
+            classifier=RegimeClassifier(lookback=20),
+            confirm_threshold=3
+        )
 
         self.logger.info(f"DataManager initialized | Source: {self.data_source}")
 
@@ -420,6 +428,14 @@ class DataManager:
 
         # 5. OI Data (real when DATA_SOURCE=api, simulated fallback otherwise)
         oi = self._get_oi_data()
+        
+        # 6. Regime Classification
+        regime_state = self.regime_classifier.classify(
+            df=df,
+            snapshot_vwap=vwap_val,
+            snapshot_atr=self.cached_atr,
+            prev_day_close=self.prev_day_close
+        )
 
         return MarketSnapshot(
             timestamp=datetime.now(),
@@ -459,6 +475,7 @@ class DataManager:
             iv_change_today=-1.5,
             iv_percentile_30d=45.0,
             oi_data_source=oi.get('data_source', DataSource.SIMULATED),
+            regime_state=regime_state.to_dict(),
         )
 
     def get_snapshot_from_df(self, df: pd.DataFrame) -> MarketSnapshot:
@@ -475,6 +492,16 @@ class DataManager:
         atr = calculate_atr(df, 14)
 
         latest = df.iloc[-1]
+        
+        # Calculate Regime
+        vwap_val = vwap.iloc[-1] if len(vwap) > 0 else latest['close']
+        atr_val = atr.iloc[-1] if len(atr) > 0 and not pd.isna(atr.iloc[-1]) else 25
+        regime_state = self.regime_classifier.classify(
+            df=df,
+            snapshot_vwap=vwap_val,
+            snapshot_atr=atr_val,
+            prev_day_close=self.prev_day_close
+        )
 
         snapshot = MarketSnapshot(
             timestamp=datetime.now(),
@@ -518,6 +545,7 @@ class DataManager:
             iv_change_today=-1.5,
             iv_percentile_30d=45.0,
             oi_data_source=DataSource.SIMULATED,  # P1.2: FLAG — not real data
+            regime_state=regime_state.to_dict(),
         )
 
         self.logger.debug(f"Snapshot price: {snapshot.price:.2f}")
@@ -805,14 +833,14 @@ class DataManager:
         return last_1m >= last_5m
 
     def _is_market_open_safe(self) -> bool:
-        """Check if current time is after market_open_safe_time (09:20)"""
-        now = datetime.now()
-        safe_time_str = self.settings.trade_filter.market_open_safe_time
-        safe_h, safe_m = map(int, safe_time_str.split(':'))
-        safe_time = now.replace(hour=safe_h, minute=safe_m, second=0, microsecond=0)
-
-        if now < safe_time:
-            self.logger.info(f"Market session start protection — waiting until {safe_time_str}")
+        """Check if current time is after market_open_safe_time using SessionGuard"""
+        from core.session_guard import SessionGuard
+        can_trade, reason = SessionGuard.can_trade(self.settings)
+        if not can_trade:
+            now = datetime.now()
+            if not hasattr(self, '_last_protection_log') or (now - self._last_protection_log).total_seconds() >= 60:
+                self.logger.info(reason)
+                self._last_protection_log = now
             return False
         return True
 

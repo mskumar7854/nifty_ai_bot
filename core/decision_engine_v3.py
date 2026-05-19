@@ -356,6 +356,7 @@ class DecisionEngineV3:
     def process(self, df, snapshot: MarketSnapshot) -> Signal:
         outputs = []
         outputs_dict = {}
+        self._last_decision_path = ["ENV_VALID"]
 
         self.logger.debug("⚡ Engine v3 Cycle Started")
 
@@ -580,6 +581,7 @@ class DecisionEngineV3:
                 f"gap_mult {gap_mult:.3f} → {_effective_gap_mult:.3f} | "
                 f"Allowing targeted participation in gap momentum."
             )
+            self._last_decision_path.append("CONVICTION_OVERRIDE_APPLIED")
 
         # ── v3.6: Compute Market Participation Mode (MPM) ────────────────────────
         # Must happen AFTER OI fallback so the score reflects redistributed weights.
@@ -612,6 +614,10 @@ class DecisionEngineV3:
             MIN_DOMINANT_THRESHOLD = max(0.18, 0.25 - _SIM_RELAX)
 
         _early_dominant = max(_early_buy, _early_sell)
+        
+        self._last_raw_confidence = _early_dominant
+        self._last_adaptive_threshold = MIN_DOMINANT_THRESHOLD
+        
         if _early_dominant < MIN_DOMINANT_THRESHOLD:
             self.logger.info(
                 f"[⚡ EARLY KILL] Dominant score {_early_dominant:.3f} < {MIN_DOMINANT_THRESHOLD} "
@@ -624,6 +630,7 @@ class DecisionEngineV3:
                 dominant=_early_dominant, threshold=MIN_DOMINANT_THRESHOLD,
                 snapshot=snapshot, outputs_dict=outputs_dict
             )
+            self._last_decision_path.append("LOW_DOMINANT_SCORE_REJECTED")
             return self._no_trade_signal(
                 snapshot,
                 [f"Early Kill: dominant_score {_early_dominant:.3f} < {MIN_DOMINANT_THRESHOLD} (MPM={mpm.value})"],
@@ -654,10 +661,12 @@ class DecisionEngineV3:
                     if name in ["multi_timeframe", "institutional"]:
                         self.last_heavy_results[name] = out
                         self.last_heavy_run_time[name] = datetime.now()
+                        self._last_decision_path.append(f"HEAVY_AGENT_RUN:{name}")
                 # If not in route but we have a cache, reuse it to sustain the thesis
                 elif name in self.last_heavy_results:
                     outputs.append(self.last_heavy_results[name])
                     outputs_dict[name] = self.last_heavy_results[name]
+                    self._last_decision_path.append(f"HEAVY_AGENT_CACHE:{name}")
                 
                 # Immediate halt if a dynamically called blocker (like Trap) fires
                 if 'out' in locals() and out.is_blocker:
@@ -863,6 +872,9 @@ class DecisionEngineV3:
         if gap_severity == "NONE" and reg_conf < 0.6:
             adaptive_confidence = max(adaptive_confidence - 0.03, 0.26)
 
+        self._last_raw_confidence = confidence
+        self._last_adaptive_threshold = adaptive_confidence
+
         if _total_relax > 0.005:
             self.logger.info(
                 f"[CONF GATE] Dynamic relax: live_conf={live_conf:.3f} - "
@@ -874,6 +886,7 @@ class DecisionEngineV3:
         if confidence < adaptive_confidence:
             reason = (f"Low Confidence Gate ({confidence:.2f} < {adaptive_confidence:.2f}, "
                       f"regime: {reg_conf:.2f}, MPM={mpm.value}, gap_elapsed: {gap_mins_elapsed:.0f}min)")
+            self._last_decision_path.append("LOW_CONF_REJECTED")
             return self._no_trade_signal(snapshot, [reason], outputs_dict)
             
         final_confluence = self.scorer.score(outputs)
@@ -975,6 +988,8 @@ class DecisionEngineV3:
                 gap_penalty=regime_penalty,
                 system_mode=os.getenv("SYSTEM_MODE", "SIMULATION"),
             ),
+            "decision_path": self._last_decision_path,
+            "uncertainty_multiplier": regime_penalty,
         }
 
         signal = Signal(
@@ -1682,6 +1697,9 @@ class DecisionEngineV3:
                 name: {"direction": out.direction.value, "confidence": out.confidence}
                 for name, out in outputs.items()
             },
+            metadata={
+                "decision_path": getattr(self, "_last_decision_path", [])
+            }
         )
         self.logger.signal(f"⚪ NO TRADE | {reasons[0]}")
         return signal

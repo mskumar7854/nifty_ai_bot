@@ -1,4 +1,4 @@
-import sys, io
+import sys, io, json
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 """
@@ -25,9 +25,9 @@ from datetime import datetime
 LOG_FILE = Path("logs/nifty_ai.log")
 
 # ── Regex Patterns ─────────────────────────────────────────────
-PAT_TS          = re.compile(r"\[(\d{2}/\d{2}/\d{2} (\d{2}):\d{2}:\d{2})\]")
-PAT_CYCLE       = re.compile(r"Engine v3 Cycle Started")
-PAT_LATENCY     = re.compile(r"Cycle Latency: ([\d.]+)ms")
+PAT_TS          = re.compile(r"(?:\[\d{2}/\d{2}/\d{2} |^)(\d{2}):\d{2}:\d{2}")
+PAT_CYCLE       = re.compile(r"📊 EXECUTION TRUTH:")
+PAT_LATENCY     = re.compile(r"(?:Latency: |LATENCY: )([\d.]+)ms")
 PAT_NOTRADE     = re.compile(r"NO TRADE \| (.+)")
 PAT_NO_STREAK   = re.compile(r"NO-TRADE STREAK: (\d+) consecutive")
 PAT_APPROVED    = re.compile(r"APPROVED \| Grade: (\S+) \| Score: ([\d.]+)")
@@ -44,7 +44,7 @@ PAT_CONFLUENCE  = re.compile(r"High Confluence Detected")
 PAT_ROUTE       = re.compile(r"V4 Dynamic Route Selected: \[(.+)\]")
 PAT_LOW_CONF    = re.compile(r"Low Confidence Gate \(([\d.]+) < ([\d.]+)")
 PAT_DOMINANCE   = re.compile(r"Minimum Dominance Rule \(Gap: ([\d.]+)")
-PAT_TRADE_EXEC  = re.compile(r"LIVE TRADE EXECUTED|SIM: Entry confirmed")
+PAT_TRADE_EXEC  = re.compile(r"LIVE TRADE EXECUTED|SIM: Entry confirmed|Simulation trade executed")
 PAT_WARNING     = re.compile(r" WARNING ")
 PAT_ERROR       = re.compile(r" ERROR ")
 PAT_CRITICAL    = re.compile(r" CRITICAL |🚨")
@@ -73,10 +73,21 @@ def load_lines(args) -> list:
     if args.all:
         return lines
 
-    today = datetime.now().strftime("%y/%m/%d")
-    today_lines = [l for l in lines if today in l]
-    print(f"[Filtering to today ({today}): {len(today_lines):,} of {len(lines):,} lines]\n")
-    return today_lines
+    today_yymmdd = datetime.now().strftime("%y/%m/%d")
+    today_mmddyy = datetime.now().strftime("%m/%d/%y")
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+
+    matched_lines = []
+    for l in lines:
+        if today_yymmdd in l or today_mmddyy in l or today_iso in l:
+            matched_lines.append(l)
+
+    if len(matched_lines) > 100:
+        print(f"[Filtering to today ({today_iso}): {len(matched_lines):,} of {len(lines):,} lines]\n")
+        return matched_lines
+    else:
+        print(f"[Log entries do not contain date prefixes. Analyzing all {len(lines):,} lines from today's daily log file]\n")
+        return lines
 
 
 def analyze(lines: list) -> None:
@@ -101,15 +112,48 @@ def analyze(lines: list) -> None:
     hour_trades      = Counter()
     current_hour     = None
 
+    in_json = False
+    json_lines = []
+
     for line in lines:
         m = PAT_TS.search(line)
         if m:
-            current_hour = m.group(2)
+            current_hour = m.group(1)
 
         if PAT_CYCLE.search(line):
             cycles += 1
             if current_hour:
                 hour_cycles[current_hour] += 1
+            in_json = True
+            json_lines = []
+            continue
+
+        if in_json:
+            if line.strip().startswith("{") or json_lines:
+                json_lines.append(line)
+                if line.strip() == "}":
+                    in_json = False
+                    try:
+                        data = json.loads("".join(json_lines))
+                        if "latency" in data and "cycle_ms" in data["latency"]:
+                            latencies.append(data["latency"]["cycle_ms"])
+                        if not data.get("execution_authorized"):
+                            reason = data.get("rejection_reason", "unknown")
+                            if "Low Confidence" in reason:
+                                reason = "Low Confidence Gate"
+                            elif "Minimum Dominance" in reason:
+                                reason = "Minimum Dominance Rule"
+                            elif "Phase 1" in reason:
+                                reason = reason.replace("Phase 1 Halt: ", "P1: ")
+                            elif "Phase 2" in reason:
+                                reason = reason.replace("Phase 2 Halt: ", "P2: ")
+                            elif "Phase 4" in reason:
+                                reason = reason.replace("Phase 4 Halt: ", "P4: ")
+                            no_trade_reasons[reason[:65]] += 1
+                    except Exception:
+                        pass
+            else:
+                in_json = False
 
         # ── Metric 4: Latency ──
         m = PAT_LATENCY.search(line)

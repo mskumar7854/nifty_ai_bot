@@ -252,6 +252,9 @@ class MarketSnapshot:
     # "real" = from broker API, "simulated" = generated locally
     # Agents MUST check this before making decisions on OI/Greeks/VIX data.
     oi_data_source: DataSource = DataSource.UNKNOWN
+    
+    # v4.6.1 Regime Context
+    regime_state: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -262,8 +265,9 @@ class MarketSnapshot:
             "atr": round(self.atr, 2),
             "pcr": round(self.pcr, 2),
             "vix": self.india_vix,
-            "regime": "",
+            "regime": self.regime_state.get("regime", ""),
             "session": "",
+            "regime_state": self.regime_state
         }
 
 
@@ -388,6 +392,7 @@ class Signal:
     weighted_score: float = 0
     buy_score: float = 0
     sell_score: float = 0
+    uncertainty_multiplier: float = 1.0
     agent_breakdown: Dict = field(default_factory=dict)
 
     # v2 additions

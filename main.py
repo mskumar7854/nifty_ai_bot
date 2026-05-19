@@ -55,6 +55,7 @@ from utils.tasks import fire_and_log
 from options_analyzer import OptionsAnalyzer
 from performance_logger import PerformanceLogger
 from core.log_observer import LogObserver
+from core.metrics_logger import MetricsLogger
 
 settings = Settings()
 logger = get_logger("main", settings.log_level)
@@ -284,6 +285,7 @@ class NiftyAISystem:
         self.options_analyzer = OptionsAnalyzer(mode=settings.system_mode.mode)
         self.perf_logger = PerformanceLogger()
         self.observer = LogObserver()
+        self.metrics_logger = MetricsLogger()
 
         # ── Dashboard ──
         self.dashboard = None
@@ -524,8 +526,12 @@ class NiftyAISystem:
 
 
 
+        self._current_latencies = {"db_ms": 0, "broker_ms": 0, "decision_ms": 0}
+
         # 🔥 Update Global Risk (PnL from DB)
+        t_db = time.perf_counter()
         await self.risk_manager.update_daily_pnl()
+        self._current_latencies["db_ms"] = int((time.perf_counter() - t_db) * 1000)
 
         try:
             # ── 1. MASTER GATE: Pre-trade approval (replaces scattered checks) ──
@@ -554,9 +560,14 @@ class NiftyAISystem:
                 return
 
             # ── 2. Fetch data (Async version) ──
+            t_broker = time.perf_counter()
             df, snapshot = await self.data_manager.fetch_latest_async(session)
+            self._current_latencies["broker_ms"] = int((time.perf_counter() - t_broker) * 1000)
+            
             if snapshot is None or snapshot.price == 0:
                 return
+                
+            self._last_snapshot = snapshot
                 
             # ── Analytics: Track OI Reliability ──
             if hasattr(snapshot, "oi_data_source"):
@@ -588,7 +599,41 @@ class NiftyAISystem:
             self.last_candle_timestamp = current_candle_ts
             
             # ── 7. Generate signal ──
+            t_decision = time.perf_counter()
             signal = self.decision_engine.process(df, snapshot)
+            self._current_latencies["decision_ms"] = int((time.perf_counter() - t_decision) * 1000)
+            
+            # ── FINAL UNIFIED EXECUTION SUMMARY LOG ──
+            def _log_canonical_truth(auth: bool, reason: str):
+                import json
+                # Compute approximate cycle latency including pre-checks and data fetch
+                cycle_lat = sum(self._current_latencies.values())
+                summary = {
+                    "engine_cycle_id": self.cycle_count,
+                    "regime": signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime),
+                    "regime_confidence": signal.metadata.get("regime_conf", 0.0) if hasattr(signal, "metadata") else 0.0,
+                    "environment_valid": True,
+                    "opportunity_valid": signal.signal_type != SignalType.NO_TRADE,
+                    "execution_authorized": auth,
+                    "rejection_reason": reason,
+                    "adaptive_threshold": round(getattr(self.decision_engine, "_last_adaptive_threshold", 0.0), 3),
+                    "raw_confidence": round(getattr(self.decision_engine, "_last_raw_confidence", 0.0), 3),
+                    "buy_score": round(getattr(signal, "buy_score", 0.0), 3),
+                    "sell_score": round(getattr(signal, "sell_score", 0.0), 3),
+                    "uncertainty_multiplier": round(getattr(signal, "uncertainty_multiplier", 1.0), 3),
+                    "decision_path": getattr(self.decision_engine, "_last_decision_path", []),
+                    "latency": {
+                        "cycle_ms": cycle_lat,
+                        "broker_ms": self._current_latencies.get("broker_ms", 0),
+                        "decision_ms": self._current_latencies.get("decision_ms", 0),
+                        "db_ms": self._current_latencies.get("db_ms", 0)
+                    }
+                }
+                logger.info(f"📊 EXECUTION TRUTH:\n{json.dumps(summary, indent=2)}")
+                if hasattr(self, "metrics_logger"):
+                    self.metrics_logger.log_cycle(summary)
+                    self.metrics_logger.log_execution_truth(summary)
+
             
             if hasattr(self, "observer") and signal.signal_type != SignalType.NO_TRADE:
                 self.observer.on_signal()
@@ -596,6 +641,7 @@ class NiftyAISystem:
             if signal.signal_type == SignalType.NO_TRADE:
                 self.simulation.record_signal(passed=False)
                 self._update_dashboard(snapshot, signal)
+                _log_canonical_truth(False, signal.reasons[0] if signal.reasons else "dominant_score_below_floor")
 
                 # ── FIX #4: TRADE FREQUENCY GUARD ──
                 # Tracks consecutive no-trade cycles and alerts operators when
@@ -638,6 +684,7 @@ class NiftyAISystem:
                     logger.warning(f"🛡️ Master Gate blocked: {master_result.reason}")
                 self.simulation.record_signal(passed=False)
                 self._update_dashboard(snapshot, signal)
+                _log_canonical_truth(False, master_result.reason)
                 return
 
             # ── 8. Gather context for 10-Gate Filter ──
@@ -695,6 +742,7 @@ class NiftyAISystem:
                 rej_reason = filter_result.rejection_reason if hasattr(filter_result, 'rejection_reason') else '10-Gate Filter'
                 log_entry["risk_reason"] = f"Filter Rejected: {rej_reason}"
                 self.perf_logger.log_signal(log_entry)
+                _log_canonical_truth(False, f"Gate Filter: {rej_reason}")
                 
                 # ── P0.6: Shadow Journal — Capture REJECTED signals too ──
                 # These become the most valuable training data later.
@@ -725,7 +773,7 @@ class NiftyAISystem:
 
             # ── 10. Signal PASSED all 10 gates ──
             logger.info(
-                f"🟢 APPROVED | "
+                f"🟢 Signal Engine CONFIRMED | "
                 f"Grade: {filter_result.grade} | "
                 f"Score: {filter_result.final_score:.0f} | "
                 f"{signal.signal_type.value}"
@@ -781,6 +829,7 @@ class NiftyAISystem:
                     
                     self.simulation.record_signal(passed=False)
                     self._update_dashboard(snapshot, signal)
+                    _log_canonical_truth(False, "Options: Near Max-Pain")
                     return
 
                 # (b) Sentiment alignment (Score must be >= 2)
@@ -801,6 +850,7 @@ class NiftyAISystem:
                     
                     self.simulation.record_signal(passed=False)
                     self._update_dashboard(snapshot, signal)
+                    _log_canonical_truth(False, f"Options: Low score ({options_score})")
                     return
             else:
                 logger.debug("[OPTIONS] Data unavailable — skipping hard filter this cycle")
@@ -860,6 +910,7 @@ class NiftyAISystem:
                 self.perf_logger.log_signal(log_entry)
                 self.simulation.record_signal(passed=False)
                 self._update_dashboard(snapshot, signal)
+                _log_canonical_truth(False, f"Liquidity Block: {reject_reason}")
                 return
             
             # Translate Spot targets to Premium targets
@@ -870,10 +921,11 @@ class NiftyAISystem:
             signal.metadata["premium_levels"] = premium_levels
             
             logger.info(
-                f"🎯 Resolved {instrument['symbol']} ({instrument['moneyness']}) | "
+                f"🎯 Execution AUTHORIZED | {instrument['symbol']} ({instrument['moneyness']}) | "
                 f"Entry: ₹{premium_levels['premium_entry']} | "
                 f"SL: ₹{premium_levels['premium_sl']}"
             )
+            _log_canonical_truth(True, "APPROVED")
             
             self.perf_logger.log_signal(log_entry)
 

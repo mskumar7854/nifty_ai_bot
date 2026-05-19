@@ -67,6 +67,21 @@ class SessionStrategy:
     def get_current_rules(self) -> Dict:
         """Get current session rules"""
 
+        # 1. Global SessionGuard check first
+        from core.session_guard import SessionGuard
+        guard_ok, guard_reason = SessionGuard.can_trade(self.settings)
+        if not guard_ok:
+            return {
+                "session": "market_open_protection",
+                "can_trade": False,
+                "reason": guard_reason,
+                "max_trades": 0,
+                "min_confidence": 100,
+                "strategy": "blocked",
+                "current_time": _now_ist().strftime("%H:%M:%S"),
+            }
+
+        # 2. Specific session check
         session_name = _get_current_session_name(self.sessions)
         session = self.sessions.get(session_name, {})
 
