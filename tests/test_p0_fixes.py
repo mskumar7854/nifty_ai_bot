@@ -87,7 +87,8 @@ class TestReconciliation:
             mock_get_dhan.return_value = mock_dhan
             
             from main import NiftyAISystem
-            asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
+            with pytest.raises(SystemExit):
+                asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
             
             assert system.trading_enabled is False, "Trading must halt on orphan"
     
@@ -100,6 +101,29 @@ class TestReconciliation:
         asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
         
         assert system.trading_enabled is True  # Still enabled
+
+    def test_failed_fetch_halts_startup_in_live(self):
+        """Failure to fetch positions at startup in LIVE mode must halt startup and raise SystemExit."""
+        system = MagicMock()
+        system.is_simulation = False
+        system.trading_enabled = True
+        system.state_mgr = MagicMock()
+        
+        with patch("dhan_client.get_dhan_client") as mock_get_dhan:
+            mock_dhan = MagicMock()
+            mock_dhan.get_positions.return_value = {
+                "status": "failure",
+                "remarks": "Invalid access token"
+            }
+            mock_get_dhan.return_value = mock_dhan
+            
+            from main import NiftyAISystem
+            with pytest.raises(SystemExit):
+                asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
+            
+            system.state_mgr.set_state.assert_called_with(
+                "HALTED", "Startup Broker Reconciliation Failed: Could not fetch broker positions for reconciliation", source="system"
+            )
 
 # Miss 1 - Agent Abstain test
 class TestAgentAbstain:

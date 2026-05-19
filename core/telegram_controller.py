@@ -444,13 +444,40 @@ class TelegramController:
     async def pause_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Pauses signal generation."""
         if not self._is_authorized(update): return
+        
+        from core.system_state import get_state_manager
+        state_mgr = get_state_manager()
+        state_mgr.set_state("PAUSED_MANUAL", "Paused by operator command via Telegram")
+        
         self.is_paused = True
         await update.message.reply_text("⏸️ <b>System PAUSED.</b> No new trades will be generated.", parse_mode='HTML')
 
     async def resume_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Resumes signal generation."""
         if not self._is_authorized(update): return
+        
+        from core.system_state import get_state_manager
+        state_mgr = get_state_manager()
+        current_state = state_mgr.get_state()
+        
+        if current_state in ["HALTED", "PAUSED_STRUCTURAL"]:
+            await update.message.reply_text(
+                f"❌ <b>RESUME BLOCKED:</b> System is in <code>{current_state}</code> state.\n"
+                f"This requires manual code investigation and server restart.",
+                parse_mode='HTML'
+            )
+            return
+            
+        state_mgr.set_state("ACTIVE", "Resumed by operator command via Telegram")
         self.is_paused = False
+        
+        if hasattr(self, "system") and self.system:
+            self.system.trading_enabled = True
+            pos_mgr = getattr(self.system, "position_manager", None)
+            if pos_mgr:
+                pos_mgr.is_halted = False
+                pos_mgr.halt_reason = ""
+                
         await update.message.reply_text("▶️ <b>System RESUMED.</b> AI Agent is back online.", parse_mode='HTML')
 
     # ─── HELPERS ───

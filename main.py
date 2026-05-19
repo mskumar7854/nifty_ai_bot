@@ -197,7 +197,9 @@ class NiftyAISystem:
     def __init__(self):
         self.running = False
         self.cycle_count = 0
-        self.trading_enabled = True # Use this as the master kill switch
+        # ── System State Manager & Master Kill Switch ──
+        from core.system_state import get_state_manager
+        self.trading_enabled = get_state_manager().is_trading_allowed()
         self.cycle_running = False
         
         # ── Multi-Layer Circuit Breaker ──
@@ -333,6 +335,14 @@ class NiftyAISystem:
 
         # Store app reference in the bot for async sending
         self.telegram_bot.app = app
+
+        # Register central State Manager Telegram alert callback
+        from core.system_state import get_state_manager
+        def send_telegram_alert(msg: str):
+            if self.telegram_enabled and self.telegram_bot:
+                import asyncio
+                asyncio.create_task(self.telegram_bot._send_admin_msg(msg))
+        get_state_manager().register_alert_callback(send_telegram_alert)
 
         # v3.7: Telegram is always initialized — even in SIMULATION mode.
         # In SIM, we want signal notifications for observability (no real trades executed).
@@ -1094,6 +1104,37 @@ class NiftyAISystem:
             price = getattr(signal, "adjusted_entry", snapshot.price)
             size = self.position_manager.calculate_position_size(signal, price, snapshot.atr)
 
+            # ── 🔒 RUNTIME INTEGRITY BREAKER CHECK (Phase 1.2) ──
+            from core.system_state import get_state_manager
+            from core.structural_breaker import StructuralBreaker
+            state_mgr = get_state_manager()
+            breaker = StructuralBreaker(state_mgr)
+            
+            # Check 1: Duplicate order check
+            direction_str = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
+            if not breaker.check_duplicate_order(signal.symbol, direction_str):
+                self.trading_enabled = False
+                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+                return None
+                
+            # Check 2: Telegram sync delay and price-drift check
+            current_price = snapshot.price if snapshot else price
+            is_valid, should_halt = breaker.check_telegram_execution_sync(
+                signal.id, signal.created_at, time.time(), current_price, signal.entry_price
+            )
+            if not is_valid:
+                if should_halt:
+                    self.trading_enabled = False
+                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+                return None
+                
+            # Check 3: Stop loss attached check
+            sl_price = size.get("sl_price", 0.0)
+            if not breaker.check_stop_loss_attached(signal.id, sl_price):
+                self.trading_enabled = False
+                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+                return None
+
             if not size["allowed"]:
                 logger.warning(f"🛡️ [EXECUTE_SIGNAL] Sizing check blocked execution: {size.get('reason')}")
                 self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
@@ -1171,6 +1212,27 @@ class NiftyAISystem:
                     )
                     latency_ms = (time.perf_counter() - t0) * 1000
                     self.broker_health.record_api_latency(latency_ms)
+
+                    # ── Runtime Position Reconciliation Breaker (Phase 1.2) ──
+                    pos_resp = await asyncio.wait_for(
+                        asyncio.to_thread(dhan.get_positions),
+                        timeout=5.0
+                    )
+                    if pos_resp and pos_resp.get("status") == "success":
+                        broker_positions = pos_resp.get("data", [])
+                        open_broker_positions = [
+                            p for p in broker_positions
+                            if p.get("positionType") == "INTRADAY" and p.get("netQty", 0) != 0
+                        ]
+                        internal_count = len(self.position_manager.open_positions)
+                        broker_count = len(open_broker_positions)
+                        
+                        from core.system_state import get_state_manager
+                        from core.structural_breaker import StructuralBreaker
+                        breaker = StructuralBreaker(get_state_manager())
+                        if not breaker.check_position_mismatch(internal_count, broker_count):
+                            self.trading_enabled = False
+
                     # Feed staleness: compare against last data fetch
                     _, snap = self.data_manager.get_latest_data()
                     if snap:
@@ -1379,7 +1441,18 @@ class NiftyAISystem:
             # 1. Fetch from Broker
             response = dhan.get_positions()
             if not response or response.get("status") != "success":
-                logger.warning("⚠️ Could not fetch broker positions for reconciliation")
+                err_msg = "Could not fetch broker positions for reconciliation"
+                logger.warning(f"⚠️ {err_msg}")
+                # Enforce fail-closed startup halt in live execution mode
+                if not self.is_simulation:
+                    self.state_mgr.set_state("HALTED", f"Startup Broker Reconciliation Failed: {err_msg}", source="system")
+                    self.state_mgr.send_alert(
+                        "🚨 <b>CRITICAL STARTUP FAILURE</b> 🚨\n\n"
+                        "Broker reconciliation failed on startup because positions could not be fetched.\n"
+                        "Please verify your API credentials and internet connectivity, then restart the system."
+                    )
+                    import sys
+                    sys.exit(1)
                 return
 
             broker_positions = response.get("data", [])
@@ -1414,21 +1487,15 @@ class NiftyAISystem:
                 )
                 
                 self.trading_enabled = False
-                alert_msg = (
-                    f"🚨 <b>ORPHANED POSITIONS DETECTED</b>\n\n"
-                    f"Found {len(orphans)} positions on Dhan not in OMS:\n"
-                    f"<code>{orphan_str}</code>\n\n"
-                    f"<b>Trading is HALTED.</b>\n"
-                    f"Check your broker and square off manually if needed.\n"
-                    f"Use /start to re-enable after verification."
-                )
-                try:
-                    fire_and_log(
-                        self.telegram_bot._send_admin_msg(alert_msg),
-                        label="orphan_position_alert"
-                    )
-                except Exception:
-                    pass
+                
+                # Trigger central persistent halt state
+                from core.system_state import get_state_manager
+                state_mgr = get_state_manager()
+                state_mgr.trigger_structural_halt(f"Orphaned positions detected on broker: {orphan_str}")
+                
+                # Call sys.exit(1) directly
+                import sys
+                sys.exit(1)
             else:
                 logger.info(
                     f"✅ Broker reconciliation passed: {len(open_broker_positions)} broker pos, "

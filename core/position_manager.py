@@ -811,13 +811,78 @@ class PositionManager:
             self.logger.error("Entry order failed — no position opened: %s", e)
             return None
 
-        if not entry_response or entry_response.get("status") != "success":
-            self.logger.warning("Entry order not filled. Aborting. Response: %s", entry_response)
-            return None
 
         # Extract order ID from response (fallback to uuid if missing)
         order_id = entry_response.get("data", {}).get("orderId", str(uuid.uuid4())[:8])
         execution_delay_ms = int((time.time() - start_time) * 1000)
+
+        # ── 🔒 RUNTIME BROKER ACK BREAKER CHECK (Phase 1.2) ──
+        from core.system_state import get_state_manager
+        state_mgr = get_state_manager()
+        
+        # Check ACK delay
+        ack_delay_sec = execution_delay_ms / 1000.0
+        if ack_delay_sec > 5.0:
+            self.logger.warning(
+                f"⚠️ LATE BROKER ACK DETECTED ({ack_delay_sec:.1f}s > 5.0s limit). "
+                f"Transitioning system to PENDING_RECONCILIATION to verify fill status for {order_id}..."
+            )
+            state_mgr.set_state(
+                "PENDING_RECONCILIATION", 
+                f"Late broker ACK for order {order_id}. Polling broker for fill verification..."
+            )
+            
+            # Aggressively poll order status for up to 15 seconds to resolve split-brain risk
+            fill_found = False
+            poll_start = time.time()
+            while time.time() - poll_start < 15.0:
+                try:
+                    from dhan_client import get_dhan_client
+                    dhan = get_dhan_client()
+                    order_status_resp = dhan.get_order_status(order_id)
+                    if order_status_resp and order_status_resp.get("status") == "success":
+                        order_data = order_status_resp.get("data", {})
+                        order_status = order_data.get("orderStatus", "")
+                        if order_status == "TRADED":
+                            self.logger.info(f"✅ Recovery: Late fill verified on broker for order {order_id}!")
+                            fill_found = True
+                            fill_price = order_data.get("price", fill_price)
+                            break
+                        elif order_status in ["CANCELLED", "REJECTED"]:
+                            self.logger.info(f"🚫 Recovery: Order {order_id} confirmed as {order_status} on broker.")
+                            break
+                except Exception as pe:
+                    self.logger.warning(f"Error polling recovery status: {pe}")
+                # Use a small non-blocking delay since this is a synchronous sleep in async function
+                import asyncio
+                await asyncio.sleep(1.0)
+                
+            if fill_found:
+                # Registered locally to prevent split-brain before structural halt is executed
+                position = self.open_position(signal, size_params, fill_price, premium)
+                reason = f"Broker ACK high latency ({ack_delay_sec:.1f}s), but late fill successfully resolved."
+                state_mgr.trigger_structural_halt(reason)
+                self._halt_trading(reason)
+                # Still try to place stop-loss since we are filled
+                await self._place_sl_with_retry(
+                    EntryResult(
+                        filled=True,
+                        order_id=order_id,
+                        fill_price=fill_price,
+                        fill_qty=qty,
+                        symbol=signal.symbol,
+                        security_id=signal.security_id or "",
+                        exchange_segment="NSE_FNO"
+                    ),
+                    stop_loss_price,
+                    sl_transaction_type
+                )
+                return position
+            else:
+                reason = f"Critical Broker ACK timeout: order {order_id} status unverified after 15s polling."
+                state_mgr.trigger_structural_halt(reason)
+                self._halt_trading(reason)
+                return None
 
         fill = EntryResult(
             filled=True,
@@ -1479,7 +1544,10 @@ class PositionManager:
         if self.master_high_water_mark > 0:
             peak_drop_pct = ((self.master_high_water_mark - self.total_capital) / self.master_high_water_mark) * 100
             if peak_drop_pct >= 10.0:
-                self._halt_trading(f"CRITICAL: 10% Drawdown from Master Target hit ({peak_drop_pct:.1f}%)")
+                reason = f"CRITICAL: 10% Drawdown from Master Target hit ({peak_drop_pct:.1f}%)"
+                self._halt_trading(reason)
+                from core.system_state import get_state_manager
+                get_state_manager().trigger_structural_halt(reason)
 
         # The Stability Gate for scaling
         if self.total_capital >= self.approved_capital_baseline * 1.10: # 10% gain
@@ -1520,29 +1588,35 @@ class PositionManager:
 
     def _check_circuit_breakers(self):
         """Check if any circuit breaker conditions are met"""
+        from core.system_state import get_state_manager
+        state_mgr = get_state_manager()
 
         # Daily loss
-        if self.today_stats.total_pnl <= \
-           -self.config.max_daily_loss:
-            self._halt_trading(
-                f"Daily loss ₹{abs(self.today_stats.total_pnl):,.0f} "
-                f">= limit ₹{self.config.max_daily_loss:,.0f}"
-            )
+        if self.today_stats.total_pnl <= -self.config.max_daily_loss:
+            reason = f"Daily loss ₹{abs(self.today_stats.total_pnl):,.0f} >= limit ₹{self.config.max_daily_loss:,.0f}"
+            self._halt_trading(reason)
+            state_mgr.trigger_financial_pause(reason)
 
-        # Drawdown
-        if self.current_drawdown_pct >= \
-           self.config.drawdown_halt_pct:
-            self._halt_trading(
-                f"Drawdown {self.current_drawdown_pct:.1f}% "
-                f">= halt {self.config.drawdown_halt_pct}%"
-            )
+        # Drawdown checks (₹10,000 baseline)
+        drawdown_rupees = self.peak_capital - self.total_capital
+        drawdown_pct = (drawdown_rupees / self.peak_capital * 100) if self.peak_capital > 0 else 0.0
+        
+        # 10% persistent halt
+        if drawdown_pct >= 10.0 or drawdown_rupees >= 1000.0:
+            reason = f"Critical financial drawdown exceeded: {drawdown_pct:.1f}% (₹{drawdown_rupees:.0f} >= ₹1,000)"
+            self._halt_trading(reason)
+            state_mgr.trigger_structural_halt(reason)
+        # 6% temporary pause
+        elif drawdown_pct >= 6.0 or drawdown_rupees >= 600.0:
+            reason = f"Financial drawdown threshold reached: {drawdown_pct:.1f}% (₹{drawdown_rupees:.0f} >= ₹600)"
+            self._halt_trading(reason)
+            state_mgr.trigger_financial_pause(reason)
 
         # Weekly loss
         if self.weekly_pnl <= -self.config.max_weekly_loss:
-            self._halt_trading(
-                f"Weekly loss ₹{abs(self.weekly_pnl):,.0f} "
-                f">= limit ₹{self.config.max_weekly_loss:,.0f}"
-            )
+            reason = f"Weekly loss ₹{abs(self.weekly_pnl):,.0f} >= limit ₹{self.config.max_weekly_loss:,.0f}"
+            self._halt_trading(reason)
+            state_mgr.trigger_financial_pause(reason)
 
     def _halt_trading(self, reason: str):
         """Halt all trading"""

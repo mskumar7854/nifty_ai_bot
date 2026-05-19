@@ -18,6 +18,13 @@ import asyncio
 from datetime import datetime
 import importlib
 
+# Ensure robust unicode emoji print support in Windows terminals
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# Dynamically resolve root directory for importing
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def print_step(msg):
     print(f"🔄 {msg}...", end=" ", flush=True)
 
@@ -81,9 +88,9 @@ async def run_preflight():
     # 5. DB Connectivity
     print_step("Checking SQLite database")
     try:
-        from core.db_manager import DatabaseManager
-        db = DatabaseManager()
-        await db.init_db()
+        from core.db_manager import DBManager
+        db = DBManager()
+        await db.initialize()
         print_pass()
     except Exception as e:
         print_fail(f"DB Error: {e}")

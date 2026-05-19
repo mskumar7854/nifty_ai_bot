@@ -354,6 +354,7 @@ class DecisionEngineV3:
         return self.agents.get("learning")
 
     def process(self, df, snapshot: MarketSnapshot) -> Signal:
+        self.current_signal_id = str(uuid.uuid4())[:8]
         outputs = []
         outputs_dict = {}
         self._last_decision_path = ["ENV_VALID"]
@@ -869,19 +870,45 @@ class DecisionEngineV3:
         adaptive_confidence = max(live_conf - _total_relax, 0.26)  # hard floor
 
         # Fallback: uncertain regime relaxation (same as before)
+        fallback_applied = False
         if gap_severity == "NONE" and reg_conf < 0.6:
             adaptive_confidence = max(adaptive_confidence - 0.03, 0.26)
+            fallback_applied = True
 
         self._last_raw_confidence = confidence
         self._last_adaptive_threshold = adaptive_confidence
 
-        if _total_relax > 0.005:
+        actual_relax = live_conf - adaptive_confidence
+        if actual_relax > 0.005:
             self.logger.info(
                 f"[CONF GATE] Dynamic relax: live_conf={live_conf:.3f} - "
                 f"gap_decay={_gap_decay_relax:.3f} - mpm={_mpm_conf_relax:.3f} - "
-                f"struct={_struct_bonus:.3f} = adaptive={adaptive_confidence:.3f} "
-                f"(MPM={mpm.value})"
+                f"struct={_struct_bonus:.3f} - fallback={0.03 if fallback_applied else 0.0:.3f} = "
+                f"adaptive={adaptive_confidence:.3f} (MPM={mpm.value})"
             )
+            try:
+                from core.signal_lifecycle import log_threshold_applied
+                reason_list = []
+                if _gap_decay_relax > 0.005:
+                    reason_list.append("gap_decay")
+                if _mpm_conf_relax > 0.005:
+                    reason_list.append("trend_continuation")
+                if _struct_bonus > 0.005:
+                    reason_list.append("conviction_override")
+                if fallback_applied:
+                    reason_list.append("uncertain_regime_relaxation")
+                
+                reason_str = "+".join(reason_list) if reason_list else "dynamic_relaxation"
+                log_threshold_applied(
+                    signal_id=self.current_signal_id,
+                    base_threshold=live_conf,
+                    adjusted_threshold=adaptive_confidence,
+                    reason=reason_str,
+                    elapsed_min=int(gap_mins_elapsed),
+                    gap_severity=gap_severity
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to log threshold applied: {e}")
 
         if confidence < adaptive_confidence:
             reason = (f"Low Confidence Gate ({confidence:.2f} < {adaptive_confidence:.2f}, "
@@ -993,7 +1020,7 @@ class DecisionEngineV3:
         }
 
         signal = Signal(
-            id=str(uuid.uuid4())[:8],
+            id=self.current_signal_id,
             timestamp=datetime.now(),
             signal_type=signal_type,
             direction=direction,
@@ -1068,11 +1095,22 @@ class DecisionEngineV3:
             return self._no_trade_signal(snapshot, ["Signal Deduplication: Duplicate signal within 60s"], outputs_dict)
             
         self.recent_signals[fingerprint] = now_ts
-
         self._record_signal(signal)
         # We no longer print the raw signal here.
         # Instrument resolution (Spot -> Option Premium) happens in main.py, 
         # and AlertManager handles the final formatted console output.
+
+        try:
+            from core.signal_lifecycle import log_signal_created
+            log_signal_created(
+                signal_id=signal.id,
+                direction=signal.direction.value,
+                raw_score_buy=signal.buy_score,
+                raw_score_sell=signal.sell_score,
+                regime=signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to log signal creation: {e}")
 
         return signal
 
@@ -1682,8 +1720,9 @@ class DecisionEngineV3:
         blockers = [out.blocker_reason for out in outputs.values() if out.is_blocker]
         final_reasons = reasons + blockers
 
+        sig_id = getattr(self, "current_signal_id", None) or str(uuid.uuid4())[:8]
         signal = Signal(
-            id=str(uuid.uuid4())[:8],
+            id=sig_id,
             timestamp=datetime.now(),
             signal_type=SignalType.NO_TRADE,
             direction=Direction.NEUTRAL,
