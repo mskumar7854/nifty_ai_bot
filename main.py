@@ -287,6 +287,7 @@ class NiftyAISystem:
         self.options_analyzer = OptionsAnalyzer(mode=settings.system_mode.mode)
         self.perf_logger = PerformanceLogger()
         self.observer = LogObserver()
+        self.observer.data_manager = self.data_manager
         self.metrics_logger = MetricsLogger()
 
         # ── Dashboard ──
@@ -331,6 +332,7 @@ class NiftyAISystem:
         app.add_handler(CommandHandler("restart", self.telegram_bot.restart_cmd))
         app.add_handler(CommandHandler("pause", self.telegram_bot.pause_cmd))
         app.add_handler(CommandHandler("resume", self.telegram_bot.resume_cmd))
+        app.add_handler(CommandHandler("force_reconcile", self.telegram_bot.force_reconcile_cmd))
         app.add_handler(CallbackQueryHandler(self.telegram_bot.handle_callback_query))
 
         # Store app reference in the bot for async sending
@@ -385,6 +387,14 @@ class NiftyAISystem:
                 f"Score: {readiness['final_score']}/100 | "
                 f"{readiness['recommendation']}"
             )
+
+        # ── Warm OI Cache on startup (Priority 1) ──
+        if getattr(self.data_manager, "data_source", None) == "api":
+            logger.info("Warming up OI options data cache on boot...")
+            try:
+                self.data_manager._get_oi_data()
+            except Exception as e:
+                logger.warning(f"OI cache warming failed on boot (will retry in loop): {e}")
 
         logger.info("🚀 System v4.6.1 Hardened Started")
 
@@ -536,7 +546,13 @@ class NiftyAISystem:
 
 
 
-        self._current_latencies = {"db_ms": 0, "broker_ms": 0, "decision_ms": 0}
+        self._current_latencies = {
+            "db_ms": 0,
+            "broker_ms": 0,
+            "oi_ms": 0,
+            "decision_ms": 0,
+            "dashboard_ms": 0
+        }
 
         # 🔥 Update Global Risk (PnL from DB)
         t_db = time.perf_counter()
@@ -573,6 +589,7 @@ class NiftyAISystem:
             t_broker = time.perf_counter()
             df, snapshot = await self.data_manager.fetch_latest_async(session)
             self._current_latencies["broker_ms"] = int((time.perf_counter() - t_broker) * 1000)
+            self._current_latencies["oi_ms"] = int(getattr(self.data_manager, "_oi_last_fetch_ms", 0.0))
             
             if snapshot is None or snapshot.price == 0:
                 return
@@ -635,7 +652,9 @@ class NiftyAISystem:
                     "latency": {
                         "cycle_ms": cycle_lat,
                         "broker_ms": self._current_latencies.get("broker_ms", 0),
+                        "oi_ms": self._current_latencies.get("oi_ms", 0),
                         "decision_ms": self._current_latencies.get("decision_ms", 0),
+                        "dashboard_ms": self._current_latencies.get("dashboard_ms", 0),
                         "db_ms": self._current_latencies.get("db_ms", 0)
                     }
                 }
@@ -707,13 +726,17 @@ class NiftyAISystem:
             if "today_trades" not in pm_status:
                 pm_status["today_trades"] = self.exit_engine.today_trades
 
+            # Query actual cached OI options data availability status
+            dm_oi_cache = getattr(self.data_manager, "_oi_cache", {})
+            real_oi_available = dm_oi_cache.get("data_source") == "REAL"
+
             # ── P0.2: Prepare base log entry to capture rejected signals ──
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
                 "time": datetime.now().strftime("%H:%M"),
                 "signal": signal.signal_type.value,
                 "price_action_passed": True,
-                "options_available": False,
+                "options_available": real_oi_available,
                 "options_sentiment": "unknown",
                 "options_score": 0,
                 "max_pain_distance": -1,
@@ -1384,6 +1407,7 @@ class NiftyAISystem:
 
     def _update_dashboard(self, snapshot, signal):
         if not self.dashboard: return
+        t_start = time.perf_counter()
         try:
             status = self.decision_engine.get_status()
             status["snapshot"] = snapshot.to_dict() if snapshot else {}
@@ -1408,6 +1432,11 @@ class NiftyAISystem:
                 status["oi_health"] = {"rate": "100%", "latency": "Unknown", "status": "LIVE"}
             
             self.dashboard.update_status(status)
+            
+            # Record dashboard latency
+            dashboard_ms = int((time.perf_counter() - t_start) * 1000)
+            if hasattr(self, "_current_latencies") and isinstance(self._current_latencies, dict):
+                self._current_latencies["dashboard_ms"] = dashboard_ms
         except Exception as e:
             logger.debug(f"Dashboard update error: {e}")
 
@@ -1432,28 +1461,42 @@ class NiftyAISystem:
         """
         if self.is_simulation:
             logger.info("🧪 Simulation mode — skipping broker reconciliation")
-            return
+            return True
 
         try:
             from dhan_client import get_dhan_client
             dhan = get_dhan_client()
             
-            # 1. Fetch from Broker
-            response = dhan.get_positions()
+            # 1. Fetch from Broker (with 3 attempts, 5s backoff)
+            response = None
+            for attempt in range(3):
+                try:
+                    response = dhan.get_positions()
+                    if response and response.get("status") == "success":
+                        break
+                    logger.warning(f"⚠️ Attempt {attempt+1}/3 failed to fetch broker positions: {response.get('remarks') if response else 'No response'}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Attempt {attempt+1}/3 exception fetching broker positions: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(5)
+            
+            from core.system_state import get_state_manager
+            state_mgr = get_state_manager()
+
             if not response or response.get("status") != "success":
-                err_msg = "Could not fetch broker positions for reconciliation"
-                logger.warning(f"⚠️ {err_msg}")
+                err_msg = "Could not fetch broker positions for reconciliation after 3 attempts"
+                logger.critical(f"🚨 {err_msg}")
                 # Enforce fail-closed startup halt in live execution mode
                 if not self.is_simulation:
-                    self.state_mgr.set_state("HALTED", f"Startup Broker Reconciliation Failed: {err_msg}", source="system")
-                    self.state_mgr.send_alert(
+                    self.trading_enabled = False
+                    state_mgr.set_state("HALTED", f"Startup Broker Reconciliation Failed: {err_msg}", source="system")
+                    state_mgr.send_alert(
                         "🚨 <b>CRITICAL STARTUP FAILURE</b> 🚨\n\n"
-                        "Broker reconciliation failed on startup because positions could not be fetched.\n"
-                        "Please verify your API credentials and internet connectivity, then restart the system."
+                        "Broker reconciliation failed: Could not fetch broker positions.\n"
+                        "Please verify your API credentials and internet connectivity.\n"
+                        "Trading is HALTED. Send <code>/force_reconcile</code> to retry."
                     )
-                    import sys
-                    sys.exit(1)
-                return
+                return False
 
             broker_positions = response.get("data", [])
             open_broker_positions = [
@@ -1488,14 +1531,19 @@ class NiftyAISystem:
                 
                 self.trading_enabled = False
                 
-                # Trigger central persistent halt state
-                from core.system_state import get_state_manager
-                state_mgr = get_state_manager()
+                # Trigger central persistent halt state (graceful, no crash)
                 state_mgr.trigger_structural_halt(f"Orphaned positions detected on broker: {orphan_str}")
-                
-                # Call sys.exit(1) directly
-                import sys
-                sys.exit(1)
+                state_mgr.send_alert(
+                    "🚨 <b>ORPHANED POSITIONS DETECTED ON BROKER</b> 🚨\n\n"
+                    f"Found {len(orphans)} positions on broker not in OMS:\n"
+                    f"<code>{orphan_str}</code>\n\n"
+                    "<b>Trading is HALTED until resolved.</b>\n\n"
+                    "To resolve:\n"
+                    "1. Log into Dhan and manually close the orphaned positions.\n"
+                    "2. Confirm positions are fully closed (netQty = 0).\n"
+                    "3. Send <code>/start</code> (or <code>/force_reconcile</code>) to resume trading."
+                )
+                return False
             else:
                 logger.info(
                     f"✅ Broker reconciliation passed: {len(open_broker_positions)} broker pos, "
@@ -1533,11 +1581,14 @@ class NiftyAISystem:
                     # Force close ALL positions if we have naked exposure
                     self.position_manager.close_all_positions("STARTUP_MISSING_SL_DETECTED")
                     self.halt_trading(f"Startup check failed: Missing SL for {missing_str}")
-
+                    return False
+            
+            return True
         except Exception as e:
             # Non-fatal: don't crash startup if reconciliation fails
             # But DO log it prominently
             logger.error(f"⚠️ Broker reconciliation failed (non-fatal): {e}")
+            return False
 
     # ══════════════════════════════════════════════════════════════
     # P0-C: EXTERNAL HEARTBEAT + DEAD MAN'S SWITCH
@@ -1626,6 +1677,12 @@ class NiftyAISystem:
         if hasattr(self, "observer"):
             import json
             logger.info(f"📊 DAILY SUMMARY:\n{json.dumps(self.observer.summary(), indent=2)}")
+            
+        try:
+            from tools import journal_writer
+            journal_writer.write_today()
+        except Exception as je:
+            logger.error(f"Failed to write operational journal: {je}")
             
         logger.info("System stopped ✓")
 

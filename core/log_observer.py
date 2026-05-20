@@ -197,6 +197,48 @@ class LogObserver:
             "consecutive_losses_current": self.consecutive_losses
         }
 
+    def get_oi_health(self) -> dict:
+        """Calculate and return actual option chain fetch health stats."""
+        # Dynamic lookup from data_manager if linked
+        dm = getattr(self, 'data_manager', None)
+        if dm is not None:
+            success = getattr(dm, '_oi_success_count', 0)
+            fail = getattr(dm, '_oi_fail_count', 0)
+            total = success + fail
+            rate = (success / max(1, total)) * 100
+            latency_ms = getattr(dm, '_oi_last_fetch_ms', 0.0)
+            
+            # Determine status
+            status = "LIVE"
+            if total > 0:
+                if rate < 50:
+                    status = "FAILED"
+                elif rate < 80:
+                    status = "DEGRADED"
+            
+            return {
+                "rate": f"{rate:.1f}%",
+                "latency": f"{latency_ms:.0f}ms" if latency_ms > 0 else "Unknown",
+                "status": status
+            }
+            
+        # Fallback to local tracked counters
+        total = self.oi_total
+        real = self.oi_real
+        rate = (real / max(1, total)) * 100
+        status = "LIVE"
+        if total > 5:
+            if rate < 50:
+                status = "FAILED"
+            elif rate < 80:
+                status = "DEGRADED"
+                
+        return {
+            "rate": f"{rate:.1f}%",
+            "latency": "Unknown",
+            "status": status
+        }
+
     def _persist(self):
         try:
             with open(self.analytics_file, "w") as f:

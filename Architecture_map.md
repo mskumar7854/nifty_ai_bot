@@ -1,6 +1,6 @@
 # 🏗️ Nifty Trading Bot — Architecture Map
 
-> **Updated**: 2026-05-18 | **Version**: v4.8.0 — DB Identity Hardened | **Mode**: SMALL_CAPITAL
+> **Updated**: 2026-05-20 | **Version**: v4.8.0 — DB Identity Hardened | **Mode**: SMALL_CAPITAL
 > **Capital**: ₹1,00,000 | **Broker**: Dhan API | **18 Active AI Agents**
 
 > [!CAUTION]
@@ -20,68 +20,131 @@
 
 ---
 
-## 📁 Project Structure (Verified 2026-05-10)
+## 📁 Project Structure (Verified 2026-05-20)
 
 ```
-nifty-ai-system/                       # Root (1,120 lines main.py)
-├── agents/                            # 26 agent files (24 agents + base_agent.py + __init__.py)
-│   │                                  # learning_agent_v2.py is a MIXIN dependency (not standalone)
+nifty-ai-system/                       # Root (1,696 lines main.py)
+├── agents/                            # 26 agent files (23 agents + base_agent.py + learning_agent_v2.py mixin + __init__.py)
 │   ├── base_agent.py                  # 137 lines — abstract base class
-│   ├── regime_agent.py                # 420 lines — market regime detection
-│   ├── structure_agent.py             # 629 lines — BOS/CHoCH/FVG/OB analysis
+│   ├── regime_agent.py                # 422 lines — market regime detection
+│   ├── structure_agent.py             # 631 lines — BOS/CHoCH/FVG/OB analysis
 │   ├── price_action_agent.py          # 359 lines — candlestick patterns
 │   ├── learning_agent.py              # 1,077 lines — adaptive pattern learning
+│   ├── learning_agent_v2.py           # 186 lines — mixin helper for memory control
 │   ├── momentum_agent.py              # 191 lines — RSI/MACD momentum
-│   └── ... (18 more agents)
+│   ├── time_session_agent.py          # 177 lines — time zone gatekeeper
+│   ├── trap_agent.py                  # 264 lines — bull/bear trap detection
+│   ├── oi_agent.py                    # 205 lines — open interest analysis
+│   ├── order_flow_agent.py            # 82 lines — bid-ask imbalance analysis
+│   ├── level_agent.py                 # 105 lines — support and resistance levels
+│   ├── institutional_agent.py         # 86 lines — FII/DII flow analysis
+│   ├── multi_timeframe_agent.py       # 187 lines — multi-timeframe alignment
+│   ├── volatility_agent.py            # 193 lines — volatility and ATR analysis
+│   ├── risk_agent.py                  # 238 lines — risk grading
+│   ├── decay_agent.py                 # 215 lines — options theta/IV decay analysis
+│   ├── expiry_day_agent.py            # 300 lines — expiry-day gamma risk
+│   ├── market_agent.py                # 164 lines — broad market trend agent
+│   ├── sentiment_agent.py             # 129 lines — market sentiment analysis
+│   ├── consolidation_agent.py         # 89 lines — consolidation detection (disabled)
+│   ├── correlation_agent.py           # 113 lines — asset correlation analysis (disabled)
+│   ├── delta_gamma_agent.py           # 94 lines — options delta/gamma risk (disabled)
+│   ├── expiry_agent.py                # 73 lines — expiry-day tracker (disabled)
+│   ├── gap_agent.py                   # 147 lines — market gap opening agent (disabled)
+│   └── __init__.py                    # 32 lines — explicit named import registry
 ├── config/                            # 3 config files
-│   ├── settings.py                    # 821 lines — master settings (v3.2)
+│   ├── settings.py                    # 899 lines — master settings (v4.8.0)
 │   ├── signal_weights.py              # 63 lines — agent weight registry
 │   └── config.py                      # 50 lines — broker credentials
-├── core/                              # 28 engine files
-│   ├── decision_engine_v3.py          # 945 lines — AI brain (phase routing)
-│   ├── position_manager.py            # ~1,646 lines — capital controller (with Hybrid TSL)
-│   ├── options_resolver.py            # Phase A — Option Strike/Instrument Builder
-│   ├── master_decision_engine.py      # 302 lines — single point of truth
-│   ├── simulation_engine.py           # 905 lines — paper trading
-│   ├── telegram_controller.py         # 580 lines — remote control
-│   ├── data_manager.py               # 716 lines — market data feed
-│   ├── threshold_tuner.py            # 508 lines — self-tuning thresholds
-│   ├── trade_filter.py               # 431 lines — 10-gate filter
-│   ├── slippage_model.py             # 378 lines — cost/slippage modeling
-│   ├── gap_penalty_manager.py        # 218 lines — ATR-normalised gap decay
-│   ├── log_observer.py               # 199 lines — intraday intelligence
-│   ├── oms.py                         # P0.3 — Persistent OMS state machine (WAL, event-sourced)
-│   ├── economics.py                   # P0.5 — CostEngine: exact net P&L (STT, brokerage, GST, etc.)
-│   ├── snapshot.py                    # P0.6 — Decision snapshot writer (SHA-256 fingerprinting)
-│   ├── system_fingerprint.py         # 98 lines — runtime state snapshot for replay
-│   └── ... (16 more core modules)
+├── core/                              # 41 engine files
+│   ├── alert_manager.py               # 179 lines — manages alert dispatching and cooldowns
+│   ├── confluence_scorer.py           # 78 lines — computes consensus scoring
+│   ├── data_manager.py                # 1,014 lines — market data feed and Option Chain fetches
+│   ├── db_manager.py                  # 368 lines — persistent SQLite manager
+│   ├── decision_engine_v3.py          # 2,044 lines — active AI brain (phase routing)
+│   ├── discipline_engine.py           # 299 lines — revenge trade blocker & cooldown enforcement
+│   ├── economics.py                   # 137 lines — CostEngine: exact net P&L calculations
+│   ├── entry_engine.py                # 151 lines — order entry queue & execution
+│   ├── exit_engine.py                 # 159 lines — intelligent exit manager & daily profit targets
+│   ├── gap_penalty_manager.py         # 222 lines — ATR-normalised gap penalty calculation
+│   ├── log_observer.py                # 247 lines — intraday expectancy and latency observer
+│   ├── master_decision_engine.py      # 334 lines — single point of truth for trade approvals
+│   ├── memory_manager.py              # 117 lines — learning agent memory persistence & trim
+│   ├── metrics_engine.py              # 304 lines — performance metrics calculations
+│   ├── metrics_logger.py              # 78 lines — CSV logger for runtime metrics
+│   ├── oms.py                         # 173 lines — persistent OMS state machine (WAL, event-sourced)
+│   ├── options_resolver.py            # 158 lines — option strike and instrument builder (Phase A)
+│   ├── order_tracker.py               # 114 lines — tracks live broker order status
+│   ├── position_manager.py            # 1,796 lines — capital sizing and Hybrid Trailing Stop Loss (TSL)
+│   ├── regime_classifier.py           # 144 lines — machine learning regime classification
+│   ├── regime_detector.py             # 49 lines — basic regime threshold detector
+│   ├── regime_state_manager.py        # 74 lines — manages regime state and transition logs
+│   ├── risk_manager.py                # 201 lines — limits capital risk & daily loss
+│   ├── session_guard.py               # 28 lines — session block checker
+│   ├── session_strategy.py            # 141 lines — session-specific trading rules
+│   ├── signal_lifecycle.py            # 128 lines — handles signal state changes & JSONL logs
+│   ├── signal_quality.py              # 184 lines — grades signal quality (A+ through D)
+│   ├── simulation_engine.py           # 914 lines — paper trading simulator with 0.3% slippage
+│   ├── slippage_model.py              # 378 lines — cost & slippage modeling
+│   ├── snapshot.py                    # 247 lines — writes decision snapshots to SQLite
+│   ├── state_tracker.py               # 50 lines — records env state transitions
+│   ├── structural_breaker.py          # 103 lines — checks ACK delays, duplicate orders, etc.
+│   ├── system_fingerprint.py          # 96 lines — generates system fingerprints for replay
+│   ├── system_state.py                # 180 lines — handles system-wide state transitions
+│   ├── telegram_controller.py         # 745 lines — remote dashboard & Telegram alerts
+│   ├── threshold_tuner.py             # 508 lines — self-tuning thresholds
+│   ├── trade_filter.py                # 548 lines — 10-gate signal filter
+│   ├── trade_logger.py                # 118 lines — logs detailed trade outcomes
+│   └── __init__.py                    # 4 lines
 ├── models/                            # Data models
-│   ├── signals.py                     # 456 lines — Signal, MarketSnapshot, enums
-│   └── trade_record.py               # 66 lines
-├── nifty_strategy/                    # Architecture 2 (standalone strategy)
-│   ├── signal_bridge.py              # 742 lines
-│   ├── strategy.py                   # 522 lines
-│   ├── paper_trader.py               # 447 lines
-│   └── ... (8 more files)
-├── utils/                             # Helpers & indicators
-│   ├── indicators.py                 # 336 lines — TA indicator library
-│   └── ... (6 more files)
+│   ├── signals.py                     # 506 lines — Signal, MarketSnapshot, enums
+│   └── trade_record.py                # 66 lines
+├── nifty_strategy/                    # Architecture 2 (standalone strategy) — 11 files
+│   ├── config.py                      # 96 lines — settings configuration for standalone strategy
+│   ├── data_provider.py               # 229 lines — market data provider for strategy
+│   ├── indicators.py                  # 147 lines — indicators calculation library
+│   ├── main.py                        # 290 lines — main execution orchestrator for Architecture 2
+│   ├── options_selector.py            # 167 lines — selects appropriate option instruments
+│   ├── paper_trader.py                # 447 lines — paper trading simulator
+│   ├── risk_manager.py                # 360 lines — risk management logic
+│   ├── signal_bridge.py               # 742 lines — bridges trading signals to execution
+│   ├── strategy.py                    # 522 lines — core strategy rules & entry/exit logic
+│   ├── test_strategy.py               # 262 lines — unit tests for the strategy logic
+│   └── trade_executor.py              # 375 lines — order routing & execution bridge
+├── utils/                             # Helpers & indicators — 7 files
+│   ├── indicators.py                  # 336 lines — TA indicator library
+│   ├── helpers.py                     # 64 lines — helper utilities
+│   ├── logger.py                      # 132 lines — HFT-optimized logging module
+│   ├── performance_analyzer.py        # 130 lines — performance analysis helper
+│   ├── tasks.py                       # 20 lines — asynchronous tasks definition
+│   ├── trade_logger.py                # 41 lines — trade event logger
+│   └── __init__.py                    # 2 lines
 ├── web/
-│   └── dashboard.py                  # 433 lines — Flask+SocketIO dashboard
-├── tests/                             # 6 test files
+│   └── dashboard.py                   # 555 lines — Flask+SocketIO dashboard
+├── tests/                             # 8 files (7 test modules + __init__.py)
+│   ├── test_agents.py                 # 121 lines — tests agent outputs and shapes
+│   ├── test_breakers.py               # 239 lines — tests structural breakers and state recovery
+│   ├── test_dhan_client.py            # 132 lines — tests simulation guard and token parser
+│   ├── test_master_decision_engine.py # 71 lines — tests basic master approval flow
+│   ├── test_p0_fixes.py               # 153 lines — tests database mismatch and orphan position fixes
+│   ├── test_risk_manager.py           # 94 lines — tests daily loss limits
+│   ├── test_sl_guarantee.py           # 165 lines — tests post-fill stop-loss retry placement loop
+│   └── __init__.py                    # 1 line
+├── tools/                             # 2 tool files
+│   ├── journal_writer.py              # 335 lines — offline journal formatter
+│   └── reconstruct_cohort3.py         # 129 lines — cohort analytics reconstructor
 ├── scripts/
-│   └── preflight.py                  # 110 lines — pre-deployment checks
+│   └── preflight.py                   # 117 lines — pre-deployment checks
 ├── data/                              # Runtime: logs, DB, state files
-├── dhan_client.py                    # 197 lines — broker singleton (sim-guarded)
-├── options_analyzer.py               # 308 lines — OI/PCR/max-pain filter
-├── main.py                           # ~1,465 lines — system orchestrator
-├── replay.py                         # P0.6 — Deterministic replay CLI
-├── watchdog.py                       # P0.3 — Independent risk supervisor
-├── Dockerfile                        # Python 3.11-slim, IST timezone
-└── docker-compose.yml                # Healthcheck, volume mounts, restart:always
+├── dhan_client.py                     # 201 lines — broker client (sim-guarded)
+├── options_analyzer.py                # 350 lines — OI/PCR/max-pain filter
+├── main.py                            # 1,696 lines — system orchestrator
+├── replay.py                          # 536 lines — deterministic replay CLI
+├── watchdog.py                        # 193 lines — deadman watchdog supervisor
+├── Dockerfile                         # Python 3.11-slim, IST timezone
+└── docker-compose.yml                 # Healthcheck, volume mounts, restart:always
 ```
 
-**Total Python lines**: ~20,000+ across 95 files.
+**Total Python lines**: ~32,200+ across 123 files.
 
 ---
 
@@ -123,19 +186,19 @@ flowchart TD
 
 ### Data Flow (Real File Names)
 
-1. **Data Fetch** → [data_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/data_manager.py) (716 lines) fetches 1-min OHLCV from Dhan API or generates simulated data
+1. **Data Fetch** → [data_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/data_manager.py) (1,014 lines) fetches 1-min OHLCV from Dhan API or generates simulated data
 2. **OI Data Fetch** → `_get_oi_data()` in `data_manager.py` pulls `total_ce_oi`, `total_pe_oi`, `pcr`, `max_pain` from Dhan option chain API (60s cache). Falls back to simulated OI transparently. Sets `DataSource.REAL` flag.
-3. **Agent Processing** → [decision_engine_v3.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/decision_engine_v3.py) (945 lines) runs agents in 4 phases: Gatekeepers → Core Direction → Dynamic Confirmation → Risk
-4. **Gap Penalty** → [gap_penalty_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/gap_penalty_manager.py) (218 lines) computes ATR-normalised, time-decaying gap penalty (replaces old binary flag)
+3. **Agent Processing** → [decision_engine_v3.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/decision_engine_v3.py) (2,044 lines) runs agents in 4 phases: Gatekeepers → Core Direction → Dynamic Confirmation → Risk
+4. **Gap Penalty** → [gap_penalty_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/gap_penalty_manager.py) (222 lines) computes ATR-normalised, time-decaying gap penalty (replaces old binary flag)
 5. **Unified Uncertainty** → Engine merges gap penalty + regime confidence into ONE multiplier (`min(gap_mult, regime_mult)`) — eliminates double-counting
 6. **Sigmoid Normalization** → Post-penalty scores pass through `_sigmoid_normalize()` to restore distribution spread before grading
 7. **Weighted Scoring** → `compute_weighted_score()` aggregates agent outputs with reliability multipliers using [signal_weights.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/config/signal_weights.py)
-8. **10-Gate Filter** → [trade_filter.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/trade_filter.py) (431 lines) runs Confidence → Confluence → Agreement → Regime → Structure → Cost → Daily Limit → Learning → Decay → Quality gates
-9. **Options Hard Filter** → [options_analyzer.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/options_analyzer.py) (308 lines) checks PCR, OI bias, max-pain distance via Dhan option chain
-10. **Master Gate** → [master_decision_engine.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/master_decision_engine.py) (302 lines) runs 9 sequential gates (G0-G8) — the **single point of truth**
+8. **10-Gate Filter** → [trade_filter.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/trade_filter.py) (548 lines) runs Confidence → Confluence → Agreement → Regime → Structure → Cost → Daily Limit → Learning → Decay → Quality gates
+9. **Options Hard Filter** → [options_analyzer.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/options_analyzer.py) (350 lines) checks PCR, OI bias, max-pain distance via Dhan option chain
+10. **Master Gate** → [master_decision_engine.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/master_decision_engine.py) (334 lines) runs 9 sequential gates (G0-G8) — the **single point of truth**
 11. **Self-Tuning** → [threshold_tuner.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/threshold_tuner.py) (508 lines) adjusts MIN_GAP and MIN_CONFIDENCE via split-control feedback loops with oscillation guards
-12. **Execution** → [position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (1,481 lines) sizes position and routes to broker via [dhan_client.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/dhan_client.py) (197 lines)
-13. **Intraday Intelligence** → [log_observer.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/log_observer.py) (199 lines) intercepts trades, measures expectancy, calculates cycle latency, and flags regime-specific edge erosion.
+12. **Execution** → [position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (1,796 lines) sizes position and routes to broker via [dhan_client.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/dhan_client.py) (201 lines)
+13. **Intraday Intelligence** → [log_observer.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/log_observer.py) (247 lines) intercepts trades, measures expectancy, calculates cycle latency, and flags regime-specific edge erosion.
 14. **Heartbeat** → At end of every `_run_cycle()`, `main.py` pings `HEARTBEAT_URL` (healthchecks.io). Missed pings trigger an external alert.
 15. **Deadman Watchdog** → Background `_deadman_watchdog()` task force-closes all positions if main loop stalls for >30s.
 
@@ -144,36 +207,36 @@ flowchart TD
 ## 🔥 God Nodes (Critical Components)
 
 ### 1. `main.py` — System Orchestrator
-- **File**: [main.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/main.py) (1,120 lines)
+- **File**: [main.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/main.py) (1,696 lines)
 - **Used by**: Entry point — everything starts here
 - **Affects**: ALL components — initializes every engine, runs the async market loop
 - **If it breaks**: **Entire system goes down**. No trades, no monitoring, no alerts.
-- **Key method**: `execute_signal()` (line 658) — THE ONLY execution path for live trades
+- **Key method**: `execute_signal()` (line 1073) — THE ONLY execution path for live trades
 - **New in v4.6.1**: Deadman watchdog, candle-based dedup, trade frequency guard, broker reconciliation
 
 ### 2. `core/position_manager.py` — Capital Controller
-- **File**: [position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (~1,646 lines)
+- **File**: [position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (~1,796 lines)
 - **Used by**: `main.py`, `master_decision_engine.py`, `telegram_controller.py`
 - **Affects**: Position sizing, SL/TP management, capital tracking, daily P&L
 - **If it breaks**: **Unlimited risk exposure** — positions could open without SL, wrong sizing, capital not tracked
 - **Key safety**: `open_position_with_sl_guarantee()` — atomic SL placement with retry loop
 
 ### 3. `core/master_decision_engine.py` — Single Point of Truth
-- **File**: [master_decision_engine.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/master_decision_engine.py) (302 lines)
+- **File**: [master_decision_engine.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/master_decision_engine.py) (334 lines)
 - **Used by**: `main.py` (3 call sites), `telegram_controller.py`, `execute_signal()`
 - **Affects**: ALL trade approvals — every order must pass `approve()`
 - **If it breaks**: **Trades bypass all safety gates** or all trades get blocked permanently
 - **Key contract**: Returns `ApprovalResult` dataclass. `__bool__` raises `TypeError` — forces `.approved` usage
 
 ### 4. `core/decision_engine_v3.py` — The AI Brain
-- **File**: [decision_engine_v3.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/decision_engine_v3.py) (945 lines)
+- **File**: [decision_engine_v3.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/decision_engine_v3.py) (2,044 lines)
 - **Used by**: `main.py` via `self.decision_engine.process()`
 - **Affects**: Signal generation, agent routing, regime detection, confidence scoring
 - **If it breaks**: **No signals generated** — system sits idle, or worse, generates bad signals
 - **New in v4.6.1**: Phase 1 latency cache (regime/structure), early kill-switch, opening gap session guard, unified uncertainty factor, sigmoid normalization, agent reliability multipliers, self-tuning thresholds
 
 ### 5. `dhan_client.py` — Broker Connection
-- **File**: [dhan_client.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/dhan_client.py) (197 lines)
+- **File**: [dhan_client.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/dhan_client.py) (201 lines)
 - **Used by**: `data_manager.py`, `options_analyzer.py`, `trade_executor.py`
 - **Affects**: ALL real market data and order execution
 - **If it breaks**: **Complete data blackout** + **orders fail silently** if not caught
@@ -187,12 +250,12 @@ flowchart TD
 | Agent | Lines | Role | Cache TTL |
 |-------|-------|------|-----------|
 | `time_session` | 177 | Block no-trade time zones | — |
-| `regime` | 420 | Detect market regime (TRENDING/RANGING/VOLATILE/SQUEEZE/BREAKOUT) | 60s |
+| `regime` | 422 | Detect market regime (TRENDING/RANGING/VOLATILE/SQUEEZE/BREAKOUT) | 60s |
 
 ### Phase 2: Core Direction (The Strategists)
 | Agent | Lines | Role | Reliability |
 |-------|-------|------|-------------|
-| `structure` | 629 | BOS, CHoCH, FVGs, Order Blocks (ICT concepts) | 1.30 |
+| `structure` | 631 | BOS, CHoCH, FVGs, Order Blocks (ICT concepts) | 1.30 |
 | `price_action` | 359 | Candlestick patterns, engulfing, pin bars | 1.25 |
 | `momentum` | 191 | RSI, MACD, momentum divergence | 1.10 |
 
@@ -221,7 +284,7 @@ flowchart TD
 `consolidation`, `correlation`, `delta_gamma`, `expiry`, `gap` — confirmed unused in execution paths.
 
 **Suppression Mechanism** (3 layers of protection):
-1. **Config allowlist**: Only agents in `active_agents` list (`config/settings.py:EnginePipelineConfig`, line 643) are instantiated by `DecisionEngineV3.__init__()`. Agents not listed are **never constructed** — zero CPU.
+1. **Config allowlist**: Only agents in `active_agents` list (`config/settings.py:EnginePipelineConfig`, line 705/718) are instantiated by `DecisionEngineV3.__init__()`. Agents not listed are **never constructed** — zero CPU.
 2. **Startup assertion**: `EXPECTED_ACTIVE_AGENT_COUNT = 18` fires `AssertionError` if loaded count drifts.
 3. **Explicit imports**: `agents/__init__.py` uses **explicit named imports only** — no `import *`, no `os.listdir()`, no `pkgutil.iter_modules()`. This prevents accidental loading of files in the directory.
 
@@ -332,7 +395,7 @@ flowchart LR
 ```
 
 > [!NOTE]
-> The Master Gate runs **inside** `execute_signal()` (main.py line 672), NOT before the filters.
+> The Master Gate runs **inside** `execute_signal()` (main.py line 1091), NOT before the filters.
 > Actual code order: Signal → 10-Gate Filter (step 9) → Options Filter (step 11) → `execute_signal()` → Master Gate `approve()` (step 12).
 > The Master Gate runs **twice**: once on initial entry (`mode="new"`) and again on confirmation (`mode="confirmed"`).
 
@@ -541,7 +604,7 @@ flowchart LR
 - **Fix**: G0 now reads `gap_manager.get_status()` from the approval `context`. On CRITICAL gap (>40% initial penalty): threshold raised by up to **25%**. On MAJOR gap (>10% current penalty): up to **15%**. The boost is proportional to remaining penalty and decays naturally as the gap penalty melts — so the entry bar automatically normalises by ~10:15 AM with no manual intervention needed.
 
 ### 14. ✅ FIXED — CostEngine DB Path Mismatch (2026-05-18)
-- **File**: [core/position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (line 1364)
+- **File**: [core/position_manager.py](file:///c:/Users/Selva/Downloads/nifty-ai-system/core/position_manager.py) (line 1433)
 - **Root Cause**: `CostEngine.save_trade_economics()` was called with a fallback of `self.config.db_path if hasattr(...) else "data/trading_v4.db"`. Since `PositionConfig` has no `db_path` field, this always silently resolved to the hardcoded `data/trading_v4.db` — a **third different DB file**, causing `trade_economics` records to be written to a file that was never schema-initialized. This was the same class of bug as the OMS path mismatch.
 - **Fix**: Replaced with the same `SYSTEM_MODE`-aware inline resolution: `data/trading_v4_live.db` or `data/trading_v4_sim.db`. All three components (DBManager, OMS, CostEngine) now write to the **exact same path**.
 
@@ -569,8 +632,8 @@ flowchart LR
 > - `dhan_client.py` (line 7) — already existed
 > - `core/position_manager.py` (line 21) — added
 > - `core/master_decision_engine.py` (line 19) — added
-> - `main.py:execute_signal()` (line 665) — added
-> - `core/decision_engine_v3.py` (line 19) — added
+> - `main.py:execute_signal()` (line 1081) — added
+> - `core/decision_engine_v3.py` (line 31) — added
 
 ```python
 # ⚠️ AI WARNING: core/position_manager.py
@@ -642,7 +705,7 @@ flowchart LR
 | Latency Optimization | ✅ DONE | No — early kill-switch + Phase 1 cache |
 | Docker Deployment & Healthcheck | ✅ DONE | No |
 | Pre-Flight Check Script | ✅ DONE | No |
-| Test Suite (6 test files) | ⚠️ PARTIAL | See coverage table below |
+| Test Suite (7 test files) | ⚠️ PARTIAL | See coverage table below |
 | **Real Market Data Burn-In (2–3 days)** | ⚠️ INCOMPLETE | **Yes — do this before real ₹** |
 
 ### Test Coverage Detail
@@ -655,6 +718,7 @@ flowchart LR
 | `test_p0_fixes.py` | P0 critical fixes (reconciliation, deadman) | No |
 | `test_risk_manager.py` | Daily loss limits, P&L tracking | No |
 | `test_agents.py` | Agent instantiation, output format | ⚠️ Doesn't test agent accuracy |
+| `test_breakers.py` | TradingStateManager state transitions and StructuralBreaker guards (ACK/Duplicate check/SL attached check/mismatch/Telegram sync checks) | No |
 
 **Untested Critical Paths**:
 - `position_manager.py:calculate_position_size()` — no unit tests for sizing edge cases

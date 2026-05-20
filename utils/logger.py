@@ -22,6 +22,7 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
     """Create a structured logger for any module"""
 
     logger = logging.getLogger(name)
+    logger.propagate = False
 
     if logger.handlers:
         return logger

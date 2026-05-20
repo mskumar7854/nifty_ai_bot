@@ -30,16 +30,46 @@ async def run_test():
             import pandas as pd
             self.ohlcv_data = pd.DataFrame([{"close": 22700.0}])
         def get_ltp(self, symbol): return 22700.0
+        def get_latest_data(self):
+            class MockSnapshot:
+                price = 22700.0
+            return None, MockSnapshot()
+
+    class MockSystem:
+        def __init__(self, entry_engine=None, data_manager=None):
+            self.risk_manager = None
+            self.position_manager = None
+            self.entry_engine = entry_engine
+            self.data_manager = data_manager
+            self.broker_health = None
+            self.telegram_enabled = True
+            self.is_simulation = True
+            self.running = True
+            self.trading_enabled = True
+            
+            class MockMaster:
+                def approve(self, signal_type):
+                    class MockApproval:
+                        approved = True
+                        reason = ""
+                    return MockApproval()
+            self.master = MockMaster()
+
+        async def execute_signal(self, signal, mode="new"):
+            print(f"🔥 Unified EXECUTION: {signal.id} mode={mode}")
 
     mock_engine = MockEngine()
     mock_dm = MockDM()
     
-    bot = TelegramController(settings, mock_engine, mock_dm, None, None, db)
+    bot = TelegramController(settings, MockSystem(mock_engine, mock_dm), db)
     # We need a dummy App object to handle message sending in the background task
     class MockApp:
         class Bot:
             async def send_message(self, *args, **kwargs):
                 print(f"   [Bot Notification] {kwargs.get('text')}")
+                class MockMsg:
+                    message_id = 9999
+                return MockMsg()
         bot = Bot()
     bot.app = MockApp()
 
@@ -56,6 +86,7 @@ async def run_test():
         target_1=22800.0,
         position_size=50
     )
+    signal.symbol = "NIFTY"
     
     print(f"📡 STEP 1: Processing new signal {sig_id} (Expiry set to 2s)...")
     await bot.process_signal(signal)

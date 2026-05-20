@@ -48,15 +48,30 @@ class DataManager:
         self.prev_day_close: Optional[float] = None
         self._day_open: Optional[float] = None   # today's first candle open
         self._api_security_id = None
-        self._api_exchange_segment = "IDX_I"  # Default for index
+        # ── Spot index candles live in IDX_I (Option chains live in NSE_FNO) ──
+        self._api_exchange_segment = "IDX_I"
         self._api_instrument_type = "INDEX"
+        self._logged_fo_auth_warning = False
         self._api_failures = 0
         self._api_circuit_breaker_until = 0.0
+
+        # ── API Polling Telemetry & Cadence Cooldown (Phase 2 Optimization) ──
+        self._last_api_fetch_ts = 0.0
+        self._api_fetch_cooldown = 10.0  # seconds (safe & lightweight)
+        self._api_cache_hit_count = 0
+        self._api_fetch_count = 0
+        self._api_total_latency_ms = 0.0
 
         # ── Real OI Cache (refreshed every 60s) ──
         self._oi_cache: dict = {}
         self._oi_last_fetch: float = 0.0
         self._oi_fetch_interval: float = 60.0  # seconds
+
+        # ── OI Health Tracking ──
+        self._oi_fail_count: int = 0      # total failures this session
+        self._oi_success_count: int = 0   # total successes this session
+        self._oi_last_success_ts: float = 0.0  # epoch of last successful fetch
+        self._oi_last_fetch_ms: float = 0.0    # latency of last fetch attempt
 
         # Simulated state
         self._sim_price = 23400.0
@@ -160,14 +175,20 @@ class DataManager:
 
     def _get_oi_data(self) -> dict:
         """
-        🟢 REAL OI DATA FETCHER (Step 2 Implementation)
+        🟢 REAL OI DATA FETCHER
         Pulls option chain from Dhan API and extracts:
           - total_ce_oi, total_pe_oi, pcr, max_pain, india_vix
           - max_ce_oi_strike, max_pe_oi_strike
 
         - Runs on a 60s cache to avoid API rate limits.
-        - Falls back to simulated data on any failure.
+        - Retries up to 3 times on transient failure (with 1s/2s backoff).
+        - Logs every 5th failure at WARNING (not just the first).
+        - Falls back to simulated data only after all retries exhausted.
         - Sets DataSource.REAL flag when successful.
+        - Tracks OI health metrics: _oi_fail_count, _oi_success_count, _oi_last_fetch_ms.
+
+        Segment: NSE_FNO (required for option chain — IDX_I is index spot only).
+        security_id: cast to int before API call (Dhan API is type-strict).
         """
         import time as _time
         now = _time.time()
@@ -179,58 +200,102 @@ class DataManager:
         if self.data_source != "api":
             return {'data_source': DataSource.SIMULATED}  # Caller will use simulated fallback
 
+        # ── Expiry resolution ──
+        from datetime import date, timedelta, datetime as _dt
+        today = date.today()
+        days_to_thursday = (3 - today.weekday()) % 7
+        if days_to_thursday == 0:
+            # On Thursday: use next week's expiry after 15:30 (options expired)
+            if _dt.now().hour > 15 or (_dt.now().hour == 15 and _dt.now().minute >= 30):
+                days_to_thursday = 7
+        expiry = today + timedelta(days=days_to_thursday)
+        expiry_str = expiry.strftime("%Y-%m-%d")
+
         try:
             dhan = get_dhan_client()
-            instrument = self.settings.trading.instrument.upper()  # "NIFTY"
-
-            # Dhan option chain call — find nearest THURSDAY expiry
-            # NIFTY weekly options expire on Thursday.
-            # (3 - weekday) % 7 gives days to Thursday, but returns 0 ON Thursday.
-            # On Thursday itself, we want THIS Thursday if before 3:30 PM,
-            # otherwise NEXT Thursday. Use `or 7` for safety after expiry.
-            from datetime import date, timedelta
-            today = date.today()
-            days_to_thursday = (3 - today.weekday()) % 7
-            if days_to_thursday == 0:
-                # On Thursday: check if market is still open (use next week after 16:00)
-                from datetime import datetime as _dt
-                if _dt.now().hour >= 16:
-                    days_to_thursday = 7
-            expiry = today + timedelta(days=days_to_thursday)
-            expiry_str = expiry.strftime("%Y-%m-%d")
 
             if self._api_security_id is None:
                 self._api_security_id = self._discover_nifty_id(dhan)
 
-            self.logger.debug(
-                f"OI Fetch: security_id={self._api_security_id} "
-                f"segment={self._api_exchange_segment} expiry={expiry_str}"
-            )
+            # ── FIX: security_id must be int for Dhan API ──
+            security_id_int = int(self._api_security_id)
 
-            response = dhan.option_chain(
-                under_security_id=self._api_security_id,
-                under_exchange_segment=self._api_exchange_segment,
-                expiry=expiry_str
-            )
+            # Construct and log the full raw request payload
+            payload_log = {
+                "security_id": security_id_int,
+                "exchange_segment": "NSE_FNO",
+                "expiry": expiry_str,
+                "underlying": "NIFTY",
+                "request_json": {
+                    "under_security_id": security_id_int,
+                    "under_exchange_segment": "NSE_FNO",
+                    "expiry": expiry_str
+                }
+            }
+            self.logger.info(f"📤 Sending Option Chain Request: {payload_log}")
 
-            if response.get('status') != 'success':
-                # Log the FULL response on first failure to diagnose API issues
-                if not hasattr(self, '_oi_fail_logged'):
-                    self.logger.warning(
-                        f"⚠️ OI Fetch FAILED (first occurrence) | "
-                        f"security_id={self._api_security_id} | "
-                        f"segment={self._api_exchange_segment} | "
-                        f"expiry={expiry_str} | "
-                        f"status={response.get('status')} | "
-                        f"remarks={response.get('remarks')} | "
-                        f"full_response_keys={list(response.keys())}"
+            # ── Retry loop: 3 attempts with exponential backoff ──
+            response = None
+            last_error = None
+            t_fetch_start = _time.perf_counter()
+
+            for attempt in range(3):
+                try:
+                    response = dhan.option_chain(
+                        under_security_id=security_id_int,
+                        under_exchange_segment="NSE_FNO",
+                        expiry=expiry_str
                     )
-                    self._oi_fail_logged = True
-                else:
-                    self.logger.debug(f"OI Fetch failed: {response.get('remarks')}")
-                return {'data_source': DataSource.SIMULATED}
+                    # Log the full raw response body
+                    self.logger.info(f"📥 Received Option Chain Response: {response}")
 
-            # Dhan option_chain response can have different nesting structures
+                    if response.get('status') == 'success':
+                        break  # Success — exit retry loop
+                    last_error = response.get('remarks', 'unknown')
+                    if attempt < 2:
+                        _time.sleep(2 ** attempt)  # 1s, 2s backoff
+                except Exception as retry_exc:
+                    last_error = str(retry_exc)
+                    if attempt < 2:
+                        _time.sleep(2 ** attempt)
+
+            self._oi_last_fetch_ms = ((_time.perf_counter() - t_fetch_start) * 1000)
+
+            if response is None or response.get('status') != 'success':
+                # Parse and inspect the response for F&O authorization error (nested code 808 or auth fails)
+                is_fo_auth_failure = False
+                if response is not None:
+                    inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+                    if "808" in inner_data or any("Authentication Failed" in str(v) for v in inner_data.values()):
+                        is_fo_auth_failure = True
+                
+                if is_fo_auth_failure:
+                    if not self._logged_fo_auth_warning:
+                        self.logger.warning(
+                            "🚨 Dhan account F&O segment API access is not active. "
+                            "Falling back to simulated/estimated option chain metrics for session continuation."
+                        )
+                        self._logged_fo_auth_warning = True
+
+                # ── Per-count failure logging (not just first-occurrence) ──
+                self._oi_fail_count += 1
+                if self._oi_fail_count % 5 == 1:  # log 1st, 6th, 11th...
+                    self.logger.warning(
+                        f"⚠️ OI Fetch FAILED (#{self._oi_fail_count}) | "
+                        f"security_id={security_id_int} | "
+                        f"segment=NSE_FNO | "
+                        f"expiry={expiry_str} | "
+                        f"status={response.get('status') if response else 'no_response'} | "
+                        f"remarks={response.get('remarks') if response else last_error} | "
+                        f"fetch_ms={self._oi_last_fetch_ms:.0f}"
+                    )
+                else:
+                    self.logger.debug(
+                        f"OI Fetch failed (#{self._oi_fail_count}): {last_error}"
+                    )
+                return {'data_source': DataSource.SIMULATED, 'fetch_ms': self._oi_last_fetch_ms}
+
+            # ── Parse option chain ──
             # Handle both: response['data']['data'] and response['data'] as list
             raw_data = response.get('data', {})
             if isinstance(raw_data, dict):
@@ -241,12 +306,13 @@ class DataManager:
                 chain = []
 
             if not chain:
+                self._oi_fail_count += 1
                 self.logger.warning(
-                    f"⚠️ OI Fetch: API success but chain is EMPTY | "
+                    f"⚠️ OI Fetch: API success but chain is EMPTY (#{self._oi_fail_count}) | "
                     f"expiry={expiry_str} | data_type={type(raw_data).__name__} | "
                     f"data_keys={list(raw_data.keys()) if isinstance(raw_data, dict) else 'N/A'}"
                 )
-                return {'data_source': DataSource.SIMULATED}
+                return {'data_source': DataSource.SIMULATED, 'fetch_ms': self._oi_last_fetch_ms}
 
             total_ce_oi, total_pe_oi = 0.0, 0.0
             max_ce_oi, max_pe_oi = 0.0, 0.0
@@ -282,20 +348,24 @@ class DataManager:
                 'max_pe_oi_strike': max_pe_strike,
                 'india_vix': self._sim_vix,  # VIX from separate Dhan call if needed
                 'data_source': DataSource.REAL,
+                'fetch_ms': self._oi_last_fetch_ms,
             }
 
             self._oi_cache = result
             self._oi_last_fetch = now
-            self._oi_fail_logged = False  # Reset so next failure gets logged
+            self._oi_success_count += 1
+            self._oi_last_success_ts = now
             self.logger.info(
                 f"🟢 REAL OI Fetched: CE={total_ce_oi/1e6:.1f}M | "
-                f"PE={total_pe_oi/1e6:.1f}M | PCR={pcr}"
+                f"PE={total_pe_oi/1e6:.1f}M | PCR={pcr} | "
+                f"fetch_ms={self._oi_last_fetch_ms:.0f}"
             )
             return result
 
         except Exception as e:
-            self.logger.warning(f"⚠️ OI Fetch exception (using simulated): {e}")
-            return {'data_source': DataSource.SIMULATED}
+            self._oi_fail_count += 1
+            self.logger.warning(f"⚠️ OI Fetch exception (#{self._oi_fail_count}, using simulated): {e}")
+            return {'data_source': DataSource.SIMULATED, 'fetch_ms': getattr(self, '_oi_last_fetch_ms', 0)}
 
     def fetch_option_quote(self, strike: int, opt_type: str, expiry: str) -> "OptionQuote":
         """
@@ -318,7 +388,7 @@ class DataManager:
                     
                 response = dhan.option_chain(
                     under_security_id=self._api_security_id,
-                    under_exchange_segment=self._api_exchange_segment,
+                    under_exchange_segment="NSE_FNO",
                     expiry=expiry
                 )
                 
@@ -557,6 +627,20 @@ class DataManager:
             self.fetch_latest()
         return self.ohlcv_data
 
+    def get_polling_telemetry(self) -> dict:
+        """
+        Exposes active API cadence & polling metrics for characterization.
+        """
+        avg_latency = 0.0
+        if self._api_fetch_count > 0:
+            avg_latency = self._api_total_latency_ms / self._api_fetch_count
+        return {
+            "last_api_fetch_ts": self._last_api_fetch_ts,
+            "cache_hit_count": self._api_cache_hit_count,
+            "api_fetch_count": self._api_fetch_count,
+            "avg_fetch_latency": avg_latency
+        }
+
     # ============================================
     # SIMULATED DATA (for development/testing)
     # ============================================
@@ -667,6 +751,18 @@ class DataManager:
         if time.time() < self._api_circuit_breaker_until:
             return pd.DataFrame()
 
+        # 🚀 CADENCE OPTIMIZATION: If we already have warmed-up data and are within
+        # the cooldown window, return the local cache immediately to prevent broker spamming.
+        now = time.time()
+        if self.ohlcv_data is not None and not self.ohlcv_data.empty:
+            time_since_last_api = now - self._last_api_fetch_ts
+            if time_since_last_api < self._api_fetch_cooldown:
+                self._api_cache_hit_count += 1
+                self.logger.debug(
+                    f"⚡ Retrieving candles from memory cache (cooldown: {self._api_fetch_cooldown - time_since_last_api:.1f}s remaining)"
+                )
+                return self.ohlcv_data
+
         try:
             dhan = get_dhan_client()
 
@@ -684,12 +780,29 @@ class DataManager:
             else:
                 from_date_str = today_str
 
-            response = dhan.intraday_minute_data(
-                security_id=self._api_security_id,
-                exchange_segment=self._api_exchange_segment,
-                instrument_type=self._api_instrument_type,
-                from_date=from_date_str,
-                to_date=today_str
+            t_start = time.perf_counter()
+            self.logger.info(
+                f"🕯️ Candle fetch started: security_id={self._api_security_id} | "
+                f"exchange_segment={self._api_exchange_segment} | "
+                f"from_date={from_date_str} to_date={today_str}"
+            )
+
+            try:
+                response = dhan.intraday_minute_data(
+                    security_id=self._api_security_id,
+                    exchange_segment=self._api_exchange_segment,
+                    instrument_type=self._api_instrument_type,
+                    from_date=from_date_str,
+                    to_date=today_str
+                )
+            except Exception as e:
+                # Catch connection or timeout errors here
+                self.logger.error(f"❌ Candle fetch Exception (possible timeout/network hang): {e}")
+                raise e
+
+            fetch_time_ms = (time.perf_counter() - t_start) * 1000
+            self.logger.info(
+                f"🕯️ Candle fetch returned in {fetch_time_ms:.1f}ms | status={response.get('status')}"
             )
 
             if response.get('status') != 'success':
@@ -701,9 +814,14 @@ class DataManager:
                     self._api_circuit_breaker_until = time.time() + 60
                 return pd.DataFrame()
 
+            # Track successful network fetches
+            self._last_api_fetch_ts = time.time()
+            self._api_fetch_count += 1
+            self._api_total_latency_ms += fetch_time_ms
+
             raw_data = response.get('data', [])
             if not raw_data:
-                self.logger.warning("No data returned from API")
+                self.logger.warning("No data returned from API (empty candle list)")
                 return pd.DataFrame()
 
             # 3. Convert to DataFrame & Cleanup
@@ -735,6 +853,11 @@ class DataManager:
             df.sort_index(inplace=True)
             df = df[~df.index.duplicated(keep="last")]
 
+            # Cache insert count (number of raw and cleaned candles stored)
+            self.logger.info(
+                f"🕯️ Hydrated {len(raw_data)} raw candles from API. Cleaned dataframe size: {len(df)}"
+            )
+
             # 4. Pro-Safeguard: Drop last incomplete candle
             if len(df) > 1:
                 df = df.iloc[:-1]
@@ -744,8 +867,16 @@ class DataManager:
 
             # 6. Warmup Check
             if len(df) < self.settings.trade_filter.min_candles_warmup:
-                self.logger.info(f"API Warmup: {len(df)}/{self.settings.trade_filter.min_candles_warmup} candles...")
+                self.logger.info(
+                    f"API Warmup progress: {len(df)}/{self.settings.trade_filter.min_candles_warmup} candles. "
+                    f"Hydration NOT complete (reason='warmup_insufficient')"
+                )
                 return pd.DataFrame()
+
+            self.logger.info(
+                f"🎉 Hydration COMPLETE: {len(df)} candles warmed up. "
+                f"Reason='warmup_complete_passed' | df_1m size={len(df)}"
+            )
 
             # 7. Resampling (1m -> 5m)
             self.df_1m = df
@@ -765,10 +896,18 @@ class DataManager:
 
         except Exception as e:
             self._api_failures += 1
+            import requests
+            if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ReadTimeout)):
+                exit_reason = "timeout"
+            else:
+                exit_reason = "exception"
+            self.logger.critical(
+                f"API CRITICAL FAILURE during candle fetch: {str(e)} | "
+                f"exit_reason={exit_reason} | failures={self._api_failures}"
+            )
             if self._api_failures >= 3:
                 self.logger.critical("API Circuit Breaker TRIPPED! Suspending API calls for 60s")
                 self._api_circuit_breaker_until = time.time() + 60
-            self.logger.critical(f"API CRITICAL FAILURE: {str(e)}")
             # Stabilize execution: do not halt system, return empty DF to skip cycle
             return pd.DataFrame()
 

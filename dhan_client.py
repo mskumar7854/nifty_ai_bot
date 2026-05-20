@@ -191,7 +191,8 @@ def get_dhan_client() -> dhanhq:
         pool_config = {"max_retries": 0}
         real_client = dhanhq(CLIENT_ID, ACCESS_TOKEN, pool=pool_config)
         # 🚀 Fix for Latency/Orphaned Threads: Eliminate 20s stall via tuple timeout (Connect, Read)
-        real_client.timeout = (0.5, 2.0)
+        # Increased read timeout to 5.0s to ensure option chain/large data fetches succeed under load
+        real_client.timeout = (0.5, 5.0)
         logger.info(f"Dhan API client initialized ✓ (token valid ~{hours_left}h)")
 
         # ── P0-A: Wrap with simulation guard ──

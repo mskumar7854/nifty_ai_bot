@@ -166,6 +166,15 @@ class TradingStateManager:
         alert_msg = f"🔒 **STRUCTURAL PAUSE** 🔒\nReason: {reason}\n\nPersistent pause activated. Operator intervention required."
         logger.warning(alert_msg)
         self.send_alert(alert_msg)
+    def force_activate(self, reason: str = "Operator force activation"):
+        """Special bypass to override terminal or paused states, e.g., via /force_reconcile"""
+        old_state = self.state
+        self.state = "ACTIVE"
+        self.reason = reason
+        self.save_state()
+        logger.warning(f"🔓 FORCE ACTIVE override triggered: {old_state} ➔ ACTIVE | Reason: {self.reason}")
+        self.log_transition(old_state, "ACTIVE", self.reason, event_type="OPERATOR_ACTION", source="telegram")
 
 def get_state_manager() -> TradingStateManager:
     return TradingStateManager()
+

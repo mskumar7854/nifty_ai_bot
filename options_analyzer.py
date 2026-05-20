@@ -69,6 +69,7 @@ class OptionsAnalyzer:
         """Grab the shared Dhan client lazily to avoid token errors in SIMULATION."""
         self.mode = mode
         self._dhan = None
+        self._logged_fo_auth_warning = False
         if self.mode != "SIMULATION":
             self._dhan = get_dhan_client()
 
@@ -180,10 +181,25 @@ class OptionsAnalyzer:
     def _get_active_expiries(self, underlying_scrip: int) -> list:
         """Return list of 'YYYY-MM-DD' expiry strings for the given underlying."""
         try:
-            response = self._dhan.get_expiry_list(
-                underlying_security_id=underlying_scrip,
-                underlying_exchange_segment=self.NSE_FNO,
+            response = self._dhan.expiry_list(
+                under_security_id=underlying_scrip,
+                under_exchange_segment=self.NSE_FNO,
             )
+            
+            # Inspect the response for F&O authorization error (nested code 808 or auth fails)
+            inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+            is_fo_auth_failure = False
+            if "808" in inner_data or any("Authentication Failed" in str(v) for v in inner_data.values()):
+                is_fo_auth_failure = True
+
+            if is_fo_auth_failure:
+                if not getattr(self, "_logged_fo_auth_warning", False):
+                    logger.warning(
+                        "🚨 Dhan account F&O segment API access is not active. "
+                        "Falling back to simulated/estimated option chain metrics for session continuation."
+                    )
+                    self._logged_fo_auth_warning = True
+
             return response.get("expiry_list", [])
         except Exception as exc:
             logger.error("Options: failed to fetch expiry list — %s", exc)
@@ -191,12 +207,38 @@ class OptionsAnalyzer:
 
     def _fetch_option_chain(self, underlying_scrip: int, expiry_date: str) -> Dict:
         """Fetch the raw option chain dict from Dhan."""
+        payload = {
+            "under_security_id": underlying_scrip,
+            "under_exchange_segment": self.NSE_FNO,
+            "expiry": expiry_date
+        }
+        logger.info(
+            f"📤 OptionsAnalyzer Request: security_id={underlying_scrip} | "
+            f"segment={self.NSE_FNO} | expiry={expiry_date} | payload={payload}"
+        )
         try:
-            return self._dhan.option_chain(
+            response = self._dhan.option_chain(
                 under_security_id=underlying_scrip,
                 under_exchange_segment=self.NSE_FNO,
                 expiry=expiry_date,
             )
+            logger.info(f"📥 OptionsAnalyzer Response: {response}")
+
+            # Inspect the response for F&O authorization error (nested code 808 or auth fails)
+            inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+            is_fo_auth_failure = False
+            if "808" in inner_data or any("Authentication Failed" in str(v) for v in inner_data.values()):
+                is_fo_auth_failure = True
+
+            if is_fo_auth_failure:
+                if not getattr(self, "_logged_fo_auth_warning", False):
+                    logger.warning(
+                        "🚨 Dhan account F&O segment API access is not active. "
+                        "Falling back to simulated/estimated option chain metrics for session continuation."
+                    )
+                    self._logged_fo_auth_warning = True
+
+            return response
         except Exception as exc:
             logger.error("Options: failed to fetch option chain — %s", exc)
             return {}

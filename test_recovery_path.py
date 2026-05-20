@@ -22,10 +22,36 @@ async def run_test():
     db = DBManager()
     await db.initialize()
     
+    class MockSystem:
+        def __init__(self):
+            self.risk_manager = None
+            self.position_manager = None
+            self.entry_engine = None
+            self.data_manager = None
+            self.broker_health = None
+            self.telegram_enabled = True
+            self.is_simulation = True
+            self.running = True
+            self.trading_enabled = True
+            
+            class MockMaster:
+                def approve(self, signal_type):
+                    class MockApproval:
+                        approved = True
+                        reason = ""
+                    return MockApproval()
+            self.master = MockMaster()
+
+        async def execute_signal(self, signal, mode="new"):
+            print(f"🔥 Unified EXECUTION: {signal.id} mode={mode}")
+    
     class MockApp:
         class Bot:
             async def send_message(self, *args, **kwargs):
                 print(f"   [Bot Notification] {kwargs.get('text')}")
+                class MockMsg:
+                    message_id = 9999
+                return MockMsg()
         bot = Bot()
 
     # ┌────────────────────────────────────────────────────────┐
@@ -47,7 +73,7 @@ async def run_test():
         entry_price=22700.0,
         stop_loss=22650.0,
         target_1=22800.0,
-        status="pending",
+        status="queued",
         created_at=now - 10 
     )
     # Save manually to simulate DB state before recovery
@@ -55,7 +81,7 @@ async def run_test():
     print(f"📡 Mocked 'pending' signal {sig_id_soft} (10s old) in DB.")
 
     # 2. Start new Bot Controller (Simulate Restart)
-    bot_v2 = TelegramController(settings, None, None, None, None, db)
+    bot_v2 = TelegramController(settings, MockSystem(), db)
     bot_v2.app = MockApp()
     
     print("🔄 Bot booting... Running recovery...")
@@ -90,7 +116,7 @@ async def run_test():
     print(f"📡 Mocked 'pending' signal {sig_id_hard} (45s old) in DB.")
 
     # 2. Restart Bot again
-    bot_v3 = TelegramController(settings, None, None, None, None, db)
+    bot_v3 = TelegramController(settings, MockSystem(), db)
     bot_v3.app = MockApp()
     
     print("🔄 Bot booting... Running recovery...")

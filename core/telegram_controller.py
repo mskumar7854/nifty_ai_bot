@@ -276,12 +276,6 @@ class TelegramController:
                 await self.db.update_signal_status(signal.id, "skipped", expected_current_status="pending")
                 await query.edit_message_text("❌ <b>Trade Skipped by User.</b>", parse_mode='HTML')
 
-            self.active_signal = None
-
-        await self._process_next_signal()
-
-    # ─── COMMAND HANDLERS (v4.6.1 Production) ───
-
     async def status_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Comprehensive system status report."""
         if not self._is_authorized(update): return
@@ -314,10 +308,17 @@ class TelegramController:
         else:
             bh_str = ""
 
+        # 5. Central System State
+        from core.system_state import get_state_manager
+        state_mgr = get_state_manager()
+        current_state = state_mgr.get_state()
+        state_emoji = "🟢" if current_state == "ACTIVE" else "🟡" if current_state.startswith("PAUSED") else "🛑"
+
         msg = (
             f"📊 <b>SYSTEM STATUS v4.7</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🤖 <b>Bot Mode:</b> {self.trading_mode}\n"
+            f"{state_emoji} <b>State:</b> <code>{current_state}</code> ({state_mgr.reason})\n"
             f"🛡️ <b>Risk Guard:</b> {risk_emoji}\n"
             f"⏸️ <b>Process:</b> {'PAUSED' if self.is_paused else 'RUNNING'}\n"
             f"{bh_str}\n"
@@ -337,6 +338,47 @@ class TelegramController:
             f"━━━━━━━━━━━━━━━━━━"
         )
         await update.message.reply_text(msg, parse_mode='HTML')
+
+    async def force_reconcile_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Force runs the broker reconciliation and attempts to clear halts if clean."""
+        if not self._is_authorized(update): return
+        
+        await update.message.reply_text("🔄 <b>Initiating broker position reconciliation...</b>", parse_mode='HTML')
+        
+        try:
+            # Run reconciliation check (which we've updated to return boolean status)
+            is_clean = await self.system._reconcile_broker_positions()
+            
+            if is_clean:
+                from core.system_state import get_state_manager
+                state_mgr = get_state_manager()
+                
+                # Clear halt states
+                state_mgr.force_activate("Operator force reconcile cleared all halts")
+                self.system.trading_enabled = True
+                
+                # Clear position manager halt state if it exists
+                pos_mgr = getattr(self.system, "position_manager", None)
+                if pos_mgr:
+                    pos_mgr.is_halted = False
+                    pos_mgr.halt_reason = ""
+                
+                msg = (
+                    "✅ <b>RECONCILIATION SUCCESSFUL</b>\n\n"
+                    "No orphaned positions or missing stop losses found.\n"
+                    "<b>System has been re-enabled and is now ACTIVE.</b>"
+                )
+                await update.message.reply_text(msg, parse_mode='HTML')
+            else:
+                msg = (
+                    "❌ <b>RECONCILIATION FAILED</b>\n\n"
+                    "Orphaned positions, missing stop losses, or broker API errors are still present.\n"
+                    "Please check the system logs, resolve any issues on the broker manually, and retry."
+                )
+                await update.message.reply_text(msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Error in force_reconcile_cmd: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ <b>Error running force reconcile:</b> {e}", parse_mode='HTML')
 
 
     async def kill_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
