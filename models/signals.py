@@ -366,6 +366,37 @@ class ConfluenceResult:
 
 
 @dataclass
+class ExecutionPolicy:
+    """Regime-specific overrides for a generated signal, preserving original intent."""
+    suppressed: bool = False
+    reason: str = ""
+    
+    # Delta tracking
+    original_sl: float = 0
+    adapted_sl: float = 0
+    original_qty: int = 0
+    adapted_qty: int = 0
+    
+    # Policies applied
+    sl_multiplier: float = 1.0
+    tp2_multiplier: float = 1.0
+    position_scale: float = 1.0
+
+    def to_dict(self) -> dict:
+        return {
+            "suppressed": self.suppressed,
+            "reason": self.reason,
+            "original_sl": self.original_sl,
+            "adapted_sl": self.adapted_sl,
+            "original_qty": self.original_qty,
+            "adapted_qty": self.adapted_qty,
+            "sl_multiplier": self.sl_multiplier,
+            "tp2_multiplier": self.tp2_multiplier,
+            "position_scale": self.position_scale,
+        }
+
+
+@dataclass
 class Signal:
     id: str                                  # Added for Telegram callback tracking
     timestamp: datetime
@@ -416,6 +447,9 @@ class Signal:
     key_levels_nearby: List[float] = field(default_factory=list)
     suggested_adjustment: str = ""  # "tighten SL", "trail", etc.
 
+    # Priority 2: Regime Execution Policy (overrides)
+    execution_policy: Optional[ExecutionPolicy] = None
+
     def to_dict(self) -> dict:
         return {
             "time": self.timestamp.strftime("%H:%M:%S"),
@@ -441,7 +475,8 @@ class Signal:
             "reasons": self.reasons,
             "warnings": self.warnings,
             "premium_levels": self.metadata.get("premium_levels", {}),
-            "symbol": getattr(self, "symbol", "")
+            "symbol": getattr(self, "symbol", ""),
+            "execution_policy": self.execution_policy.to_dict() if self.execution_policy else None
         }
 
     def __str__(self) -> str:

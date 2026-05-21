@@ -38,6 +38,7 @@ from typing import Dict, Optional, Tuple
 
 # Reuse the project-level singleton — no duplicate auth
 from dhan_client import get_dhan_client
+from config.config import OPTION_CHAIN_SEGMENT, CANDLE_SEGMENT
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class OptionsAnalyzer:
     NIFTY_BANK: int = 25    # Bank Nifty
 
     # ── Segment ────────────────────────────────────────────────
-    NSE_FNO: str = "NSE_FNO"
+    NSE_FNO: str = OPTION_CHAIN_SEGMENT   # Nifty underlying is an INDEX, not F&O instrument
 
     # ── Hardened sentiment thresholds ─────────────────────────
     PCR_BULLISH_THRESHOLD: float = 1.1   # PCR above this → bullish pressure
@@ -70,6 +71,12 @@ class OptionsAnalyzer:
         self.mode = mode
         self._dhan = None
         self._logged_fo_auth_warning = False
+        self.oi_circuit = {
+            "open_until": 0.0,
+            "reason": None,
+            "failure_count": 0,
+            "last_error": None
+        }
         if self.mode != "SIMULATION":
             self._dhan = get_dhan_client()
 
@@ -207,6 +214,15 @@ class OptionsAnalyzer:
 
     def _fetch_option_chain(self, underlying_scrip: int, expiry_date: str) -> Dict:
         """Fetch the raw option chain dict from Dhan."""
+        import time as _time
+        if _time.time() < self.oi_circuit["open_until"]:
+            logger.warning(
+                f"[OPTIONS] OI circuit breaker OPEN until "
+                f"{datetime.fromtimestamp(self.oi_circuit['open_until']).strftime('%H:%M:%S')} "
+                f"due to {self.oi_circuit['reason']} (Error: {self.oi_circuit['last_error']}). Skipping fetch."
+            )
+            return {}
+
         payload = {
             "under_security_id": underlying_scrip,
             "under_exchange_segment": self.NSE_FNO,
@@ -224,8 +240,30 @@ class OptionsAnalyzer:
             )
             logger.info(f"📥 OptionsAnalyzer Response: {response}")
 
-            # Inspect the response for F&O authorization error (nested code 808 or auth fails)
+            # Inspect the response for F&O authorization/rate error
             inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+            is_non_retryable = False
+            error_code = None
+            if "808" in inner_data or "808" in str(response):
+                error_code = "808"
+                is_non_retryable = True
+            elif "805" in inner_data or "805" in str(response):
+                error_code = "805"
+                is_non_retryable = True
+
+            if is_non_retryable:
+                self.oi_circuit.update({
+                    "open_until": _time.time() + 900,
+                    "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT",
+                    "failure_count": self.oi_circuit["failure_count"] + 1,
+                    "last_error": error_code
+                })
+                logger.warning(
+                    f"🚨 OptionsAnalyzer: Non-retryable error {error_code} detected! "
+                    f"Tripping circuit breaker for 15 minutes."
+                )
+
+            # Inspect the response for F&O authorization error (nested code 808 or auth fails)
             is_fo_auth_failure = False
             if "808" in inner_data or any("Authentication Failed" in str(v) for v in inner_data.values()):
                 is_fo_auth_failure = True

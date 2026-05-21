@@ -48,3 +48,8 @@ def _validate():
         )
 
 _validate()
+
+# ── Central Exchange Segment Constants ─────────────────────────
+OPTION_CHAIN_SEGMENT = "NSE_FNO"
+CANDLE_SEGMENT = "IDX_I"
+

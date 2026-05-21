@@ -14,6 +14,7 @@ import threading
 import signal as sig_module
 import sys
 import os
+import uuid
 from typing import Optional
 
 # Force UTF-8 Encoding on Windows to prevent Emoji/Rich logging crashes
@@ -48,6 +49,8 @@ from core.discipline_engine import DisciplineEngine
 from core.risk_manager import RiskManager
 from core.master_decision_engine import MasterDecisionEngine
 from core.telegram_controller import TelegramController
+from core.burnin_tracker import BurninTracker
+from core.readiness_scorer import ReadinessScorer
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 from models.signals import SignalType, Direction, TradeOutcome
 from utils.logger import get_logger
@@ -56,6 +59,7 @@ from options_analyzer import OptionsAnalyzer
 from performance_logger import PerformanceLogger
 from core.log_observer import LogObserver
 from core.metrics_logger import MetricsLogger
+from core.regime_adapter import RegimeAdapter
 
 settings = Settings()
 logger = get_logger("main", settings.log_level)
@@ -81,28 +85,51 @@ def print_banner():
         "SCALED": "💰",
     }.get(mode, "🔧")
 
+    # ── Context-aware header ──
+    if mode == "SIMULATION":
+        header_label = "BURN-IN VALIDATION MODE"
+        posture_line = "📡 Posture : Observation only — collecting evidence"
+    elif mode == "SMALL_CAPITAL":
+        header_label = "SMALL CAPITAL — LIVE"
+        posture_line = "📡 Posture : Live execution — 1-2 lots"
+    else:
+        header_label = "SCALED DEPLOYMENT — LIVE"
+        posture_line = "📡 Posture : Full capital execution"
+
+    # ── Context-aware signal flow footer ──
+    if mode == "SIMULATION":
+        flow_footer = "│  ⚠️  All signals paper-traded — no real orders placed     │"
+    else:
+        flow_footer = "│  Result: 2-3 trades/day (design target, track actuals)    │"
+
     print(f"""
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║                                                                          ║
-║    🧠⚡ NIFTY AI AGENT SYSTEM v4.6.1 — PRODUCTION HARDENED               ║
+║    🧠⚡ NIFTY AI AGENT SYSTEM v4.6.1 — {header_label:<34s}║
 ║                                                                          ║
-║    {mode_icon} Mode    : {mode:<30s}                      ║
-║    📋 Phase   : {phase}                                                   ║
-║    💰 Capital : ₹{capital:<12,.0f}                                        ║
-║    🎯 Max Trades: {settings.trade_filter.max_trades_per_day}/day                                            ║
-║    📊 Min Grade : {settings.trade_filter.min_grade_to_trade} ({settings.trade_filter.min_signal_confidence:.0f}% confidence)                        ║
-║    🛡️  Daily Loss: ₹{settings.position.max_daily_loss:<8,.0f} max                                  ║
-║    🎯 Daily Goal: ₹{settings.exit.daily_target_amount:<8,.0f} (auto-stop)                           ║
+║  ┌─── Runtime State ──────────────────────────────────────────┐          ║
+║  │  {mode_icon} Mode    : {mode:<30s}                    │          ║
+║  │  📋 Phase   : {phase}                                                 │          ║
+║  │  {posture_line:<56s}│          ║
+║  └────────────────────────────────────────────────────────────┘          ║
 ║                                                                          ║
-║    ┌──────────── SIGNAL FLOW ────────────────────────────────┐           ║
-║    │  {active_count} Agents ({routed_count} routed) → Decision Engine → 10-Gate Filter │           ║
-║    │       ↓              ↓               ↓                   │           ║
-║    │  Kill 65%     Smart Entry      Exit Intelligence         │           ║
-║    │  of signals   + Confirmation   + Daily Target Lock       │           ║
-║    │  Result: 2-3 trades/day, 60%+ win rate, 1.5+ R:R        │           ║
-║    └──────────────────────────────────────────────────────────┘           ║
+║  ┌─── Risk Configuration ─────────────────────────────────────┐          ║
+║  │  💰 Capital   : ₹{capital:<12,.0f}                                   │          ║
+║  │  🛡️  Max Loss  : ₹{settings.position.max_daily_loss:<8,.0f}/day                             │          ║
+║  │  🎯 Max Trades: {settings.trade_filter.max_trades_per_day}/day                                           │          ║
+║  │  📊 Min Grade : {settings.trade_filter.min_grade_to_trade} ({settings.trade_filter.min_signal_confidence:.0f}% confidence)                       │          ║
+║  │  🎯 Daily Goal: ₹{settings.exit.daily_target_amount:<8,.0f}(auto-stop)                      │          ║
+║  └────────────────────────────────────────────────────────────┘          ║
 ║                                                                          ║
-║    📊 Dashboard: http://localhost:{settings.dashboard.port:<5d}                                ║
+║  ┌─── Signal Flow ────────────────────────────────────────────┐          ║
+║  │  {active_count} Agents ({routed_count} routed) → Decision Engine → 10-Gate Filter│          ║
+║  │       ↓              ↓               ↓                     │          ║
+║  │  Kill 65%     Smart Entry      Exit Intelligence           │          ║
+║  │  of signals   + Confirmation   + Daily Target Lock         │          ║
+║  {flow_footer:<73s}║
+║  └────────────────────────────────────────────────────────────┘          ║
+║                                                                          ║
+║  📊 Dashboard: http://localhost:{settings.dashboard.port:<5d}                                  ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
     """)
@@ -248,10 +275,9 @@ class NiftyAISystem:
         self.position_manager.tuner = self.decision_engine.tuner
         self.risk_manager = RiskManager(settings, self.decision_engine.memory.db)
         self.slippage_model = SlippageModel(settings)
-        self.metrics_engine = MetricsEngine(settings.get_capital())
-
-        # ── Edge Layer ──
+        self.metrics_engine = MetricsEngine(settings)
         self.trade_filter = TradeFilter(settings)
+        self.regime_adapter = RegimeAdapter()
         self.entry_engine = EntryEngine(settings)
         self.exit_engine = ExitEngine(settings)
         self.session_strategy = SessionStrategy(settings)
@@ -279,7 +305,11 @@ class NiftyAISystem:
         self.alert_manager = AlertManager(settings, self.telegram_bot)
 
         # ── Final Layer ──
-        self.simulation = SimulationEngine(settings)
+        # Phase B: Instantiate BurninTracker and ReadinessScorer first
+        self.burnin_tracker = BurninTracker()
+        self.readiness_scorer = ReadinessScorer()
+        # Pass burnin_tracker into SimulationEngine so it auto-records every trade
+        self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker)
 
         # ── Phase 2: Options Hard Filter ──
         # ── P1-D: Options Analyzer ──
@@ -299,6 +329,13 @@ class NiftyAISystem:
                     host=settings.dashboard.host,
                     port=settings.dashboard.port,
                 )
+                # Phase B: Wire burnin components into dashboard
+                self.dashboard.set_burnin_components(
+                    self.burnin_tracker,
+                    self.readiness_scorer,
+                )
+                # Priority 1: Wire simulation engine for Trade Ledger
+                self.dashboard.set_simulation_engine(self.simulation)
             except Exception as e:
                 logger.warning(f"Dashboard not available: {e}")
 
@@ -358,8 +395,12 @@ class NiftyAISystem:
 
         try:
             await app.initialize()
+            try:
+                await app.bot.delete_webhook(drop_pending_updates=True)
+            except Exception as weberr:
+                logger.warning(f"Webhook deletion warning: {weberr}")
             await app.start()
-            await app.updater.start_polling()
+            await app.updater.start_polling(drop_pending_updates=True)
             if self.is_simulation:
                 logger.info("📱 Telegram Active (SIMULATION mode — alerts only, no real execution)")
             else:
@@ -805,6 +846,19 @@ class NiftyAISystem:
                 return
 
             # ── 10. Signal PASSED all 10 gates ──
+            # ── Priority 2: Apply Regime Execution Policy ──
+            signal = self.regime_adapter.apply_policy(signal)
+            
+            if signal.execution_policy and signal.execution_policy.suppressed:
+                logger.warning(f"🛡️ Regime Adapter blocked: {signal.execution_policy.reason}")
+                log_entry["filter_passed"] = False
+                log_entry["risk_reason"] = f"Regime Block: {signal.execution_policy.reason}"
+                self.perf_logger.log_signal(log_entry)
+                self.simulation.record_signal(passed=False)
+                self._update_dashboard(snapshot, signal)
+                _log_canonical_truth(False, f"RegimeAdapter: {signal.execution_policy.reason}")
+                return
+
             logger.info(
                 f"🟢 Signal Engine CONFIRMED | "
                 f"Grade: {filter_result.grade} | "
@@ -1687,9 +1741,126 @@ class NiftyAISystem:
         logger.info("System stopped ✓")
 
 
+import atexit
+import signal
+
+lock_file_handle = None
+LOCK_FILE_PATH = "bot.lock"
+
+def acquire_lock():
+    global lock_file_handle
+    import os
+    import sys
+    
+    # Try reading the existing PID if the file exists and is not locked
+    existing_pid = None
+    if os.path.exists(LOCK_FILE_PATH):
+        try:
+            with open(LOCK_FILE_PATH, "r") as f:
+                content = f.read().strip()
+                if content.isdigit():
+                    existing_pid = int(content)
+        except Exception:
+            pass
+
+    try:
+        lock_file_handle = open(LOCK_FILE_PATH, "r+")
+    except FileNotFoundError:
+        lock_file_handle = open(LOCK_FILE_PATH, "w+")
+    except Exception:
+        lock_file_handle = open(LOCK_FILE_PATH, "w+")
+
+    # Attempt to lock the file
+    locked = False
+    if sys.platform == 'win32':
+        import msvcrt
+        try:
+            lock_file_handle.seek(0)
+            msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            locked = True
+        except IOError:
+            locked = False
+    else:
+        import fcntl
+        try:
+            fcntl.flock(lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except IOError:
+            locked = False
+
+    if not locked:
+        try:
+            lock_file_handle.close()
+        except Exception:
+            pass
+        lock_file_handle = None
+        
+        logger.error(
+            f"❌ Another instance already running "
+            f"(PID={existing_pid or 'unknown'})"
+        )
+        sys.exit(1)
+
+    try:
+        lock_file_handle.seek(0)
+        lock_file_handle.write(f"{os.getpid()}\n")
+        lock_file_handle.truncate()
+        lock_file_handle.flush()
+    except Exception as e:
+        logger.warning(f"Failed to write PID to lock file: {e}")
+
+def release_lock():
+    global lock_file_handle
+    import sys
+    import os
+    if lock_file_handle is not None:
+        try:
+            if sys.platform == 'win32':
+                import msvcrt
+                try:
+                    lock_file_handle.seek(0)
+                    msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+            else:
+                import fcntl
+                try:
+                    fcntl.flock(lock_file_handle, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            lock_file_handle.close()
+            lock_file_handle = None
+        except Exception:
+            pass
+        
+        try:
+            if os.path.exists(LOCK_FILE_PATH):
+                os.remove(LOCK_FILE_PATH)
+        except Exception:
+            pass
+
+def sig_handler(signum, frame):
+    logger.info(f"Signal {signum} caught, releasing lock and exiting gracefully.")
+    release_lock()
+    sys.exit(0)
+
 def main():
+    # Register graceful lock release
+    atexit.register(release_lock)
+    try:
+        signal.signal(signal.SIGINT, sig_handler)
+        signal.signal(signal.SIGTERM, sig_handler)
+    except Exception:
+        pass
+
+    # Acquire cross-platform singleton process lock
+    acquire_lock()
+
     system = NiftyAISystem()
-    asyncio.run(system.start())
+    try:
+        asyncio.run(system.start())
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":

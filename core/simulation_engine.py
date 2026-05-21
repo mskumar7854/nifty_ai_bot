@@ -37,6 +37,8 @@ from models.signals import (
 from utils.logger import get_logger
 from utils.helpers import save_json, load_json, safe_divide
 from config.settings import Settings
+from core.execution_fidelity import ExecutionFidelityEngine, ExecutionResult
+from core.burnin_tracker import BurninTracker
 
 
 @dataclass
@@ -81,8 +83,38 @@ class SimulatedTrade:
     filter_score: float = 0
     gates_passed: int = 0
     gates_total: int = 0
-    
+
     instrument: dict = field(default_factory=dict)
+
+    # ── Phase A: Execution Fidelity Telemetry ──
+    fill_ratio: float = 1.0
+    slippage_pts: float = 0.0
+    spread_cost_pts: float = 0.0
+    total_friction_pts: float = 0.0
+    latency_ms: int = 0
+    moneyness_category: str = ""
+    execution_quality_score: float = 0.0
+    execution_quality: str = ""
+    exit_slippage_pts: float = 0.0   # slippage incurred at exit
+
+    # ── Priority 2: Execution Policy Deltas ──
+    adaptation_reason: str = ""
+    original_sl: float = 0.0
+    original_tp1: float = 0.0
+    original_tp2: float = 0.0
+    adapted_sl: float = 0.0
+    original_qty: int = 0
+    adapted_qty: int = 0
+    failure_type: str = ""
+
+    # ── Phase C: Counterfactual Outcomes ──
+    original_sl_hit: bool = False
+    original_tp1_hit: bool = False
+    original_tp2_hit: bool = False
+    baseline_outcome: dict = field(default_factory=dict)  # { "exit_reason": "...", "pnl": 0.0 }
+    adapted_outcome: dict = field(default_factory=dict)   # { "exit_reason": "...", "pnl": 0.0 }
+    adaptation_outcome: str = ""                          # LOSS_MITIGATED, WIN_ENHANCED, etc.
+    adaptation_pnl_delta: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +137,28 @@ class SimulatedTrade:
             "regime": self.regime,
             "session": self.session,
             "filter_score": self.filter_score,
+            # Execution telemetry
+            "fill_ratio": round(self.fill_ratio, 3),
+            "slippage_pts": round(self.slippage_pts, 3),
+            "spread_cost_pts": round(self.spread_cost_pts, 3),
+            "total_friction_pts": round(self.total_friction_pts, 3),
+            "latency_ms": self.latency_ms,
+            "moneyness": self.moneyness_category,
+            "exec_quality": self.execution_quality,
+            "exec_quality_score": round(self.execution_quality_score, 1),
+            "exit_slippage_pts": round(self.exit_slippage_pts, 3),
+            # Priority 2
+            "adaptation_reason": self.adaptation_reason,
+            "original_sl": self.original_sl,
+            "adapted_sl": self.adapted_sl,
+            "original_qty": self.original_qty,
+            "adapted_qty": self.adapted_qty,
+            "failure_type": self.failure_type,
+            # Phase C: Counterfactual
+            "baseline_outcome": self.baseline_outcome,
+            "adapted_outcome": self.adapted_outcome,
+            "adaptation_outcome": self.adaptation_outcome,
+            "adaptation_pnl_delta": round(self.adaptation_pnl_delta, 2),
         }
 
 
@@ -142,9 +196,15 @@ class SimulationEngine:
     4. Identify weaknesses before losing real money
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, burnin_tracker: Optional[BurninTracker] = None):
         self.settings = settings
         self.logger = get_logger("simulation")
+
+        # ── Phase A: Execution Fidelity Engine ──
+        self.exec_engine = ExecutionFidelityEngine()
+
+        # ── Phase B: Burn-In Tracker (optional, injected from main) ──
+        self.burnin_tracker: Optional[BurninTracker] = burnin_tracker
 
         # ── Capital Tracking ──
         self.initial_capital = settings.get_capital()
@@ -215,11 +275,13 @@ class SimulationEngine:
             f"History: {len(self.all_trades)} trades"
         )
 
-    def record_signal(self, passed: bool):
+    def record_signal(self, passed: bool, regime: str = ""):
         """Record that a signal was generated"""
         self.total_signals += 1
         if not passed:
             self.total_filtered += 1
+        if self.burnin_tracker:
+            self.burnin_tracker.record_signal_filtered(regime=regime, was_killed=not passed)
 
     def open_simulated_trade(
         self,
@@ -252,33 +314,88 @@ class SimulationEngine:
         if hasattr(signal, 'session_phase') and signal.session_phase:
             session_str = signal.session_phase.value
 
-        # ── 🎲 REALISTIC SLIPPAGE SIMULATION (PHASE A) ──
+        # ── ⚡ EXECUTION FIDELITY ENGINE (Phase A) ──
         quote = signal.metadata.get("quote")
         instrument = signal.metadata.get("instrument", {})
-        
-        if quote and quote.ask > 0:
-            # We buy at the ASK price. Slippage is added on top of the spread.
-            slippage_factor = 1 + np.random.uniform(0.000, 0.003)
-            realistic_entry = round(quote.ask * slippage_factor, 2)
-            base_price = quote.ask
-        else:
+
+        # Determine base signal price
+        base_price = quote.ask if (quote and quote.ask > 0) else signal.entry_price
+        if not (quote and quote.ask > 0):
             self.logger.warning("Simulation fallback to Spot due to missing OptionQuote")
-            slippage_factor = 1 + np.random.uniform(-0.003, 0.003)
-            realistic_entry = round(signal.entry_price * slippage_factor, 2)
-            base_price = signal.entry_price
-            
-        slippage_pts = round(realistic_entry - base_price, 2)
-        
-        # ── P0-F: Adjust SL and Targets relative to Fill Price ──
-        # Phase A: SL/TP are passed as prices based on premium. Calculate the distance.
-        sl_dist = abs(signal.entry_price - signal.stop_loss)
+
+        # Classify instrument for moneyness calc
+        strike = instrument.get("strike", base_price)
+        option_type = instrument.get("type", "CE")
+        expiry_str = instrument.get("expiry", None)
+        expiry_date = None
+        if expiry_str:
+            try:
+                expiry_date = date.fromisoformat(expiry_str)
+            except Exception:
+                pass
+
+        # ── Priority 2: Execution Policy Overrides ──
+        target_qty = signal.position_size if signal.position_size > 0 else 75
+        sl_multiplier = 1.0
+        tp2_multiplier = 1.0
+        policy_reason = ""
+        orig_sl = signal.stop_loss
+        orig_tp1 = signal.target_1
+        orig_tp2 = signal.target_2
+        adapted_sl = signal.stop_loss
+        orig_qty = target_qty
+        adapted_qty = target_qty
+
+        if getattr(signal, 'execution_policy', None):
+            target_qty = signal.execution_policy.adapted_qty
+            sl_multiplier = signal.execution_policy.sl_multiplier
+            tp2_multiplier = signal.execution_policy.tp2_multiplier
+            policy_reason = signal.execution_policy.reason
+            orig_sl = signal.execution_policy.original_sl
+            adapted_sl = signal.execution_policy.adapted_sl
+            orig_qty = signal.execution_policy.original_qty
+            adapted_qty = signal.execution_policy.adapted_qty
+
+        # Run the fidelity pipeline
+        exec_result: ExecutionResult = self.exec_engine.simulate_entry(
+            signal_price=base_price,
+            spot_price=snapshot.price,
+            strike=strike,
+            option_type=option_type,
+            qty=target_qty,
+            regime=regime_str or "UNKNOWN",
+            vix=snapshot.india_vix,
+            expiry_date=expiry_date,
+        )
+
+        # ── Handle Rejection ──
+        if exec_result.rejected:
+            self.logger.warning(
+                f"🚫 Trade REJECTED by fidelity engine | "
+                f"Reason: {exec_result.rejection_reason} | "
+                f"Signal: {signal.signal_type.value}"
+            )
+            return None   # Caller must handle None (skip OMS/Telegram)
+
+        realistic_entry = exec_result.fill_price
+        filled_qty = exec_result.filled_qty
+
+        # ── Adjust SL/TP relative to actual fill price + Execution Policy ──
+        sl_dist = abs(signal.entry_price - signal.stop_loss) * sl_multiplier
         t1_dist = abs(signal.target_1 - signal.entry_price)
-        t2_dist = abs(signal.target_2 - signal.entry_price)
+        t2_dist = abs(signal.target_2 - signal.entry_price) * tp2_multiplier
         
-        # Option Premium goes UP on a win
+        orig_sl_dist = abs(signal.entry_price - signal.stop_loss)
+        orig_t1_dist = abs(signal.target_1 - signal.entry_price)
+        orig_t2_dist = abs(signal.target_2 - signal.entry_price)
+
         adjusted_sl = round(realistic_entry - sl_dist, 2)
         adjusted_t1 = round(realistic_entry + t1_dist, 2)
         adjusted_t2 = round(realistic_entry + t2_dist, 2)
+        
+        baseline_sl = round(realistic_entry - orig_sl_dist, 2)
+        baseline_t1 = round(realistic_entry + orig_t1_dist, 2)
+        baseline_t2 = round(realistic_entry + orig_t2_dist, 2)
 
         trade = SimulatedTrade(
             trade_id=trade_id,
@@ -287,12 +404,12 @@ class SimulationEngine:
             direction=signal.direction,
             confidence=signal.confidence,
             grade=filter_grade,
-            entry_price=realistic_entry,   # ✅ Slippage-adjusted Ask
-            stop_loss=adjusted_sl,         # ✅ Slippage-adjusted
-            target_1=adjusted_t1,          # ✅ Slippage-adjusted
-            target_2=adjusted_t2,          # ✅ Slippage-adjusted
-            lots=max(1, signal.position_size // 50),
-            qty=signal.position_size if signal.position_size > 0 else 50,
+            entry_price=realistic_entry,
+            stop_loss=adjusted_sl,
+            target_1=adjusted_t1,
+            target_2=adjusted_t2,
+            lots=max(1, filled_qty // 75),
+            qty=filled_qty,
             regime=regime_str,
             session=session_str,
             rsi=snapshot.rsi,
@@ -308,19 +425,43 @@ class SimulationEngine:
             gates_total=gates_total,
             instrument=instrument,
             costs=costs_estimate,
+            # ── Execution telemetry ──
+            fill_ratio=exec_result.fill_ratio,
+            slippage_pts=exec_result.slippage_pts,
+            spread_cost_pts=exec_result.spread_cost_pts,
+            total_friction_pts=exec_result.total_friction_pts,
+            latency_ms=exec_result.latency_ms,
+            moneyness_category=exec_result.moneyness_category,
+            execution_quality_score=exec_result.execution_quality_score,
+            execution_quality=exec_result.execution_quality,
+            # Priority 2 Deltas
+            adaptation_reason=policy_reason,
+            original_sl=baseline_sl,
+            original_tp1=baseline_t1,
+            original_tp2=baseline_t2,
+            adapted_sl=adjusted_sl,
+            original_qty=orig_qty,
+            adapted_qty=filled_qty,
         )
 
         self.open_trades[trade_id] = trade
         self.total_trades += 1
         self.today_trades += 1
 
+        # ── Phase B: Record execution into BurninTracker ──
+        if self.burnin_tracker:
+            self.burnin_tracker.record_execution(exec_result, regime=regime_str)
+
         self.logger.info(
             f"📝 SIM TRADE OPENED: {trade_id} | "
             f"{signal.signal_type.value} | "
-            f"Signal: ₹{signal.entry_price:,.1f} | "
-            f"Filled: ₹{realistic_entry:,.1f} (slip: {slippage_pts:+.1f}pts) | "
-            f"Grade: {filter_grade} | "
-            f"Conf: {signal.confidence:.0f}%"
+            f"Signal: ₹{base_price:,.1f} → Fill: ₹{realistic_entry:,.1f} | "
+            f"Friction: {exec_result.total_friction_pts:+.2f}pts | "
+            f"Latency: {exec_result.latency_ms}ms | "
+            f"Fill: {exec_result.fill_ratio*100:.0f}% | "
+            f"Moneyness: {exec_result.moneyness_category} | "
+            f"Quality: {exec_result.execution_quality} ({exec_result.execution_quality_score:.0f}) | "
+            f"Grade: {filter_grade} | Conf: {signal.confidence:.0f}%"
         )
 
         return trade
@@ -340,16 +481,35 @@ class SimulationEngine:
                 continue
 
             eval_price = current_price
-            
-            # PHASE A: Option Premium Tracking
+
+            # PHASE A: Option Premium Tracking (sell at BID)
             if data_manager and trade.instrument:
                 quote = data_manager.fetch_option_quote(
-                    trade.instrument.get("strike"), 
-                    trade.instrument.get("type"), 
+                    trade.instrument.get("strike"),
+                    trade.instrument.get("type"),
                     trade.instrument.get("expiry")
                 )
                 if quote and quote.bid > 0:
-                    eval_price = quote.bid # We sell at the BID price to close
+                    eval_price = quote.bid
+
+            # ── Phase C: Counterfactual Intrabar Hit Tracking ──
+            # Deterministic intrabar assumptions: SL hits before TP if both breached, but we'll mark them as we see them.
+            if trade.original_sl > 0 and eval_price <= trade.original_sl and not trade.original_sl_hit:
+                trade.original_sl_hit = True
+                trade.baseline_outcome = {
+                    "exit_reason": "STOP_LOSS",
+                    "pnl": (trade.original_sl - trade.entry_price) * trade.original_qty if trade.direction == Direction.BULLISH else (trade.entry_price - trade.original_sl) * trade.original_qty
+                }
+            if trade.original_tp1 > 0 and eval_price >= trade.original_tp1 and not trade.original_tp1_hit:
+                trade.original_tp1_hit = True
+                # If SL wasn't hit, TP1 would be the exit
+                if not trade.baseline_outcome:
+                    trade.baseline_outcome = {
+                        "exit_reason": "TARGET_1",
+                        "pnl": (trade.original_tp1 - trade.entry_price) * trade.original_qty if trade.direction == Direction.BULLISH else (trade.entry_price - trade.original_tp1) * trade.original_qty
+                    }
+            if trade.original_tp2 > 0 and eval_price >= trade.original_tp2 and not trade.original_tp2_hit:
+                trade.original_tp2_hit = True
 
             # Option Premium goes UP on a win
             if eval_price <= trade.stop_loss:
@@ -381,7 +541,18 @@ class SimulationEngine:
             return
 
         trade = self.open_trades[trade_id]
-        trade.simulated_exit_price = exit_price
+
+        # ── Phase A: Exit Slippage ──
+        exit_result = self.exec_engine.simulate_exit(
+            trigger_price=exit_price,
+            exit_reason=reason,
+            vix=trade.vix,
+            regime=trade.regime or "UNKNOWN",
+        )
+        realistic_exit = exit_result.exit_price
+        trade.exit_slippage_pts = exit_result.slippage_pts
+
+        trade.simulated_exit_price = realistic_exit
         trade.exit_reason = reason
         trade.hold_minutes = (
             datetime.now() - trade.timestamp
@@ -424,9 +595,59 @@ class SimulationEngine:
             self.max_loss_streak = max(
                 self.max_loss_streak, abs(self.current_streak)
             )
+            
+            # ── Priority 2: Structured Post-Mortem ──
+            if "target" not in reason.lower():
+                if "breakout" in trade.regime.lower() or trade.adaptation_reason and "breakout" in trade.adaptation_reason.lower():
+                    trade.failure_type = "FALSE_BREAKOUT"
+                elif trade.total_friction_pts + trade.exit_slippage_pts > (trade.entry_price * 0.015):
+                    trade.failure_type = "SLIPPAGE_LOSS"
+                elif trade.spread_cost_pts > (trade.entry_price * 0.01):
+                    trade.failure_type = "SPREAD_DEGRADATION"
+                elif "time" in reason.lower() or "manual" in reason.lower():
+                    trade.failure_type = "EARLY_EXIT"
+                else:
+                    trade.failure_type = "GOOD_LOSS"
         else:
             trade.result = "BREAK_EVEN"
-
+            
+        # ── Phase C: Counterfactual Resolution ──
+        trade.adapted_outcome = {
+            "exit_reason": reason,
+            "pnl": trade.net_pnl
+        }
+        
+        # If no baseline outcome was logged (e.g. time exit before any targets hit), fallback to adapted outcome logic.
+        if not trade.baseline_outcome:
+            # Baseline PNL is what the PNL would have been with the original size
+            hypothetical_pnl = trade.net_pnl * (trade.original_qty / trade.qty) if trade.qty > 0 else trade.net_pnl
+            trade.baseline_outcome = {
+                "exit_reason": reason,
+                "pnl": hypothetical_pnl
+            }
+            
+        base_pnl = trade.baseline_outcome.get("pnl", 0)
+        adpt_pnl = trade.adapted_outcome.get("pnl", 0)
+        trade.adaptation_pnl_delta = adpt_pnl - base_pnl
+        
+        if trade.adaptation_reason:
+            if trade.original_sl_hit and trade.result == "WIN":
+                trade.adaptation_outcome = "REVERSAL_CAPTURED"
+            elif trade.original_tp1_hit and trade.result == "LOSS":
+                trade.adaptation_outcome = "PROFIT_SUPPRESSED"
+            elif base_pnl < 0 and adpt_pnl > base_pnl:
+                trade.adaptation_outcome = "LOSS_MITIGATED"
+            elif base_pnl < 0 and adpt_pnl > 0:
+                trade.adaptation_outcome = "LOSS_AVOIDED"
+            elif adpt_pnl > base_pnl and base_pnl > 0:
+                trade.adaptation_outcome = "WIN_ENHANCED"
+            elif trade.exit_reason == "TARGET_2" and not trade.original_tp2_hit:
+                trade.adaptation_outcome = "RUNNER_CAPTURED"
+            elif adpt_pnl < base_pnl:
+                trade.adaptation_outcome = "PROFIT_SUPPRESSED"
+            else:
+                trade.adaptation_outcome = "NEUTRAL"
+        
         # Update capital
         self.total_costs += trade.costs
         self.net_pnl += trade.net_pnl
@@ -491,9 +712,24 @@ class SimulationEngine:
         # Remove from open
         del self.open_trades[trade_id]
 
+        # ── Phase B: Record trade into BurninTracker ──
+        if self.burnin_tracker:
+            risk = abs(trade.entry_price - trade.stop_loss) * trade.qty
+            rr = (trade.net_pnl / risk) if risk > 0 else 0
+            self.burnin_tracker.record_trade_closed(
+                result=trade.result,
+                net_pnl=trade.net_pnl,
+                gross_profit=max(trade.net_pnl, 0),
+                gross_loss=abs(min(trade.net_pnl, 0)),
+                rr_ratio=rr,
+                regime=trade.regime,
+            )
+
         # Save periodically
         if len(self.all_trades) % 5 == 0:
             self._save_state()
+            if self.burnin_tracker:
+                self.burnin_tracker._save()
 
         self.logger.info(
             f"{'🟢' if trade.result == 'WIN' else '🔴'} "
@@ -502,8 +738,8 @@ class SimulationEngine:
             f"Gross: ₹{trade.gross_pnl:,.0f} | "
             f"Costs: ₹{trade.costs:,.0f} | "
             f"Net: ₹{trade.net_pnl:,.0f} | "
-            f"Reason: {reason} | "
-            f"Hold: {trade.hold_minutes:.0f}min"
+            f"Exit slip: {trade.exit_slippage_pts:.2f}pts | "
+            f"Reason: {reason} | Hold: {trade.hold_minutes:.0f}min"
         )
 
     def _check_daily_reset(self):
@@ -559,6 +795,10 @@ class SimulationEngine:
         )
 
         self.daily_reports.append(report)
+
+        # ── Phase B: Persist daily burnin snapshot ──
+        if self.burnin_tracker:
+            self.burnin_tracker.get_daily_snapshot()
 
     # ══════════════════════════════════════
     # READINESS ASSESSMENT

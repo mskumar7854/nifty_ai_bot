@@ -15,6 +15,7 @@ from decimal import Decimal
 from flask import Flask, render_template_string, jsonify, Response
 from flask_socketio import SocketIO, emit
 from utils.logger import get_logger
+from typing import Optional
 
 logger = get_logger("dashboard")
 
@@ -242,6 +243,95 @@ DASHBOARD_HTML = """
         </div>
     </div>
 
+    <div class="panel" id="burnin-panel">
+        <div class="panel-title">🎯 BURN-IN READINESS DASHBOARD</div>
+        <div style="display:grid; grid-template-columns: 1fr 2fr; gap:20px;">
+            <!-- Left: Readiness Score -->
+            <div style="text-align:center; padding:20px; background:#0d0d14; border-radius:8px; border:1px solid #333;">
+                <div style="font-size:11px; color:#888; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px;">Readiness Score</div>
+                <div id="bi-score" style="font-size:56px; font-weight:bold; color:#00d4ff; line-height:1;">--</div>
+                <div id="bi-gate" style="font-size:13px; margin-top:10px; color:#ffaa00;">Loading...</div>
+                <div style="margin-top:15px; font-size:11px; color:#555;">P × 0.35 + S × 0.25 + D × 0.20 + E × 0.20</div>
+                <div style="margin-top:10px; display:flex; justify-content:space-between; font-size:11px;">
+                    <span id="bi-trades" style="color:#888;">-- trades</span>
+                    <span id="bi-days" style="color:#888;">-- days</span>
+                </div>
+            </div>
+            <!-- Right: Category scores + Regime -->
+            <div>
+                <div style="margin-bottom:15px;">
+                    <div style="font-size:11px; color:#888; margin-bottom:8px;">CATEGORY BREAKDOWN</div>
+                    <div id="bi-categories"></div>
+                </div>
+                <div>
+                    <div style="font-size:11px; color:#888; margin-bottom:8px;">EXECUTION QUALITY</div>
+                    <div id="bi-exec" style="font-size:12px; color:#aaa;"></div>
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:15px;">
+            <div style="font-size:11px; color:#888; margin-bottom:8px;">REGIME INTELLIGENCE</div>
+            <div id="bi-regime" style="display:flex; gap:10px; flex-wrap:wrap;"></div>
+        </div>
+        <div id="bi-recs" style="margin-top:15px; background:#101020; padding:12px; border-radius:6px; font-size:12px; color:#aaa;"></div>
+    </div>
+
+    <!-- Priority 1: Trade Replay & Ledger -->
+    <div class="panel" id="trade-replay-panel">
+        <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>📼 TRADE REPLAY & LEDGER</span>
+            <span id="adaptation-alpha" style="font-size:12px; font-weight:normal; color:#00ff88;"></span>
+        </div>
+        
+        <!-- Phase C: Replay Filters -->
+        <div style="margin-bottom:10px; display:flex; gap:10px; font-size:12px; background:#151525; padding:8px; border-radius:4px;">
+            <select id="filter-regime" style="background:#222; color:#fff; border:1px solid #444; padding:2px 5px;">
+                <option value="ALL">All Regimes</option>
+                <option value="CHOPPY">Choppy</option>
+                <option value="TRENDING_UP">Trending Up</option>
+                <option value="TRENDING_DOWN">Trending Down</option>
+                <option value="VOLATILE">Volatile</option>
+                <option value="BREAKOUT">Breakout</option>
+            </select>
+            <select id="filter-failure" style="background:#222; color:#fff; border:1px solid #444; padding:2px 5px;">
+                <option value="ALL">All Failure Types</option>
+                <option value="FALSE_BREAKOUT">False Breakout</option>
+                <option value="SLIPPAGE_LOSS">Slippage Loss</option>
+                <option value="SPREAD_DEGRADATION">Spread Degradation</option>
+                <option value="EARLY_EXIT">Early Exit</option>
+                <option value="GOOD_LOSS">Good Loss</option>
+            </select>
+            <select id="filter-quality" style="background:#222; color:#fff; border:1px solid #444; padding:2px 5px;">
+                <option value="ALL">All Execution Qualities</option>
+                <option value="GOOD">Good</option>
+                <option value="FAIR">Fair</option>
+                <option value="POOR">Poor</option>
+            </select>
+            <label style="display:flex; align-items:center; gap:5px; color:#aaa; cursor:pointer;">
+                <input type="checkbox" id="filter-adapted" /> Adapted Only
+            </label>
+        </div>
+
+        <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:left;">
+                <thead>
+                    <tr style="border-bottom:1px solid #333; color:#888;">
+                        <th style="padding:8px;">Time</th>
+                        <th style="padding:8px;">Signal</th>
+                        <th style="padding:8px;">Regime</th>
+                        <th style="padding:8px;">Execution</th>
+                        <th style="padding:8px;">Result (Actual vs Base)</th>
+                        <th style="padding:8px;">Failure Type</th>
+                        <th style="padding:8px;">Adaptation Outcome</th>
+                    </tr>
+                </thead>
+                <tbody id="trade-ledger-body">
+                    <!-- Populated via JS -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <script>
         const socket = io();
 
@@ -386,6 +476,171 @@ DASHBOARD_HTML = """
                 if (log.children.length > 50) log.removeChild(log.lastChild);
             }
         }
+        // Burn-In Stats polling
+        function fetchBurnin() {
+            fetch('/api/burnin').then(r => r.json()).then(d => {
+                if (!d || d.status === 'no_data') return;
+                const s = d.score || {};
+                const st = d.stats || {};
+
+                // Score
+                document.getElementById('bi-score').textContent = s.final_score ?? '--';
+                const gate = s.gate || 'LOADING';
+                const gateColors = {
+                    'OPERATIONALLY_MATURE': '#00ff88',
+                    'SMALL_CAPITAL_ELIGIBLE': '#88ff44',
+                    'CONTROLLED_BURNIN': '#ffaa00',
+                    'EXPERIMENTAL': '#ff8800',
+                    'UNSAFE': '#ff4444',
+                };
+                const gateEl = document.getElementById('bi-gate');
+                gateEl.textContent = gate.replace(/_/g, ' ');
+                gateEl.style.color = gateColors[gate] || '#ffaa00';
+
+                // Evidence
+                const ev = s.evidence || {};
+                document.getElementById('bi-trades').textContent = (ev.trades || 0) + ' trades';
+                document.getElementById('bi-days').textContent = (ev.trading_days || 0) + ' days';
+
+                // Categories
+                const cats = s.categories || {};
+                const catLabels = {
+                    profitability: { label: 'Profitability', color: '#00ff88' },
+                    stability:     { label: 'Stability',     color: '#00d4ff' },
+                    discipline:    { label: 'Discipline',    color: '#aa88ff' },
+                    execution:     { label: 'Execution',     color: '#ffaa00' },
+                };
+                let catHtml = '';
+                for (const [key, cfg] of Object.entries(catLabels)) {
+                    const cat = cats[key] || {};
+                    const pct = cat.score || 0;
+                    catHtml += `
+                        <div style="margin-bottom:8px;">
+                            <div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:3px;">
+                                <span style="color:#ccc;">${cfg.label} (×${cat.weight || 0})</span>
+                                <span style="color:${cfg.color};">${pct.toFixed(1)}</span>
+                            </div>
+                            <div style="height:6px; background:#222; border-radius:3px; overflow:hidden;">
+                                <div style="height:100%; width:${pct}%; background:${cfg.color}; border-radius:3px; transition:width 0.5s;"></div>
+                            </div>
+                        </div>`;
+                }
+                document.getElementById('bi-categories').innerHTML = catHtml;
+
+                // Execution quality
+                const exec = st.execution || {};
+                document.getElementById('bi-exec').innerHTML = [
+                    `Fill Rate: <span style="color:#00ff88">${(exec.fill_success_rate_pct||100).toFixed(1)}%</span>`,
+                    `Avg Slippage: <span style="color:#ffaa00">${(exec.avg_slippage_pts||0).toFixed(3)}pts</span>`,
+                    `Avg Spread: <span style="color:#ffaa00">${(exec.avg_spread_pts||0).toFixed(3)}pts</span>`,
+                    `Rejection Rate: <span style="color:#ff8800">${(exec.rejection_rate_pct||0).toFixed(2)}%</span>`,
+                    `Avg Latency: <span style="color:#aaa">${Math.round(exec.avg_latency_ms||0)}ms</span>`,
+                ].join(' &nbsp;|&nbsp; ');
+
+                // Regime breakdown
+                const regime = st.regime || {};
+                let regHtml = '';
+                for (const [name, r] of Object.entries(regime)) {
+                    const pnlColor = r.pnl >= 0 ? '#00ff88' : '#ff4444';
+                    regHtml += `<div style="background:#161625; border:1px solid #2a2a35; border-radius:6px; padding:10px 14px; font-size:11px; min-width:130px;">
+                        <div style="color:#00d4ff; font-weight:bold; margin-bottom:5px;">${name}</div>
+                        <div>Win Rate: <span style="color:#fff">${r.win_rate}%</span></div>
+                        <div>P&amp;L: <span style="color:${pnlColor}">₹${r.pnl}</span></div>
+                        <div>Trades: <span style="color:#888">${r.trades}</span></div>
+                    </div>`;
+                }
+                document.getElementById('bi-regime').innerHTML = regHtml || '<span style="color:#555">No trades yet</span>';
+
+                // Recommendations
+                const recs = s.recommendations || [];
+                document.getElementById('bi-recs').innerHTML =
+                    '<strong style="color:#888">📌 Recommendations:</strong> <br>' +
+                    recs.map(r => `▸ ${r}`).join('<br>');
+            }).catch(() => {});
+        }
+
+        let cachedTrades = [];
+
+        function renderTrades() {
+            const fRegime = document.getElementById('filter-regime').value;
+            const fFailure = document.getElementById('filter-failure').value;
+            const fQuality = document.getElementById('filter-quality').value;
+            const fAdapted = document.getElementById('filter-adapted').checked;
+            
+            let html = '';
+            cachedTrades.forEach(t => {
+                // Apply Filters
+                if (fRegime !== 'ALL' && t.regime !== fRegime) return;
+                if (fFailure !== 'ALL' && t.failure_type !== fFailure) return;
+                if (fQuality !== 'ALL' && t.exec_quality !== fQuality) return;
+                if (fAdapted && !t.adaptation_reason) return;
+
+                const resColor = t.result === 'WIN' ? '#00ff88' : t.result === 'LOSS' ? '#ff4444' : '#888';
+                const execQualityColor = t.exec_quality === 'GOOD' ? '#00ff88' : t.exec_quality === 'FAIR' ? '#ffaa00' : '#ff4444';
+                
+                let adaptationText = '';
+                if (t.adaptation_reason) {
+                    const outcomeColor = (t.adaptation_outcome === 'LOSS_MITIGATED' || t.adaptation_outcome === 'WIN_ENHANCED' || t.adaptation_outcome === 'LOSS_AVOIDED' || t.adaptation_outcome === 'REVERSAL_CAPTURED' || t.adaptation_outcome === 'RUNNER_CAPTURED') ? '#00ff88' : (t.adaptation_outcome === 'PROFIT_SUPPRESSED' ? '#ff4444' : '#888');
+                    let deltaBadge = t.adaptation_pnl_delta > 0 ? `<span style="color:#00ff88;">+₹${t.adaptation_pnl_delta}</span>` : `<span style="color:#ff4444;">₹${t.adaptation_pnl_delta}</span>`;
+                    
+                    adaptationText = `
+                    <div style="color:${outcomeColor}; font-weight:bold; font-size:11px;">${t.adaptation_outcome} (${deltaBadge})</div>
+                    <div style="color:#00d4ff; font-size:10px; margin-top:3px;">${t.adaptation_reason}</div>
+                    <div style="color:#888; font-size:10px;">SL: ${t.original_sl} → ${t.adapted_sl} | Qty: ${t.original_qty} → ${t.adapted_qty}</div>`;
+                }
+                
+                let failureText = '';
+                if (t.failure_type) {
+                    failureText = `<span style="background:#ff444433; color:#ff4444; padding:2px 6px; border-radius:4px; font-size:10px;">${t.failure_type.replace(/_/g, ' ')}</span>`;
+                }
+                
+                let baselineHtml = '';
+                if (t.baseline_outcome && t.baseline_outcome.pnl !== undefined) {
+                    baselineHtml = `<div style="font-size:10px; color:#777;">Base: ₹${t.baseline_outcome.pnl.toFixed(1)} (${t.baseline_outcome.exit_reason})</div>`;
+                }
+
+                html += `<tr style="border-bottom:1px solid #222;">
+                    <td style="padding:8px; color:#aaa;">${t.time.split('.')[0]}</td>
+                    <td style="padding:8px; font-weight:bold; color:${t.direction === 'BULLISH' ? '#00ff88' : t.direction === 'BEARISH' ? '#ff4444' : '#fff'}">${t.signal}</td>
+                    <td style="padding:8px; color:#888;">${t.regime}</td>
+                    <td style="padding:8px;">
+                        <div>Fill: ${(t.fill_ratio * 100).toFixed(0)}% | Latency: ${t.latency_ms}ms</div>
+                        <div style="font-size:10px; color:${execQualityColor}">Friction: +${t.total_friction_pts}pts (${t.exec_quality})</div>
+                    </td>
+                    <td style="padding:8px;">
+                        <strong style="color:${resColor}">₹${t.net_pnl.toFixed(1)}</strong>
+                        <div style="font-size:10px; color:#888;">Actual: ${t.exit_reason || 'OPEN'}</div>
+                        ${baselineHtml}
+                    </td>
+                    <td style="padding:8px;">${failureText}</td>
+                    <td style="padding:8px;">${adaptationText}</td>
+                </tr>`;
+            });
+            document.getElementById('trade-ledger-body').innerHTML = html || '<tr><td colspan="7" style="padding:8px; color:#555; text-align:center;">No trades match filters</td></tr>';
+        }
+
+        document.getElementById('filter-regime').addEventListener('change', renderTrades);
+        document.getElementById('filter-failure').addEventListener('change', renderTrades);
+        document.getElementById('filter-quality').addEventListener('change', renderTrades);
+        document.getElementById('filter-adapted').addEventListener('change', renderTrades);
+
+        function fetchTrades() {
+            fetch('/api/trades').then(r => r.json()).then(d => {
+                if (!d || d.status !== 'ok') return;
+                cachedTrades = d.trades;
+                
+                let alphaStr = d.total_adaptation_alpha > 0 ? `+₹${d.total_adaptation_alpha.toFixed(1)}` : `₹${d.total_adaptation_alpha.toFixed(1)}`;
+                let alphaColor = d.total_adaptation_alpha > 0 ? '#00ff88' : '#ff4444';
+                document.getElementById('adaptation-alpha').innerHTML = `Adaptation Alpha: <span style="color:${alphaColor}; font-weight:bold;">${alphaStr}</span>`;
+                
+                renderTrades();
+            }).catch(() => {});
+        }
+
+        fetchBurnin();
+        fetchTrades();
+        setInterval(fetchBurnin, 30000);  // refresh every 30s
+        setInterval(fetchTrades, 30000);
     </script>
 </body>
 </html>
@@ -404,6 +659,13 @@ class Dashboard:
         self._errors = 0
         self._last_cycle = 0
         self._trading_enabled = True
+
+        # ── Phase B: Burn-In Tracker + Readiness Scorer (injected from main) ──
+        self._burnin_tracker = None
+        self._readiness_scorer = None
+        
+        # ── Priority 1: Trade Replay Viewer ──
+        self._simulation_engine = None
 
         self._setup_routes()
         self._setup_error_handlers()
@@ -429,6 +691,38 @@ class Dashboard:
                 })
             except Exception as e:
                 logger.error(f"STATUS ENDPOINT ERROR: {e}")
+                return _safe_jsonify({"status": "error", "message": str(e)}), 500
+
+        @self.app.route("/api/burnin")
+        def api_burnin():
+            """Burn-In Metrics + Readiness Score endpoint for dashboard panel."""
+            try:
+                if not self._burnin_tracker or not self._readiness_scorer:
+                    return _safe_jsonify({"status": "no_data", "message": "BurninTracker not initialized"})
+                stats = self._burnin_tracker.get_lifetime_stats()
+                score = self._readiness_scorer.score(stats)
+                return _safe_jsonify({"status": "ok", "stats": stats, "score": score})
+            except Exception as e:
+                logger.error(f"BURNIN ENDPOINT ERROR: {e}")
+                return _safe_jsonify({"status": "error", "message": str(e)}), 500
+
+        @self.app.route("/api/trades")
+        def api_trades():
+            """Trade Ledger & Replay endpoint for dashboard panel."""
+            try:
+                if not self._simulation_engine:
+                    return _safe_jsonify({"status": "no_data", "message": "SimulationEngine not initialized"})
+                
+                # Get last 50 completed trades, reversed so newest is first
+                trades = [t.to_dict() for t in self._simulation_engine.all_trades[-100:]]
+                trades.reverse()
+                
+                # Phase C: Calculate Aggregate Adaptation Alpha
+                total_alpha = sum(t.adaptation_pnl_delta for t in self._simulation_engine.all_trades if t.adaptation_reason)
+                
+                return _safe_jsonify({"status": "ok", "trades": trades, "total_adaptation_alpha": total_alpha})
+            except Exception as e:
+                logger.error(f"TRADES ENDPOINT ERROR: {e}")
                 return _safe_jsonify({"status": "error", "message": str(e)}), 500
 
         @self.app.route("/health")
@@ -527,6 +821,15 @@ class Dashboard:
             self.socketio.emit('signal_update', safe_data)
         except Exception as e:
             logger.error(f"Socket emit error: {e}")
+
+    def set_burnin_components(self, burnin_tracker, readiness_scorer):
+        """Inject BurninTracker and ReadinessScorer (called from main after init)."""
+        self._burnin_tracker = burnin_tracker
+        self._readiness_scorer = readiness_scorer
+
+    def set_simulation_engine(self, sim_engine):
+        """Inject SimulationEngine for Trade Ledger / Replay functionality."""
+        self._simulation_engine = sim_engine
 
     def update_status(self, data: dict):
         """Update dashboard data (called from main loop)"""

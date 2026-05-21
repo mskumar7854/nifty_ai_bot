@@ -22,6 +22,7 @@ from config.settings import Settings
 from dhan_client import get_dhan_client
 from core.regime_classifier import RegimeClassifier
 from core.regime_state_manager import RegimeStateManager
+from config.config import OPTION_CHAIN_SEGMENT, CANDLE_SEGMENT
 
 
 class DataManager:
@@ -49,11 +50,17 @@ class DataManager:
         self._day_open: Optional[float] = None   # today's first candle open
         self._api_security_id = None
         # ── Spot index candles live in IDX_I (Option chains live in NSE_FNO) ──
-        self._api_exchange_segment = "IDX_I"
+        self._api_exchange_segment = CANDLE_SEGMENT
         self._api_instrument_type = "INDEX"
         self._logged_fo_auth_warning = False
         self._api_failures = 0
         self._api_circuit_breaker_until = 0.0
+        self.oi_circuit = {
+            "open_until": 0.0,
+            "reason": None,
+            "failure_count": 0,
+            "last_error": None
+        }
 
         # ── API Polling Telemetry & Cadence Cooldown (Phase 2 Optimization) ──
         self._last_api_fetch_ts = 0.0
@@ -181,7 +188,7 @@ class DataManager:
           - max_ce_oi_strike, max_pe_oi_strike
 
         - Runs on a 60s cache to avoid API rate limits.
-        - Retries up to 3 times on transient failure (with 1s/2s backoff).
+        - Retries up to 3 times on transient failure (with 1s/2s/4s backoff).
         - Logs every 5th failure at WARNING (not just the first).
         - Falls back to simulated data only after all retries exhausted.
         - Sets DataSource.REAL flag when successful.
@@ -199,6 +206,15 @@ class DataManager:
 
         if self.data_source != "api":
             return {'data_source': DataSource.SIMULATED}  # Caller will use simulated fallback
+
+        # Check circuit breaker
+        if now < self.oi_circuit["open_until"]:
+            cooldown_rem = int(self.oi_circuit["open_until"] - now)
+            self.logger.warning(
+                f"[DATAMANAGER] OI circuit breaker OPEN — skipping fetch. "
+                f"Cooldown remaining: {cooldown_rem}s. Last error: {self.oi_circuit['last_error']}"
+            )
+            return {'data_source': DataSource.SIMULATED}
 
         # ── Expiry resolution ──
         from datetime import date, timedelta, datetime as _dt
@@ -223,12 +239,12 @@ class DataManager:
             # Construct and log the full raw request payload
             payload_log = {
                 "security_id": security_id_int,
-                "exchange_segment": "NSE_FNO",
+                "exchange_segment": OPTION_CHAIN_SEGMENT,
                 "expiry": expiry_str,
                 "underlying": "NIFTY",
                 "request_json": {
                     "under_security_id": security_id_int,
-                    "under_exchange_segment": "NSE_FNO",
+                    "under_exchange_segment": OPTION_CHAIN_SEGMENT,
                     "expiry": expiry_str
                 }
             }
@@ -243,7 +259,7 @@ class DataManager:
                 try:
                     response = dhan.option_chain(
                         under_security_id=security_id_int,
-                        under_exchange_segment="NSE_FNO",
+                        under_exchange_segment=OPTION_CHAIN_SEGMENT,
                         expiry=expiry_str
                     )
                     # Log the full raw response body
@@ -251,11 +267,60 @@ class DataManager:
 
                     if response.get('status') == 'success':
                         break  # Success — exit retry loop
+                    
                     last_error = response.get('remarks', 'unknown')
+                    
+                    # Inspect the response for non-retryable errors
+                    inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+                    error_str = str(last_error) + " " + str(inner_data) + " " + str(response)
+                    
+                    is_non_retryable = False
+                    error_code = None
+                    for err in ["805", "808", "permission_denied", "invalid_client"]:
+                        if err in error_str:
+                            error_code = err
+                            is_non_retryable = True
+                            break
+                            
+                    if is_non_retryable:
+                        self.oi_circuit.update({
+                            "open_until": _time.time() + 900,
+                            "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT" if error_code == "805" else "PERMISSION_DENIED",
+                            "failure_count": self.oi_circuit["failure_count"] + 1,
+                            "last_error": error_code
+                        })
+                        self.logger.warning(
+                            f"🚨 DataManager: Non-retryable error {error_code} detected! "
+                            f"Tripping circuit breaker for 15 minutes."
+                        )
+                        break  # Halt retries immediately
+                    
                     if attempt < 2:
                         _time.sleep(2 ** attempt)  # 1s, 2s backoff
                 except Exception as retry_exc:
                     last_error = str(retry_exc)
+                    # Also check exception message for non-retryable errors
+                    is_non_retryable = False
+                    error_code = None
+                    for err in ["805", "808", "permission_denied", "invalid_client"]:
+                        if err in last_error:
+                            error_code = err
+                            is_non_retryable = True
+                            break
+                            
+                    if is_non_retryable:
+                        self.oi_circuit.update({
+                            "open_until": _time.time() + 900,
+                            "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT" if error_code == "805" else "PERMISSION_DENIED",
+                            "failure_count": self.oi_circuit["failure_count"] + 1,
+                            "last_error": error_code
+                        })
+                        self.logger.warning(
+                            f"🚨 DataManager: Non-retryable exception {error_code} detected! "
+                            f"Tripping circuit breaker for 15 minutes."
+                        )
+                        break  # Immediately halt further retries
+                        
                     if attempt < 2:
                         _time.sleep(2 ** attempt)
 
@@ -283,7 +348,7 @@ class DataManager:
                     self.logger.warning(
                         f"⚠️ OI Fetch FAILED (#{self._oi_fail_count}) | "
                         f"security_id={security_id_int} | "
-                        f"segment=NSE_FNO | "
+                        f"segment={OPTION_CHAIN_SEGMENT} | "
                         f"expiry={expiry_str} | "
                         f"status={response.get('status') if response else 'no_response'} | "
                         f"remarks={response.get('remarks') if response else last_error} | "
@@ -379,36 +444,88 @@ class DataManager:
         
         # 1. LIVE API MODE
         if self.data_source == "api":
-            try:
-                dhan = get_dhan_client()
-                
-                # Fetch option chain once to find the specific contract
-                if self._api_security_id is None:
-                    self._api_security_id = self._discover_nifty_id(dhan)
+            now = _time.time()
+            if now < self.oi_circuit["open_until"]:
+                self.logger.warning("OI circuit breaker OPEN — skipping live quote fetch and falling back to synthetic quote")
+            else:
+                try:
+                    dhan = get_dhan_client()
                     
-                response = dhan.option_chain(
-                    under_security_id=self._api_security_id,
-                    under_exchange_segment="NSE_FNO",
-                    expiry=expiry
-                )
-                
-                if response.get('status') == 'success':
-                    chain = response.get('data', {}).get('data', [])
-                    for row in chain:
-                        if row.get('strikePrice') == strike:
-                            opt_data = row.get('callOption' if opt_type == 'CE' else 'putOption', {})
-                            return OptionQuote(
-                                security_id=opt_data.get('securityId', ''),
-                                symbol=opt_data.get('tradingSymbol', f"NIFTY {strike} {opt_type}"),
-                                ltp=float(opt_data.get('lastPrice', 0)),
-                                bid=float(opt_data.get('bidPrice', 0) or opt_data.get('lastPrice', 0)),
-                                ask=float(opt_data.get('askPrice', 0) or opt_data.get('lastPrice', 0)),
-                                volume=int(opt_data.get('volume', 0)),
-                                oi=int(opt_data.get('openInterest', 0))
-                            )
-            except Exception as e:
-                self.logger.error(f"Option quote fetch failed: {e}")
-                # Fallback to simulation logic below if API fails
+                    # Fetch option chain once to find the specific contract
+                    if self._api_security_id is None:
+                        self._api_security_id = self._discover_nifty_id(dhan)
+                        
+                    security_id_int = int(self._api_security_id)
+                    
+                    payload_log = {
+                        "security_id": security_id_int,
+                        "exchange_segment": OPTION_CHAIN_SEGMENT,
+                        "expiry": expiry,
+                        "underlying": "NIFTY",
+                        "request_json": {
+                            "under_security_id": security_id_int,
+                            "under_exchange_segment": OPTION_CHAIN_SEGMENT,
+                            "expiry": expiry
+                        }
+                    }
+                    self.logger.info(f"📤 Sending Option Chain Request for Quote: {payload_log}")
+                    
+                    response = dhan.option_chain(
+                        under_security_id=security_id_int,
+                        under_exchange_segment=OPTION_CHAIN_SEGMENT,
+                        expiry=expiry
+                    )
+                    self.logger.info(f"📥 Received Option Chain Response for Quote: {response}")
+                    
+                    # Inspect the response for non-retryable errors
+                    inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+                    error_str = str(response.get('remarks', '')) + " " + str(inner_data) + " " + str(response)
+                    
+                    is_non_retryable = False
+                    error_code = None
+                    for err in ["805", "808", "permission_denied", "invalid_client"]:
+                        if err in error_str:
+                            error_code = err
+                            is_non_retryable = True
+                            break
+                            
+                    if is_non_retryable:
+                        self.oi_circuit.update({
+                            "open_until": _time.time() + 900,
+                            "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT",
+                            "failure_count": self.oi_circuit["failure_count"] + 1,
+                            "last_error": error_code
+                        })
+                        self.logger.warning(
+                            f"🚨 DataManager: Non-retryable error {error_code} detected during option quote fetch! "
+                            f"Tripping circuit breaker for 15 minutes."
+                        )
+                    
+                    if response.get('status') == 'success':
+                        # Handle both: response['data']['data'] and response['data'] as list
+                        raw_data = response.get('data', {})
+                        if isinstance(raw_data, dict):
+                            chain = raw_data.get('data', [])
+                        elif isinstance(raw_data, list):
+                            chain = raw_data
+                        else:
+                            chain = []
+                            
+                        for row in chain:
+                            if row.get('strikePrice', row.get('strike_price', 0)) == strike:
+                                opt_data = row.get('callOption', row.get('ce', {})) if opt_type == 'CE' else row.get('putOption', row.get('pe', {}))
+                                return OptionQuote(
+                                    security_id=opt_data.get('securityId', opt_data.get('security_id', '')),
+                                    symbol=opt_data.get('tradingSymbol', opt_data.get('trading_symbol', f"NIFTY {strike} {opt_type}")),
+                                    ltp=float(opt_data.get('lastPrice', opt_data.get('last_price', 0))),
+                                    bid=float(opt_data.get('bidPrice', opt_data.get('bid_price', 0)) or opt_data.get('lastPrice', opt_data.get('last_price', 0))),
+                                    ask=float(opt_data.get('askPrice', opt_data.get('ask_price', 0)) or opt_data.get('lastPrice', opt_data.get('last_price', 0))),
+                                    volume=int(opt_data.get('volume', 0)),
+                                    oi=int(opt_data.get('openInterest', opt_data.get('oi', 0)))
+                                )
+                except Exception as e:
+                    self.logger.error(f"Option quote fetch failed: {e}")
+                    # Fallback to simulation logic below if API fails
 
         # 2. SIMULATION MODE (Synthetic Option Pricing)
         # This is CRITICAL for realistic paper trading. We cannot use Spot Nifty.
@@ -634,11 +751,24 @@ class DataManager:
         avg_latency = 0.0
         if self._api_fetch_count > 0:
             avg_latency = self._api_total_latency_ms / self._api_fetch_count
+            
+        now = time.time()
+        oi_circuit_status = "CLOSED"
+        cooldown_remaining = 0
+        if now < self.oi_circuit["open_until"]:
+            oi_circuit_status = "OPEN"
+            cooldown_remaining = int(self.oi_circuit["open_until"] - now)
+            
         return {
             "last_api_fetch_ts": self._last_api_fetch_ts,
             "cache_hit_count": self._api_cache_hit_count,
             "api_fetch_count": self._api_fetch_count,
-            "avg_fetch_latency": avg_latency
+            "avg_fetch_latency": avg_latency,
+            "oi_circuit": oi_circuit_status,
+            "cooldown_remaining_seconds": cooldown_remaining,
+            "cooldown_remaining_formatted": f"{cooldown_remaining // 60}m {cooldown_remaining % 60}s" if cooldown_remaining > 0 else "0s",
+            "last_oi_error": self.oi_circuit["last_error"],
+            "last_oi_success": datetime.fromtimestamp(self._oi_last_success_ts).strftime("%Y-%m-%d %H:%M:%S") if self._oi_last_success_ts > 0 else None
         }
 
     # ============================================
@@ -972,16 +1102,14 @@ class DataManager:
         return last_1m >= last_5m
 
     def _is_market_open_safe(self) -> bool:
-        """Check if current time is after market_open_safe_time using SessionGuard"""
+        """Check if current time is after market_open_safe_time using SessionGuard.
+        
+        Transition logging is handled inside SessionGuard.can_trade() —
+        this method is intentionally silent during steady-state protection.
+        """
         from core.session_guard import SessionGuard
-        can_trade, reason = SessionGuard.can_trade(self.settings)
-        if not can_trade:
-            now = datetime.now()
-            if not hasattr(self, '_last_protection_log') or (now - self._last_protection_log).total_seconds() >= 60:
-                self.logger.info(reason)
-                self._last_protection_log = now
-            return False
-        return True
+        can_trade, _reason = SessionGuard.can_trade(self.settings)
+        return can_trade
 
     def _discover_nifty_id(self, dhan) -> str:
         """
