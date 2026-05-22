@@ -190,7 +190,7 @@ class OptionsAnalyzer:
         try:
             response = self._dhan.expiry_list(
                 under_security_id=underlying_scrip,
-                under_exchange_segment=self.NSE_FNO,
+                under_exchange_segment="IDX_I",
             )
             
             # Inspect the response for F&O authorization error (nested code 808 or auth fails)
@@ -223,10 +223,11 @@ class OptionsAnalyzer:
             )
             return {}
 
+        # Log exact v2 payload to prevent confusion
         payload = {
-            "under_security_id": underlying_scrip,
-            "under_exchange_segment": self.NSE_FNO,
-            "expiry": expiry_date
+            "UnderlyingScrip": underlying_scrip,
+            "UnderlyingSeg": "IDX_I",
+            "Expiry": expiry_date
         }
         logger.info(
             f"📤 OptionsAnalyzer Request: security_id={underlying_scrip} | "
@@ -235,7 +236,7 @@ class OptionsAnalyzer:
         try:
             response = self._dhan.option_chain(
                 under_security_id=underlying_scrip,
-                under_exchange_segment=self.NSE_FNO,
+                under_exchange_segment="IDX_I",
                 expiry=expiry_date,
             )
             logger.info(f"📥 OptionsAnalyzer Response: {response}")

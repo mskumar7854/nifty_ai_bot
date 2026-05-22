@@ -203,7 +203,19 @@ DASHBOARD_HTML = """
         <div>
             <div class="panel">
                 <div class="panel-title">ENGINE TELEMETRY</div>
+                <div class="telemetry-item" style="border-bottom: none; padding-bottom: 2px;">
+                    <span class="exec-label">Session State</span>
+                    <span class="exec-value" id="t-session-state" style="font-size: 11px;">---</span>
+                </div>
+                <div class="telemetry-item" style="border-bottom: none; padding-bottom: 2px;">
+                    <span class="exec-label">Runtime Posture</span>
+                    <span class="exec-value" id="t-runtime-posture">---</span>
+                </div>
                 <div class="telemetry-item">
+                    <span class="exec-label">Data Health</span>
+                    <span class="exec-value" id="t-data-health">---</span>
+                </div>
+                <div class="telemetry-item" style="margin-top: 10px;">
                     <span class="exec-label">Engine Latency</span>
                     <span class="exec-value" id="t-latency">---ms</span>
                 </div>
@@ -357,6 +369,18 @@ DASHBOARD_HTML = """
             document.getElementById('update-time').style.color = '#888';
 
             // Telemetry Update
+            if (data.orchestrator) {
+                document.getElementById('t-session-state').textContent = data.orchestrator.session_state || '---';
+                
+                const postEl = document.getElementById('t-runtime-posture');
+                postEl.textContent = data.orchestrator.runtime_posture || '---';
+                postEl.style.color = data.orchestrator.runtime_posture === 'LIVE' ? '#00ff88' : (data.orchestrator.runtime_posture === 'DEGRADED' ? '#ff4444' : '#ffaa00');
+
+                const hlthEl = document.getElementById('t-data-health');
+                hlthEl.textContent = data.orchestrator.data_health || '---';
+                hlthEl.style.color = data.orchestrator.data_health === 'FRESH' ? '#00ff88' : (data.orchestrator.data_health === 'STALE' ? '#ffaa00' : '#ff4444');
+            }
+
             if (data.latency_ms !== undefined) {
                 const latEl = document.getElementById('t-latency');
                 latEl.textContent = data.latency_ms + 'ms';
@@ -650,7 +674,7 @@ DASHBOARD_HTML = """
 class Dashboard:
     """Web dashboard for monitoring the AI system"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 5000):
+    def __init__(self, host: str = "0.0.0.0", port: int = 5000, telemetry_emit_interval_seconds: float = 2.0):
         self.app = Flask(__name__)
         self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='threading')
         self.host = host
@@ -659,6 +683,13 @@ class Dashboard:
         self._errors = 0
         self._last_cycle = 0
         self._trading_enabled = True
+
+        # Telemetry throttling controls
+        self._last_emit_ts = 0.0
+        self._emit_interval_seconds = telemetry_emit_interval_seconds
+        self._last_emitted_posture = None
+        self._last_emitted_trading_status = None
+
 
         # ── Phase B: Burn-In Tracker + Readiness Scorer (injected from main) ──
         self._burnin_tracker = None
@@ -839,6 +870,28 @@ class Dashboard:
         # Update error count from system if available
         if "errors" in data:
             self._errors = data["errors"]
+
+        # Throttle telemetry emits to reduce network and CPU utilization,
+        # but bypass throttle if critical state changes (posture or trading status).
+        now = time.time()
+        current_posture = data.get("orchestrator", {}).get("runtime_posture")
+        current_trading_enabled = self._trading_enabled
+
+        state_changed = (
+            current_posture != self._last_emitted_posture or
+            current_trading_enabled != self._last_emitted_trading_status
+        )
+
+        if state_changed or (now - self._last_emit_ts >= self._emit_interval_seconds):
+            try:
+                safe_data = json.loads(json.dumps(data, cls=_SafeEncoder))
+                self.socketio.emit('system_status', safe_data)
+                self._last_emit_ts = now
+                self._last_emitted_posture = current_posture
+                self._last_emitted_trading_status = current_trading_enabled
+            except Exception as e:
+                logger.error(f"Socket status emit error: {e}")
+
 
     def start(self):
         """Start dashboard using gevent worker"""

@@ -630,6 +630,8 @@ class DashboardConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 5000
+    telemetry_emit_interval_seconds: float = 2.0
+
 
 
 @dataclass
@@ -715,6 +717,7 @@ class EnginePipelineConfig:
     """
 
     # ── 9 agents confirmed to influence decisions (Graphify) ──
+    # ── Core Directional Stack (Phase 1) ──
     active_agents: List[str] = field(
         default_factory=lambda: [
             # Phase 1 gatekeepers
@@ -724,28 +727,13 @@ class EnginePipelineConfig:
             "structure",
             "price_action",
             "momentum",
-            # Phase 3 confirmation (dynamically routed)
-            "trap",
-            "oi",
-            "order_flow",
-            "level",
-            "institutional",
-            "multi_timeframe",
-            "volatility",
             # Phase 4 risk & meta
             "risk",
-            "decay",
-            "expiry_day",
-            "learning",
-            # Phase 4 extras (market + sentiment used in v1 blocker logic)
-            "market",
-            "sentiment",
         ]
-        # NOT included (Graphify confirmed unused in execution paths):
-        #   consolidation, correlation, delta_gamma, expiry,
-        #   gap, gap_agent, level_agent (legacy), price_action_agent (dup),
-        #   regime_agent (dup), structure_agent (dup),
-        #   order_flow_agent (dup key)
+        # Temporarily Disabled (Phase 1 Edge Validation):
+        # "oi", "trap", "order_flow", "level", "institutional", 
+        # "multi_timeframe", "volatility", "decay", "expiry_day", 
+        # "learning", "market", "sentiment"
     )
 
     # Phase 1: The Gatekeepers (Fast & Cheap)
@@ -768,29 +756,16 @@ class EnginePipelineConfig:
     )
 
     # Phase 3: Deep Confirmation (The Heavy Lifters)
-    # Goal: Are institutions backing this move? Are there traps?
+    # Temporarily disabled for Phase 1 edge validation
     phase_3_confirmation: List[str] = field(
-        default_factory=lambda: [
-            "trap",           # Run trap first to kill bad signals early
-            "oi",
-            "order_flow",
-            "level",
-            "institutional",
-            "multi_timeframe",
-            "volatility",     # ATR/VIX context — dynamically routed by V4 router
-        ]
+        default_factory=lambda: []
     )
 
     # Phase 4: Risk & Meta-Analysis (The Final Check)
-    # Goal: Does the risk/reward make sense? Is theta against us?
+    # Goal: Does the risk/reward make sense?
     phase_4_risk: List[str] = field(
         default_factory=lambda: [
             "risk",
-            "decay",
-            "expiry_day",
-            "learning",
-            "market",         # Overall market trend context (legacy meta-signal)
-            "sentiment",      # External sentiment context (low-weight meta-signal)
         ]
     )
 
@@ -877,6 +852,7 @@ class Settings:
         self.dashboard = DashboardConfig(
             enabled=os.getenv("DASHBOARD_ENABLED", "true").lower() == "true",
             port=int(os.getenv("DASHBOARD_PORT", 5000)),
+            telemetry_emit_interval_seconds=float(os.getenv("TELEMETRY_EMIT_INTERVAL_SECONDS", 2.0)),
         )
         self.brokerage = BrokerageConfig()
         self.legacy_position = LegacyPositionConfig()

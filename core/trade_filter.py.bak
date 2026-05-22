@@ -27,8 +27,6 @@ from models.signals import Signal, SignalType, Direction
 from utils.logger import get_logger
 from utils.helpers import safe_divide
 from config.settings import Settings
-import time
-from core.telemetry.rejection_schema import GateEvaluation, RejectionRecord, RejectionLogger
 
 
 @dataclass
@@ -61,7 +59,6 @@ class TradeFilter:
         self.killed = 0
         self.passed_ = 0
         self.kill_reasons: Dict[str, int] = {}
-        self.rejection_logger = RejectionLogger()
 
     def evaluate(
         self,
@@ -85,11 +82,6 @@ class TradeFilter:
         gates = []
         total_score = 0.0
         max_score = 0.0
-
-        t0_eval = time.perf_counter()
-        telemetry_gates = {}
-        primary_kill_reason = None
-        failed_gates_count = 0
 
         # ──────────────────────────────────────────────────────────
         # P2-C: GATE ORDERING RATIONALE (DO NOT REORDER without updating)
@@ -117,8 +109,7 @@ class TradeFilter:
         max_score += 5.0
 
         if not g0_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "DAILY_LIMIT_REACHED"
+            return self._kill(signal, gates, "DAILY_LIMIT_REACHED", 1, 10)
 
         # ── CHOP ZONE FILTER (Phase 5 — with P2-F override support) ──
         current_time = datetime.now()
@@ -155,8 +146,7 @@ class TradeFilter:
                     "score": 0,
                     "detail": "11:30 to 1:30 IST Chop Zone blocking entries.",
                 })
-                failed_gates_count += 1
-                if not primary_kill_reason: primary_kill_reason = "CHOP_ZONE_ACTIVE"
+                return self._kill(signal, gates, "CHOP_ZONE_ACTIVE", 1, 10)
 
         # ── GATE 1: Confidence (Grade + Context Aware Thresholds) ──
         # v3.7: Base thresholds are grade-driven. The HIGH-CONVICTION relaxation
@@ -241,24 +231,8 @@ class TradeFilter:
         total_score += g1_score * 0.20
         max_score += 20.0
 
-        telemetry_gates["Confidence"] = GateEvaluation(
-            gate_name="Confidence",
-            passed=g1_pass,
-            threshold=min_conf,
-            actual=conf,
-            delta=conf - min_conf,
-            inputs={
-                "grade": grade_str,
-                "consensus_pct": _consensus_pct,
-                "has_structural_event": _has_structural_event,
-                "high_conviction": _high_conviction,
-                "strong_consensus": _strong_consensus,
-                "raw_model_score": getattr(signal, "raw_score", conf)
-            }
-        )
         if not g1_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "LOW_CONFIDENCE"
+            return self._kill(signal, gates, "LOW_CONFIDENCE", 1, 10)
 
         # ── GATE 2: Confluence ──
 
@@ -277,8 +251,7 @@ class TradeFilter:
         max_score += 15.0
 
         if not g2_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "LOW_CONFLUENCE"
+            return self._kill(signal, gates, "LOW_CONFLUENCE", 2, 10)
 
         # ── GATE 3: Agent Agreement ──
         # Compute agreement from confluence data
@@ -304,8 +277,7 @@ class TradeFilter:
         max_score += 10.0
 
         if not g3_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "LOW_AGENT_AGREEMENT"
+            return self._kill(signal, gates, "LOW_AGENT_AGREEMENT", 3, 10)
 
         # ── GATE 4: Regime ──
         regime_str = regime_info.get("regime", "UNKNOWN")
@@ -322,8 +294,7 @@ class TradeFilter:
         max_score += 10.0
 
         if not g4_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = f"BLOCKED_REGIME_{regime_str}"
+            return self._kill(signal, gates, f"BLOCKED_REGIME_{regime_str}", 4, 10)
 
         # ── GATE 5: Structure ──
         structure_type = structure_info.get("structure", "OK")
@@ -340,8 +311,7 @@ class TradeFilter:
         max_score += 10.0
 
         if not g5_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = f"BAD_STRUCTURE_{structure_type}"
+            return self._kill(signal, gates, f"BAD_STRUCTURE_{structure_type}", 5, 10)
 
         # ── GATE 6: Cost vs Breakeven (Premium Edge PEV) ──
         total_costs = cost_info.get("total_costs", 100) # Baseline costs
@@ -413,23 +383,6 @@ class TradeFilter:
         total_score += g6_score * 0.10
         max_score += 10.0
 
-        telemetry_gates["PEV"] = GateEvaluation(
-            gate_name="Cost/Breakeven (PEV)",
-            passed=g6_pass,
-            threshold=dynamic_pev_threshold,
-            actual=pev_ratio,
-            delta=pev_ratio - dynamic_pev_threshold,
-            inputs={
-                "p_win": p_win,
-                "p_loss": p_loss,
-                "target_pts": target_pts,
-                "stop_pts": stop_pts,
-                "total_costs": total_costs,
-                "slippage_risk": slippage_risk,
-                "regime_multiplier": regime_multiplier,
-                "liquidity_multiplier": liquidity_multiplier
-            }
-        )
         if not g6_pass:
             # Shadow Trade tracking via detailed logging
             self.logger.warning(
@@ -443,8 +396,7 @@ class TradeFilter:
                 signal.shadow_reason = "PEV_TOO_LOW"
             except Exception:
                 pass
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "PEV_TOO_LOW"
+            return self._kill(signal, gates, "PEV_TOO_LOW", 6, 10)
 
         # P2-C: Daily Limit was moved to Gate 0 (first check) to save compute.
         # The old Gate 7 location is removed to avoid duplicate scoring.
@@ -471,8 +423,7 @@ class TradeFilter:
         max_score += 5.0
 
         if not g8_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "LEARNING_BLOCK"
+            return self._kill(signal, gates, "LEARNING_BLOCK", 8, 10)
 
         # ── GATE 9: Decay/Theta ──
         theta_pct = decay_info.get("theta_pct_per_hour", 0)
@@ -495,8 +446,7 @@ class TradeFilter:
         max_score += 5.0
 
         if not g9_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = "HIGH_DECAY"
+            return self._kill(signal, gates, "HIGH_DECAY", 9, 10)
 
         # ── GATE 10: Quality Grade ──
         grade_map = {"A+": 5, "A": 4, "B+": 3.5, "B": 3, "C": 2, "D": 1}
@@ -518,26 +468,7 @@ class TradeFilter:
         max_score += 10.0
 
         if not g10_pass:
-            failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = f"LOW_GRADE_{grade_str}"
-
-        # ── EVALUATION COMPLETE: Handle Rejections ──
-        if failed_gates_count > 0:
-            regime_val = regime_info.get("regime", "UNKNOWN") if isinstance(regime_info, dict) else str(getattr(signal, "regime", "UNKNOWN"))
-            mpm_mode = getattr(signal, "mpm_mode", "NORMAL")
-            
-            rejection_record = RejectionRecord(
-                signal_id=getattr(signal, "id", f"rej_{int(time.time())}"),
-                timestamp=datetime.now().isoformat(),
-                regime=regime_val,
-                mpm_mode=mpm_mode,
-                primary_blocker=primary_kill_reason,
-                total_failed_gates=failed_gates_count,
-                evaluation_duration_ms=(time.perf_counter() - t0_eval) * 1000,
-                gate_details=telemetry_gates
-            )
-            self.rejection_logger.log_rejection(rejection_record)
-            return self._kill(signal, gates, primary_kill_reason, 10 - failed_gates_count, 10)
+            return self._kill(signal, gates, f"LOW_GRADE_{grade_str}", 10, 10)
 
         # ── ALL GATES PASSED ──
         final_score = safe_divide(total_score, max_score) * 100

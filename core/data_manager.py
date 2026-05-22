@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
-from models.signals import MarketSnapshot, DataSource
+from models.signals import MarketSnapshot, DataSource, OptionQuote
 from utils.indicators import (
     calculate_vwap, calculate_rsi, calculate_ema, calculate_atr
 )
@@ -64,10 +64,24 @@ class DataManager:
 
         # ── API Polling Telemetry & Cadence Cooldown (Phase 2 Optimization) ──
         self._last_api_fetch_ts = 0.0
-        self._api_fetch_cooldown = 10.0  # seconds (safe & lightweight)
+        self._api_fetch_cooldown = 1.0  # seconds (reduced from 10 to keep DataHealth FRESH)
         self._api_cache_hit_count = 0
         self._api_fetch_count = 0
         self._api_total_latency_ms = 0.0
+
+        # ── Incremental Engine Metadata ──
+        self._warmup_complete = False
+        self.last_successful_fetch_ts = 0.0
+        self.last_new_candle_ts = 0.0
+        self.last_incremental_latency_ms = 0.0
+
+        # ── Market Activity Tracking (mutation-based freshness) ──
+        # Updated whenever ANY OHLCV value changes on the latest candle,
+        # not just when a new candle timestamp appears.
+        # This correctly models discrete-time candle feeds where the
+        # active candle mutates continuously during its minute.
+        self.last_market_activity_ts: datetime | None = None
+        self._last_ohlcv_fingerprint: tuple | None = None
 
         # ── Real OI Cache (refreshed every 60s) ──
         self._oi_cache: dict = {}
@@ -102,81 +116,72 @@ class DataManager:
 
         self.logger.info(f"DataManager initialized | Source: {self.data_source}")
 
-    def fetch_latest(self) -> pd.DataFrame:
-        """
-        Fetch latest OHLCV data.
-        Routes to appropriate source with throttling for API.
-        """
-        # API Throttling
+    # Removed legacy get_latest_data, get_snapshot, and fetch_latest
+
+    async def startup_bootstrap(self, session: aiohttp.ClientSession = None) -> None:
+        """BOOT-TIME ONLY: Fetch historical data, initialize dataframe, and validate warmup."""
+        import asyncio
+        self.logger.info("🚀 USING BOOTSTRAP HYDRATION PATH")
+        if self.data_source == "simulated":
+            df = self._fetch_simulated()
+            if df is not None and not df.empty:
+                self.ohlcv_data = df
+                self._warmup_complete = True
+            return
+
         if self.data_source == "api":
-            time_since_last = (datetime.now() - self.last_fetch_time).total_seconds()
-            if time_since_last < self.fetch_interval_seconds:
-                # Return cached data if too frequent
-                if self.ohlcv_data is not None:
-                    return self.ohlcv_data
-                # Or sleep briefly
-                time.sleep(self.fetch_interval_seconds - time_since_last)
-
-        if self.data_source == "simulated":
-            df = self._fetch_simulated()
-        elif self.data_source == "api":
-            df = self._fetch_from_api()
-        elif self.data_source == "csv":
-            df = self._fetch_from_csv()
+            df = await asyncio.to_thread(self._fetch_history_for_bootstrap)
+            if df is not None and not df.empty:
+                self.logger.info("✅ Bootstrap completed successfully. Setting _warmup_complete = True")
+                self._warmup_complete = True
+            else:
+                self.logger.error("❌ Bootstrap failed or returned empty df. _warmup_complete remains False.")
         else:
-            df = self._fetch_simulated()
+            self._fetch_simulated()
+            self._warmup_complete = True
 
-        self.last_fetch_time = datetime.now()
-        self.ohlcv_data = df
-        return df
-
-    def get_fund_limits(self) -> float:
-        """Fetches available margin from the broker."""
-        if self.data_source == "simulated":
-            return self.settings.position.total_capital
-            
-        try:
-            dhan = get_dhan_client()
-            response = dhan.get_fund_limits()
-            if response.get("status") == "success":
-                return float(response.get("data", {}).get("availabelBalance", 0.0))
-        except Exception as e:
-            self.logger.error(f"Failed to fetch fund limits: {e}")
-            
-        return 0.0
-
-    def get_latest_data(self):
-        """Returns both DataFrame and MarketSnapshot"""
-        df = self.fetch_latest()
-        snapshot = self.get_snapshot_from_df(df)
-        return df, snapshot
-
-    def get_snapshot(self) -> MarketSnapshot:
-        """Fetch latest and return snapshot"""
-        df = self.fetch_latest()
-        # Use incremental snapshot for performance
-        return self.get_snapshot_incremental(df)
-
-    async def fetch_latest_async(self, session: aiohttp.ClientSession) -> Tuple[pd.DataFrame, MarketSnapshot]:
+    async def update_latest_candle_async(self, session: aiohttp.ClientSession) -> Tuple[pd.DataFrame, MarketSnapshot]:
         """
-        🚀 ASYNC HFT DATA FETCH
-        Fetches data without blocking and returns (df, snapshot).
+        🚀 RUNTIME HFT DATA FETCH
+        Fetches incremental data without blocking and returns (df, snapshot).
         """
         import asyncio
+        
+        if not getattr(self, '_warmup_complete', False):
+            self.logger.warning("⚠️ update_latest_candle_async called before warmup! Forcing bootstrap.")
+            await self.startup_bootstrap(session)
+            
         if self.data_source == "simulated":
-            # Simulation is fast enough locally, but we still make it async-compliant
             df = self._fetch_simulated()
         elif self.data_source == "api":
-            # In a real live environment, we'd use 'session' here to call Dhan API
-            # 🚀 Wrapped in to_thread to prevent blocking the async event loop (Telegram, etc.)
-            df = await asyncio.to_thread(self._fetch_from_api)
+            self.logger.debug("⚡ USING INCREMENTAL PATH")
+            df = await asyncio.to_thread(self._fetch_from_api_incremental)
         else:
             df = self._fetch_simulated()
 
         if df is not None and not df.empty:
             self.ohlcv_data = df
             self.last_fetch_time = datetime.now()
-            
+
+            # ── Market mutation detection ──
+            # Track whether the latest candle's OHLCV values actually changed.
+            # This is the authoritative signal for "market is alive" —
+            # NOT the candle timestamp (which stays fixed within each minute).
+            try:
+                last_row = df.iloc[-1]
+                fingerprint = (
+                    float(last_row.get('open', 0)),
+                    float(last_row.get('high', 0)),
+                    float(last_row.get('low', 0)),
+                    float(last_row.get('close', 0)),
+                    float(last_row.get('volume', 0)),
+                )
+                if fingerprint != self._last_ohlcv_fingerprint:
+                    self._last_ohlcv_fingerprint = fingerprint
+                    self.last_market_activity_ts = datetime.now()
+            except Exception:
+                pass  # Don't let mutation tracking break the hot path
+
         snapshot = await asyncio.to_thread(self.get_snapshot_incremental, df)
         return df, snapshot
 
@@ -209,23 +214,25 @@ class DataManager:
 
         # Check circuit breaker
         if now < self.oi_circuit["open_until"]:
-            cooldown_rem = int(self.oi_circuit["open_until"] - now)
-            self.logger.warning(
-                f"[DATAMANAGER] OI circuit breaker OPEN — skipping fetch. "
-                f"Cooldown remaining: {cooldown_rem}s. Last error: {self.oi_circuit['last_error']}"
-            )
-            return {'data_source': DataSource.SIMULATED}
+            if not self.oi_circuit.get("warning_logged", False):
+                cooldown_rem = int(self.oi_circuit["open_until"] - now)
+                self.logger.warning(
+                    f"[DATAMANAGER] OI circuit breaker OPEN — skipping fetch. "
+                    f"Cooldown remaining: {cooldown_rem}s. Last error: {self.oi_circuit['last_error']}"
+                )
+                self.oi_circuit["warning_logged"] = True
+            
+            # Cache the circuit breaker simulated result to reduce CPU and check interval
+            fallback = {'data_source': DataSource.SIMULATED}
+            self._oi_cache = fallback
+            self._oi_last_fetch = now
+            return fallback
+        else:
+            self.oi_circuit["warning_logged"] = False
 
-        # ── Expiry resolution ──
-        from datetime import date, timedelta, datetime as _dt
-        today = date.today()
-        days_to_thursday = (3 - today.weekday()) % 7
-        if days_to_thursday == 0:
-            # On Thursday: use next week's expiry after 15:30 (options expired)
-            if _dt.now().hour > 15 or (_dt.now().hour == 15 and _dt.now().minute >= 30):
-                days_to_thursday = 7
-        expiry = today + timedelta(days=days_to_thursday)
-        expiry_str = expiry.strftime("%Y-%m-%d")
+        # ── Expiry resolution (Dynamic via Resolver) ──
+        from core.options_resolver import OptionContractBuilder
+        expiry_str = OptionContractBuilder.get_expiry_str()
 
         try:
             dhan = get_dhan_client()
@@ -239,13 +246,13 @@ class DataManager:
             # Construct and log the full raw request payload
             payload_log = {
                 "security_id": security_id_int,
-                "exchange_segment": OPTION_CHAIN_SEGMENT,
+                "exchange_segment": "IDX_I",
                 "expiry": expiry_str,
                 "underlying": "NIFTY",
                 "request_json": {
-                    "under_security_id": security_id_int,
-                    "under_exchange_segment": OPTION_CHAIN_SEGMENT,
-                    "expiry": expiry_str
+                    "UnderlyingScrip": security_id_int,
+                    "UnderlyingSeg": "IDX_I",
+                    "Expiry": expiry_str
                 }
             }
             self.logger.info(f"📤 Sending Option Chain Request: {payload_log}")
@@ -259,7 +266,7 @@ class DataManager:
                 try:
                     response = dhan.option_chain(
                         under_security_id=security_id_int,
-                        under_exchange_segment=OPTION_CHAIN_SEGMENT,
+                        under_exchange_segment="IDX_I",
                         expiry=expiry_str
                     )
                     # Log the full raw response body
@@ -358,7 +365,12 @@ class DataManager:
                     self.logger.debug(
                         f"OI Fetch failed (#{self._oi_fail_count}): {last_error}"
                     )
-                return {'data_source': DataSource.SIMULATED, 'fetch_ms': self._oi_last_fetch_ms}
+                
+                # Cache the failure fallback result to reduce processing and checks
+                fallback = {'data_source': DataSource.SIMULATED, 'fetch_ms': self._oi_last_fetch_ms}
+                self._oi_cache = fallback
+                self._oi_last_fetch = now
+                return fallback
 
             # ── Parse option chain ──
             # Handle both: response['data']['data'] and response['data'] as list
@@ -459,20 +471,20 @@ class DataManager:
                     
                     payload_log = {
                         "security_id": security_id_int,
-                        "exchange_segment": OPTION_CHAIN_SEGMENT,
+                        "exchange_segment": "IDX_I",
                         "expiry": expiry,
                         "underlying": "NIFTY",
                         "request_json": {
-                            "under_security_id": security_id_int,
-                            "under_exchange_segment": OPTION_CHAIN_SEGMENT,
-                            "expiry": expiry
+                            "UnderlyingScrip": security_id_int,
+                            "UnderlyingSeg": "IDX_I",
+                            "Expiry": expiry
                         }
                     }
                     self.logger.info(f"📤 Sending Option Chain Request for Quote: {payload_log}")
                     
                     response = dhan.option_chain(
                         under_security_id=security_id_int,
-                        under_exchange_segment=OPTION_CHAIN_SEGMENT,
+                        under_exchange_segment="IDX_I",
                         expiry=expiry
                     )
                     self.logger.info(f"📥 Received Option Chain Response for Quote: {response}")
@@ -529,7 +541,7 @@ class DataManager:
 
         # 2. SIMULATION MODE (Synthetic Option Pricing)
         # This is CRITICAL for realistic paper trading. We cannot use Spot Nifty.
-        spot = self._sim_price if self.data_source == "simulated" else self.fetch_latest()['close'].iloc[-1]
+        spot = self._sim_price if self.data_source == "simulated" else self.ohlcv_data['close'].iloc[-1]
         
         # Extremely rough Black-Scholes approximation for simulation realism
         diff = spot - strike if opt_type == "CE" else strike - spot
@@ -625,7 +637,7 @@ class DataManager:
         )
 
         return MarketSnapshot(
-            timestamp=datetime.now(),
+            timestamp=latest.name if isinstance(latest.name, datetime) else pd.to_datetime(latest.name),
             price=price, open=latest['open'], high=high, low=low, close=price,
             volume=int(vol),
             vwap=vwap_val,
@@ -691,7 +703,7 @@ class DataManager:
         )
 
         snapshot = MarketSnapshot(
-            timestamp=datetime.now(),
+            timestamp=latest.name if isinstance(latest.name, datetime) else pd.to_datetime(latest.name),
             price=latest['close'],
             open=latest['open'],
             high=latest['high'],
@@ -740,8 +752,8 @@ class DataManager:
 
     def get_dataframe(self) -> pd.DataFrame:
         """Return current dataframe"""
-        if self.ohlcv_data is None:
-            self.fetch_latest()
+        if self.ohlcv_data is None and self.data_source == "simulated":
+            self._fetch_simulated()
         return self.ohlcv_data
 
     def get_polling_telemetry(self) -> dict:
@@ -872,48 +884,23 @@ class DataManager:
     # REAL API DATA (plug in later)
     # ============================================
 
-    def _fetch_from_api(self) -> pd.DataFrame:
+    def _fetch_history_for_bootstrap(self) -> pd.DataFrame:
         """
-        Fetch from real broker API (Dhan).
-        Includes robust cleanup, MTF resampling, and validation.
+        Fetch 5 days of history. Used strictly at boot time.
         """
         import time
-        if time.time() < self._api_circuit_breaker_until:
-            return pd.DataFrame()
-
-        # 🚀 CADENCE OPTIMIZATION: If we already have warmed-up data and are within
-        # the cooldown window, return the local cache immediately to prevent broker spamming.
-        now = time.time()
-        if self.ohlcv_data is not None and not self.ohlcv_data.empty:
-            time_since_last_api = now - self._last_api_fetch_ts
-            if time_since_last_api < self._api_fetch_cooldown:
-                self._api_cache_hit_count += 1
-                self.logger.debug(
-                    f"⚡ Retrieving candles from memory cache (cooldown: {self._api_fetch_cooldown - time_since_last_api:.1f}s remaining)"
-                )
-                return self.ohlcv_data
-
         try:
             dhan = get_dhan_client()
 
-            # 1. Dynamic Security ID Discovery
             if self._api_security_id is None:
                 self._api_security_id = self._discover_nifty_id(dhan)
 
-            # 2. Fetch Intraday 1-minute data
             today_str = datetime.now().strftime("%Y-%m-%d")
-            
-            # 🚀 OPTIMIZATION: Only fetch 5-day warmup if we don't have historical data.
-            # Fetching 5 days every second causes 550ms+ latency and execution risk.
-            if self.ohlcv_data is None or self.ohlcv_data.empty:
-                from_date_str = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-            else:
-                from_date_str = today_str
+            from_date_str = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
 
             t_start = time.perf_counter()
             self.logger.info(
-                f"🕯️ Candle fetch started: security_id={self._api_security_id} | "
-                f"exchange_segment={self._api_exchange_segment} | "
+                f"🕯️ Boot-Time Candle fetch started: security_id={self._api_security_id} | "
                 f"from_date={from_date_str} to_date={today_str}"
             )
 
@@ -926,120 +913,181 @@ class DataManager:
                     to_date=today_str
                 )
             except Exception as e:
-                # Catch connection or timeout errors here
-                self.logger.error(f"❌ Candle fetch Exception (possible timeout/network hang): {e}")
+                self.logger.error(f"❌ Bootstrap Candle fetch Exception: {e}")
                 raise e
 
             fetch_time_ms = (time.perf_counter() - t_start) * 1000
-            self.logger.info(
-                f"🕯️ Candle fetch returned in {fetch_time_ms:.1f}ms | status={response.get('status')}"
-            )
+            self.logger.info(f"🕯️ Bootstrap fetch returned in {fetch_time_ms:.1f}ms | status={response.get('status')}")
 
             if response.get('status') != 'success':
-                self.logger.error(f"Dhan API Error: {response}")
-                self._api_failures += 1
-                self.logger.info(f"API FAILURES COUNT IS NOW: {self._api_failures}")
-                if self._api_failures >= 3:
-                    self.logger.critical("API Circuit Breaker TRIPPED! Suspending API calls for 60s")
-                    self._api_circuit_breaker_until = time.time() + 60
+                self.logger.error(f"Dhan API Error during bootstrap: {response}")
                 return pd.DataFrame()
-
-            # Track successful network fetches
-            self._last_api_fetch_ts = time.time()
-            self._api_fetch_count += 1
-            self._api_total_latency_ms += fetch_time_ms
 
             raw_data = response.get('data', [])
             if not raw_data:
-                self.logger.warning("No data returned from API (empty candle list)")
+                self.logger.warning("No data returned from API for bootstrap.")
                 return pd.DataFrame()
 
-            # 3. Convert to DataFrame & Cleanup
             df = pd.DataFrame(raw_data)
             df.columns = [c.lower() for c in df.columns]
 
-            time_col = None
-            if 'start_time' in df.columns:
-                time_col = 'start_time'
-            elif 'timestamp' in df.columns:
-                time_col = 'timestamp'
-
-            if time_col:
-                if pd.api.types.is_numeric_dtype(df[time_col]):
-                    # Parse as epoch and convert to IST
-                    df['timestamp'] = pd.to_datetime(df[time_col], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
-                else:
-                    df['timestamp'] = pd.to_datetime(df[time_col])
-                df.set_index('timestamp', inplace=True)
+            time_col = 'start_time' if 'start_time' in df.columns else 'timestamp'
+            if pd.api.types.is_numeric_dtype(df[time_col]):
+                df['timestamp'] = pd.to_datetime(df[time_col], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
             else:
-                raise RuntimeError(f"API data missing time column. Columns: {df.columns.tolist()}")
+                df['timestamp'] = pd.to_datetime(df[time_col])
+            df.set_index('timestamp', inplace=True)
 
-            # 🚀 OPTIMIZATION: Merge with historical cache if we only fetched today
-            if self.ohlcv_data is not None and not self.ohlcv_data.empty and from_date_str == today_str:
-                df = pd.concat([self.ohlcv_data, df])
-
-            # Mandatory Professional Cleanup
             df.dropna(inplace=True)
             df.sort_index(inplace=True)
             df = df[~df.index.duplicated(keep="last")]
 
-            # Cache insert count (number of raw and cleaned candles stored)
-            self.logger.info(
-                f"🕯️ Hydrated {len(raw_data)} raw candles from API. Cleaned dataframe size: {len(df)}"
-            )
+            self.logger.info(f"🕯️ Hydrated {len(raw_data)} raw candles from API. Cleaned dataframe size: {len(df)}")
 
-            # 4. Pro-Safeguard: Drop last incomplete candle
             if len(df) > 1:
                 df = df.iloc[:-1]
 
-            # 5. Gap Handling
             self._handle_gap(df)
 
-            # 6. Warmup Check
             if len(df) < self.settings.trade_filter.min_candles_warmup:
-                self.logger.info(
-                    f"API Warmup progress: {len(df)}/{self.settings.trade_filter.min_candles_warmup} candles. "
-                    f"Hydration NOT complete (reason='warmup_insufficient')"
+                self.logger.warning(
+                    f"Bootstrap Warmup progress: {len(df)}/{self.settings.trade_filter.min_candles_warmup} candles. "
+                    f"Hydration NOT complete."
                 )
                 return pd.DataFrame()
 
             self.logger.info(
                 f"🎉 Hydration COMPLETE: {len(df)} candles warmed up. "
-                f"Reason='warmup_complete_passed' | df_1m size={len(df)}"
+                f"Reason='bootstrap_complete_passed' | df_1m size={len(df)}"
             )
 
-            # 7. Resampling (1m -> 5m)
             self.df_1m = df
             self.df_5m = self._resample_data(df, self.settings.trend_timeframe)
+            self.ohlcv_data = df
+            
+            # Capping memory
+            MAX_CANDLES = 2000
+            if len(self.ohlcv_data) > MAX_CANDLES:
+                self.ohlcv_data = self.ohlcv_data.tail(MAX_CANDLES)
 
-            # 8. MTF Sync Check
-            if not self._check_mtf_sync():
-                self.logger.warning("MTF Sync Mismatch — Waiting for candle closure")
-                return pd.DataFrame()
-
-            # 9. Market Open Filter (09:20)
-            if not self._is_market_open_safe():
-                return pd.DataFrame()
-
-            self._api_failures = 0
             return self.df_1m
 
         except Exception as e:
-            self._api_failures += 1
-            import requests
-            if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ReadTimeout)):
-                exit_reason = "timeout"
-            else:
-                exit_reason = "exception"
-            self.logger.critical(
-                f"API CRITICAL FAILURE during candle fetch: {str(e)} | "
-                f"exit_reason={exit_reason} | failures={self._api_failures}"
-            )
-            if self._api_failures >= 3:
-                self.logger.critical("API Circuit Breaker TRIPPED! Suspending API calls for 60s")
-                self._api_circuit_breaker_until = time.time() + 60
-            # Stabilize execution: do not halt system, return empty DF to skip cycle
+            self.logger.critical(f"API CRITICAL FAILURE during bootstrap: {str(e)}")
             return pd.DataFrame()
+
+
+    def _fetch_from_api_incremental(self) -> pd.DataFrame:
+        """
+        🚀 RUNTIME OPTIMIZATION: Incremental streaming update.
+        Only fetches today's candles. Uses precise row updating/appending.
+        """
+        import time
+        if not self._is_market_open_safe():
+            return self.ohlcv_data
+
+        if time.time() < self._api_circuit_breaker_until:
+            return self.ohlcv_data
+
+        now = time.time()
+        time_since_last_api = now - self._last_api_fetch_ts
+        if time_since_last_api < self._api_fetch_cooldown:
+            return self.ohlcv_data
+
+        try:
+            dhan = get_dhan_client()
+
+            if self._api_security_id is None:
+                self._api_security_id = self._discover_nifty_id(dhan)
+
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            t_start = time.perf_counter()
+
+            response = dhan.intraday_minute_data(
+                security_id=self._api_security_id,
+                exchange_segment=self._api_exchange_segment,
+                instrument_type=self._api_instrument_type,
+                from_date=today_str,
+                to_date=today_str
+            )
+
+            fetch_time_ms = (time.perf_counter() - t_start) * 1000
+
+            if response.get('status') != 'success':
+                self._api_failures += 1
+                if self._api_failures >= 3:
+                    self.logger.critical("API Circuit Breaker TRIPPED! Suspending API calls for 60s")
+                    self._api_circuit_breaker_until = time.time() + 60
+                return self.ohlcv_data
+
+            self._api_failures = 0
+            self._last_api_fetch_ts = time.time()
+            self._api_fetch_count += 1
+            self._api_total_latency_ms += fetch_time_ms
+
+            # Freshness Metadata Update
+            self.last_successful_fetch_ts = time.time()
+            self.last_incremental_latency_ms = fetch_time_ms
+
+            raw_data = response.get('data', [])
+            if not raw_data:
+                return self.ohlcv_data
+
+            # Fast transform
+            df_new = pd.DataFrame(raw_data)
+            df_new.columns = [c.lower() for c in df_new.columns]
+
+            time_col = 'start_time' if 'start_time' in df_new.columns else 'timestamp'
+            if pd.api.types.is_numeric_dtype(df_new[time_col]):
+                df_new['timestamp'] = pd.to_datetime(df_new[time_col], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata').dt.tz_localize(None)
+            else:
+                df_new['timestamp'] = pd.to_datetime(df_new[time_col])
+                
+            df_new.set_index('timestamp', inplace=True)
+            df_new.dropna(inplace=True)
+            df_new.sort_index(inplace=True)
+            df_new = df_new[~df_new.index.duplicated(keep="last")]
+
+            if len(df_new) > 1:
+                df_new = df_new.iloc[:-1]
+
+            if df_new.empty:
+                return self.ohlcv_data
+
+            if self.ohlcv_data is None or self.ohlcv_data.empty:
+                self.ohlcv_data = df_new
+            else:
+                latest_api_ts = df_new.index[-1]
+                last_ts = self.ohlcv_data.index[-1]
+
+                if latest_api_ts == last_ts:
+                    # Update last row (candle mutated before close)
+                    self.ohlcv_data.loc[latest_api_ts] = df_new.iloc[-1]
+                elif latest_api_ts > last_ts:
+                    # Append new rows strictly > last_ts
+                    new_rows = df_new[df_new.index > last_ts]
+                    if not new_rows.empty:
+                        self.ohlcv_data = pd.concat([self.ohlcv_data, new_rows])
+                        self.last_new_candle_ts = time.time()
+                else:
+                    # Reject as stale (latency/out-of-order)
+                    self.logger.warning(f"⚠️ Stale candle received! {latest_api_ts} < {last_ts}. Rejecting.")
+
+            # Memory limit
+            MAX_CANDLES = 2000
+            if len(self.ohlcv_data) > MAX_CANDLES:
+                self.ohlcv_data = self.ohlcv_data.tail(MAX_CANDLES)
+
+            self.df_1m = self.ohlcv_data
+            return self.ohlcv_data
+
+        except Exception as e:
+            self._api_failures += 1
+            self.logger.error(f"Incremental fetch exception: {e}")
+            if self._api_failures >= 3:
+                self._api_circuit_breaker_until = time.time() + 60
+            return self.ohlcv_data
 
     def _handle_gap(self, df: pd.DataFrame):
         """Detect and handle opening gaps"""
@@ -1107,9 +1155,8 @@ class DataManager:
         Transition logging is handled inside SessionGuard.can_trade() —
         this method is intentionally silent during steady-state protection.
         """
-        from core.session_guard import SessionGuard
-        can_trade, _reason = SessionGuard.can_trade(self.settings)
-        return can_trade
+        from core.session_guard import orchestrator
+        return orchestrator.is_live()
 
     def _discover_nifty_id(self, dhan) -> str:
         """

@@ -157,22 +157,24 @@ def calculate_support_resistance(
 
     recent = df.tail(lookback)
 
+    high_vals = recent['high'].values
+    low_vals = recent['low'].values
+
     # Find pivot highs and lows
     pivot_highs = []
     pivot_lows = []
+    
+    n = len(recent)
+    for i in range(2, n - 2):
+        val_h = high_vals[i]
+        if (val_h > high_vals[i-1] and val_h > high_vals[i-2] and
+            val_h > high_vals[i+1] and val_h > high_vals[i+2]):
+            pivot_highs.append(val_h)
 
-    for i in range(2, len(recent) - 2):
-        if (recent['high'].iloc[i] > recent['high'].iloc[i-1] and
-            recent['high'].iloc[i] > recent['high'].iloc[i-2] and
-            recent['high'].iloc[i] > recent['high'].iloc[i+1] and
-            recent['high'].iloc[i] > recent['high'].iloc[i+2]):
-            pivot_highs.append(recent['high'].iloc[i])
-
-        if (recent['low'].iloc[i] < recent['low'].iloc[i-1] and
-            recent['low'].iloc[i] < recent['low'].iloc[i-2] and
-            recent['low'].iloc[i] < recent['low'].iloc[i+1] and
-            recent['low'].iloc[i] < recent['low'].iloc[i+2]):
-            pivot_lows.append(recent['low'].iloc[i])
+        val_l = low_vals[i]
+        if (val_l < low_vals[i-1] and val_l < low_vals[i-2] and
+            val_l < low_vals[i+1] and val_l < low_vals[i+2]):
+            pivot_lows.append(val_l)
 
     # Sort and return top levels
     resistances = sorted(pivot_highs, reverse=True)[:num_levels]
@@ -256,53 +258,54 @@ def calculate_supertrend(
     Calculate Supertrend
     Returns: DataFrame with supertrend, direction
     """
-    high = df['high']
-    low = df['low']
-    close = df['close']
+    high = df['high'].values
+    low = df['low'].values
+    close = df['close'].values
 
-    atr = calculate_atr(df, period)
+    atr = calculate_atr(df, period).values
 
     # HL2 + (multiplier * ATR)
     hl2 = (high + low) / 2
     upper_band = hl2 + (multiplier * atr)
     lower_band = hl2 - (multiplier * atr)
 
-    # Final bands adjustment logic
-    final_upper_band = pd.Series(0.0, index=df.index)
-    final_lower_band = pd.Series(0.0, index=df.index)
-    supertrend = pd.Series(0.0, index=df.index)
-    direction = pd.Series(1, index=df.index)  # 1 for bull, -1 for bear
+    n = len(df)
+    final_upper_band = np.zeros(n)
+    final_lower_band = np.zeros(n)
+    supertrend = np.zeros(n)
+    direction = np.ones(n)
 
-    for i in range(1, len(df)):
+    for i in range(1, n):
+        if np.isnan(upper_band[i]):
+            continue
+            
         # Final Upper Band
-        if (upper_band.iloc[i] < final_upper_band.iloc[i-1]) or \
-           (close.iloc[i-1] > final_upper_band.iloc[i-1]):
-            final_upper_band.iloc[i] = upper_band.iloc[i]
+        if (upper_band[i] < final_upper_band[i-1]) or (close[i-1] > final_upper_band[i-1]):
+            final_upper_band[i] = upper_band[i]
         else:
-            final_upper_band.iloc[i] = final_upper_band.iloc[i-1]
+            final_upper_band[i] = final_upper_band[i-1]
 
         # Final Lower Band
-        if (lower_band.iloc[i] > final_lower_band.iloc[i-1]) or \
-           (close.iloc[i-1] < final_lower_band.iloc[i-1]):
-            final_lower_band.iloc[i] = lower_band.iloc[i]
+        if (lower_band[i] > final_lower_band[i-1]) or (close[i-1] < final_lower_band[i-1]):
+            final_lower_band[i] = lower_band[i]
         else:
-            final_lower_band.iloc[i] = final_lower_band.iloc[i-1]
+            final_lower_band[i] = final_lower_band[i-1]
 
         # Supertrend and Direction
-        if supertrend.iloc[i-1] == final_upper_band.iloc[i-1]:
-            if close.iloc[i] > final_upper_band.iloc[i]:
-                direction.iloc[i] = 1
-                supertrend.iloc[i] = final_lower_band.iloc[i]
+        if supertrend[i-1] == final_upper_band[i-1]:
+            if close[i] > final_upper_band[i]:
+                direction[i] = 1
+                supertrend[i] = final_lower_band[i]
             else:
-                direction.iloc[i] = -1
-                supertrend.iloc[i] = final_upper_band.iloc[i]
+                direction[i] = -1
+                supertrend[i] = final_upper_band[i]
         else:
-            if close.iloc[i] < final_lower_band.iloc[i]:
-                direction.iloc[i] = -1
-                supertrend.iloc[i] = final_upper_band.iloc[i]
+            if close[i] < final_lower_band[i]:
+                direction[i] = -1
+                supertrend[i] = final_upper_band[i]
             else:
-                direction.iloc[i] = 1
-                supertrend.iloc[i] = final_lower_band.iloc[i]
+                direction[i] = 1
+                supertrend[i] = final_lower_band[i]
 
     return pd.DataFrame({
         'supertrend': supertrend,
@@ -319,16 +322,21 @@ def find_swing_points(
     """
     highs = []
     lows = []
+    
+    vals = series.values
+    n = len(vals)
 
-    for i in range(order, len(series) - order):
+    for i in range(order, n - order):
+        val = vals[i]
+        window = vals[i - order : i + order + 1]
+        
         # Local peak
-        window = series.iloc[i - order : i + order + 1]
-        if series.iloc[i] == window.max():
-            highs.append((i, series.iloc[i]))
+        if val == np.max(window):
+            highs.append((i, val))
 
         # Local trough
-        if series.iloc[i] == window.min():
-            lows.append((i, series.iloc[i]))
+        if val == np.min(window):
+            lows.append((i, val))
 
     return {
         "highs": highs,

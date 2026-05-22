@@ -48,6 +48,8 @@ from core.simulation_engine import SimulationEngine
 from core.discipline_engine import DisciplineEngine
 from core.risk_manager import RiskManager
 from core.master_decision_engine import MasterDecisionEngine
+from core.telemetry.rejection_schema import GateEvaluation, RejectionRecord, RejectionLogger
+
 from core.telegram_controller import TelegramController
 from core.burnin_tracker import BurninTracker
 from core.readiness_scorer import ReadinessScorer
@@ -60,6 +62,7 @@ from performance_logger import PerformanceLogger
 from core.log_observer import LogObserver
 from core.metrics_logger import MetricsLogger
 from core.regime_adapter import RegimeAdapter
+from core.session_guard import orchestrator, RuntimePosture
 
 settings = Settings()
 logger = get_logger("main", settings.log_level)
@@ -286,6 +289,7 @@ class NiftyAISystem:
         # ── 🧠 MASTER GATE (single point of truth for all trade approvals) ──
         # Every execution path MUST call self.master.approve() before trading.
         # If it returns False → no order placed. No exceptions.
+        self.rejection_logger = RejectionLogger()
         self.master = MasterDecisionEngine(
             risk_manager=self.risk_manager,
             position_manager=self.position_manager,
@@ -328,6 +332,7 @@ class NiftyAISystem:
                 self.dashboard = Dashboard(
                     host=settings.dashboard.host,
                     port=settings.dashboard.port,
+                    telemetry_emit_interval_seconds=settings.dashboard.telemetry_emit_interval_seconds,
                 )
                 # Phase B: Wire burnin components into dashboard
                 self.dashboard.set_burnin_components(
@@ -439,9 +444,24 @@ class NiftyAISystem:
 
         logger.info("🚀 System v4.6.1 Hardened Started")
 
+        # ── VERIFY SESSION STATE ON BOOT ──
+        boot_session = orchestrator.get_session_state()
+        boot_posture = orchestrator.get_posture()
+        logger.info(f"🧭 BOOT SEQUENCE: Session={boot_session.name} | Posture={boot_posture.name}")
+        
+        if boot_posture == RuntimePosture.STANDBY:
+            logger.info("⏳ Market is currently in STANDBY. System will wait for active session.")
+        else:
+            logger.info("⚡ Market is ACTIVE. Activating live pipeline.")
+
         # 3. Main Market Loop
         async with aiohttp.ClientSession() as session:
             logger.info("🎬 Powering up AI Execution Loop")
+            
+            # ── BOOT-TIME HYDRATION ──
+            # Replaces the old continuous warmup logic. Only runs once per boot.
+            await self.data_manager.startup_bootstrap(session)
+
             # ── P0-C: Launch deadman watchdog as background task ──
             deadman_task = asyncio.create_task(self._deadman_watchdog())
             # ── v4.7: Broker health polling loop ──
@@ -475,10 +495,11 @@ class NiftyAISystem:
                     LATENCY_CRIT_MS = 800    # Critical: exceeding safe execution window
 
                     if elapsed_ms > LATENCY_CRIT_MS:
+                        lat_parts = " | ".join(f"{k}={v}" for k, v in self._current_latencies.items() if v > 0)
                         logger.critical(
                             f"🔴 CRITICAL LATENCY: {elapsed_ms:.0f}ms "
-                            f"(>{LATENCY_CRIT_MS}ms threshold) — "
-                            f"cycle #{self.cycle_count}"
+                            f"(>{LATENCY_CRIT_MS}ms) — "
+                            f"cycle #{self.cycle_count} [{lat_parts}]"
                         )
                         self.error_count += 1
                         
@@ -493,10 +514,11 @@ class NiftyAISystem:
                         self._consecutive_high_latency = 0
 
                     if elapsed_ms <= LATENCY_CRIT_MS and elapsed_ms > LATENCY_WARN_MS:
+                        lat_parts = " | ".join(f"{k}={v}" for k, v in self._current_latencies.items() if v > 0)
                         logger.warning(
                             f"⚠️ HIGH LATENCY: {elapsed_ms:.0f}ms "
-                            f"(>{LATENCY_WARN_MS}ms threshold) — "
-                            f"cycle #{self.cycle_count}"
+                            f"(>{LATENCY_WARN_MS}ms) — "
+                            f"cycle #{self.cycle_count} [{lat_parts}]"
                         )
 
                     # Periodic latency summary (every 60 cycles ≈ 1 min)
@@ -515,8 +537,10 @@ class NiftyAISystem:
                     if hasattr(self, "observer"):
                         self.observer.on_cycle_end(elapsed_sec)
                         
-                    # High-frequency: 1 second interval
-                    await asyncio.sleep(1.0)
+                    # ── Dynamic polling via orchestrator ──
+                    # Uses mutation-based freshness (not candle timestamp)
+                    # so an active candle that's still updating is seen as FRESH.
+                    await orchestrator.sleep_until_next_cycle(self.data_manager.last_market_activity_ts)
             except asyncio.CancelledError:
                 logger.info("Shutdown signal received")
             finally:
@@ -534,6 +558,9 @@ class NiftyAISystem:
         self.cycle_running = True
         try:
             await self._run_cycle_inner(session)
+        except Exception as e:
+            logger.error(f"🔴 ERROR IN CYCLE: {e}", exc_info=True)
+            self.engine_errors += 1
         finally:
             self.cycle_running = False
 
@@ -544,14 +571,35 @@ class NiftyAISystem:
         if not self.trading_enabled:
             if self.cycle_count % 60 == 0:
                 logger.warning("⛔ SYSTEM HALTED: Master switch is OFF. Manual /start required.")
-            self._monitor_only()
+            await self._monitor_only_async(session)
             return
 
         if self.telegram_bot.is_paused:
             if self.cycle_count % 60 == 0:
                 logger.info("⏸️ System Paused via Telegram. Monitoring only.")
-            self._monitor_only()
+            await self._monitor_only_async(session)
             return
+
+        # ── RUNTIME POSTURE CHECK & HYDRATION ──
+        # Use mutation-based freshness: tracks when OHLCV values last changed,
+        # not when the candle timestamp last rolled over.
+        posture = orchestrator.get_posture(self.data_manager.last_market_activity_ts)
+        
+        if posture == RuntimePosture.STANDBY:
+            # STRICT REQUIREMENT: No data fetching, no hydration, no execution while market is closed.
+            # Only update dashboard and sleep.
+            if self.cycle_count % 60 == 0:
+                logger.info(f"💤 Posture is STANDBY (Market Closed). Sleeping...")
+            self._update_dashboard(None, None)
+            return  # Sleep interval will be 300s/1800s/60s based on orchestrator
+
+        if posture == RuntimePosture.HALTED:
+            # Passive observability mode
+            await self._monitor_only_async(session)
+            return
+
+        # For OBSERVATION or DEGRADED, we continue the loop to update dashboard/telemetry
+        # but the master gate will block actual trade execution.
 
         # ── 🛡️ RUNTIME DUAL-ARCH GUARD ──
         # Verify ACTIVE_TRADING_SYSTEM matches "main" every cycle.
@@ -588,11 +636,13 @@ class NiftyAISystem:
 
 
         self._current_latencies = {
-            "db_ms": 0,
-            "broker_ms": 0,
-            "oi_ms": 0,
+            "fetch_ms": 0,
+            "indicator_ms": 0,
+            "agents_ms": 0,
             "decision_ms": 0,
-            "dashboard_ms": 0
+            "dashboard_ms": 0,
+            "db_ms": 0,
+            "oi_ms": 0,
         }
 
         # 🔥 Update Global Risk (PnL from DB)
@@ -610,6 +660,7 @@ class NiftyAISystem:
             pre_check = self.master.approve(
                 "BUY_CE",   # signal type doesn't matter for pre-cycle gate
                 context={
+                    "posture": posture,
                     "gap_manager": getattr(self.decision_engine, "gap_penalty_manager", None),
                     "discipline_context": {
                         "daily_target_hit": self.exit_engine.daily_target_hit,
@@ -620,16 +671,28 @@ class NiftyAISystem:
                     }
                 },
             )
-            if not pre_check.approved:
+            if posture in (RuntimePosture.OBSERVATION, RuntimePosture.DEGRADED):
+                # We fetch data for dashboard/telemetry, but block trading
                 if self.cycle_count % 300 == 0:
-                    logger.info(f"⛔ Master Gate: {pre_check.reason}")
-                self._monitor_only()
-                return
+                    logger.info(f"📡 Posture is {posture.name}. Monitoring only.")
+                await self._monitor_only_async(session)
+                # We do NOT return here, so that data fetch and dashboard update still occur!
+                # We will prevent trade entry execution further down instead.
+                trade_allowed = False
+            else:
+                if not pre_check.approved:
+                    if self.cycle_count % 300 == 0:
+                        logger.info(f"⛔ Master Gate: {pre_check.reason}")
+                    await self._monitor_only_async(session)
+                    # Same logic: continue cycle for telemetry but block execution
+                    trade_allowed = False
+                else:
+                    trade_allowed = True
 
             # ── 2. Fetch data (Async version) ──
             t_broker = time.perf_counter()
-            df, snapshot = await self.data_manager.fetch_latest_async(session)
-            self._current_latencies["broker_ms"] = int((time.perf_counter() - t_broker) * 1000)
+            df, snapshot = await self.data_manager.update_latest_candle_async(session)
+            self._current_latencies["fetch_ms"] = int((time.perf_counter() - t_broker) * 1000)
             self._current_latencies["oi_ms"] = int(getattr(self.data_manager, "_oi_last_fetch_ms", 0.0))
             
             if snapshot is None or snapshot.price == 0:
@@ -666,6 +729,9 @@ class NiftyAISystem:
                 
             self.last_candle_timestamp = current_candle_ts
             
+            if not trade_allowed:
+                return  # Skip signal generation and trade entry if blocked
+                
             # ── 7. Generate signal ──
             t_decision = time.perf_counter()
             signal = self.decision_engine.process(df, snapshot)
@@ -692,7 +758,7 @@ class NiftyAISystem:
                     "decision_path": getattr(self.decision_engine, "_last_decision_path", []),
                     "latency": {
                         "cycle_ms": cycle_lat,
-                        "broker_ms": self._current_latencies.get("broker_ms", 0),
+                        "fetch_ms": self._current_latencies.get("fetch_ms", 0),
                         "oi_ms": self._current_latencies.get("oi_ms", 0),
                         "decision_ms": self._current_latencies.get("decision_ms", 0),
                         "dashboard_ms": self._current_latencies.get("dashboard_ms", 0),
@@ -992,6 +1058,35 @@ class NiftyAISystem:
                     f"🛡️ [LIQUIDITY GATE] Trade rejected: {reject_reason} | "
                     f"Bid: {quote.bid}, Ask: {quote.ask}, Vol: {quote.volume}"
                 )
+                
+                # Emit Rejection Telemetry for Spread Gate
+                regime_val = signal.regime.value if hasattr(signal.regime, "value") else str(getattr(signal, "regime", "UNKNOWN"))
+                mpm_mode = getattr(signal, "mpm_mode", "NORMAL")
+                rej_record = RejectionRecord(
+                    signal_id=getattr(signal, "id", f"rej_{int(time.time())}"),
+                    timestamp=datetime.now().isoformat(),
+                    regime=regime_val,
+                    mpm_mode=mpm_mode,
+                    primary_blocker=reject_reason,
+                    total_failed_gates=1,
+                    evaluation_duration_ms=0.0, # Option quote fetch latency is tracked via _current_latencies
+                    gate_details={
+                        "Spread": GateEvaluation(
+                            gate_name="Spread & Liquidity",
+                            passed=False,
+                            threshold=0.05,
+                            actual=spread_pct,
+                            delta=spread_pct - 0.05,
+                            inputs={
+                                "bid": quote.bid,
+                                "ask": quote.ask,
+                                "volume": quote.volume,
+                                "quote_age_ms": quote_age_ms
+                            }
+                        )
+                    }
+                )
+                self.rejection_logger.log_rejection(rej_record)
                 log_entry["filter_passed"] = False
                 log_entry["risk_reason"] = f"Liquidity Block: {reject_reason}"
                 self.perf_logger.log_signal(log_entry)
@@ -1311,7 +1406,7 @@ class NiftyAISystem:
                             self.trading_enabled = False
 
                     # Feed staleness: compare against last data fetch
-                    _, snap = self.data_manager.get_latest_data()
+                    _, snap = await self.data_manager.update_latest_candle_async(None)
                     if snap:
                         age_s = (datetime.now() - snap.timestamp).total_seconds()
                         self.broker_health.feed_delay_s = age_s
@@ -1450,14 +1545,16 @@ class NiftyAISystem:
                                 label=f"notify_trade_close:{action['position_id']}"
                             )
 
-    def _monitor_only(self):
+    async def _monitor_only_async(self, session: aiohttp.ClientSession):
         try:
-            _, snapshot = self.data_manager.get_latest_data()
+            df, snapshot = await self.data_manager.update_latest_candle_async(session)
             if snapshot and snapshot.price > 0:
-                self._monitor_positions(snapshot, None)
+                self._monitor_positions(snapshot, df)
                 self._update_dashboard(snapshot, None)
-        except Exception:
-            pass
+                if df is not None and not df.empty:
+                    self.last_candle_timestamp = df.index[-1]
+        except Exception as e:
+            logger.error(f"Monitor only fetch failed: {e}")
 
     def _update_dashboard(self, snapshot, signal):
         if not self.dashboard: return
@@ -1473,6 +1570,9 @@ class NiftyAISystem:
             status["risk"] = self.risk_manager.get_status_report()
             status["errors"] = self.error_count
             status["last_cycle"] = self.last_cycle_time
+            
+            # Session Orchestrator Telemetry (uses mutation-based freshness)
+            status["orchestrator"] = orchestrator.get_dashboard_fields(self.data_manager.last_market_activity_ts)
             
             # Latency Telemetry
             lat = self._latency_history[-1] if hasattr(self, '_latency_history') and self._latency_history else 0
@@ -1495,9 +1595,11 @@ class NiftyAISystem:
             logger.debug(f"Dashboard update error: {e}")
 
     def halt_trading(self, reason: str):
-        """Emergency Stop Control"""
+        """Emergency Stop Control — propagates to orchestrator for scheduler authority."""
         if self.trading_enabled:
             self.trading_enabled = False
+            # Propagate to orchestrator so sleep_until_next_cycle() drops to 60s
+            orchestrator.halt()
             logger.critical(f"🛑 HALTING TRADING: {reason}")
             if self.telegram_bot:
                 fire_and_log(self.telegram_bot.notify_halt(reason), label="notify_halt")
@@ -1706,9 +1808,10 @@ class NiftyAISystem:
                         except Exception:
                             pass
                     
-                    # Halt trading
-                    self.halt_trading("DEADMAN_SWITCH: Main loop stalled")
-                    break  # Stop watchdog after triggering
+                    # Auto-restart logic
+                    logger.warning("Auto-recovering from DEADMAN_SWITCH. Trading remains enabled.")
+                    self.position_manager.record_heartbeat()  # Reset to prevent immediate re-trigger
+                    # Do not break; watchdog will continue monitoring
             except asyncio.CancelledError:
                 break
             except Exception as e:

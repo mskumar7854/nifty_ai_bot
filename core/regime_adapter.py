@@ -20,8 +20,8 @@ class RegimeAdapter:
 
         regime = signal.regime
 
-        if regime == MarketRegime.CHOPPY or regime == MarketRegime.RANGING:
-            # CHOPPY: Suppress BREAKOUT trades
+        if regime == MarketRegime.RANGING:
+            # RANGING: Suppress BREAKOUT trades
             # Since we don't have a specific "BREAKOUT" trade type in SignalType, we rely on the agent name
             # or reasons to detect breakout trades. But we can also check if the system regime is choppy,
             # we should suppress signals that are meant for breakouts.

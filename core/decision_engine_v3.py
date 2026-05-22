@@ -241,16 +241,19 @@ class DecisionEngineV3:
         )
 
         # ── P1-B: Agent Count Assertion ──
-        # The doc says "23 agents" in the header but the registry has 23 classes.
-        # active_agents from settings should match what we expect.
-        # Update EXPECTED_ACTIVE_AGENT_COUNT when agents are added/removed.
-        EXPECTED_ACTIVE_AGENT_COUNT = 18  # Single source of truth — from settings.pipeline.active_agents
+        # Dynamically derive the expected count from settings.pipeline.active_agents
+        # so we don't need a hardcoded magic number that breaks when agents are
+        # added/removed during Phase 1 edge validation or future expansions.
+        EXPECTED_ACTIVE_AGENT_COUNT = len(getattr(settings.pipeline, "active_agents", []))
         registered = len(self.agents)
         if registered != EXPECTED_ACTIVE_AGENT_COUNT:
+            missing = set(getattr(settings.pipeline, "active_agents", [])) - set(self.agents.keys())
+            extra = set(self.agents.keys()) - set(getattr(settings.pipeline, "active_agents", []))
             raise AssertionError(
                 f"🚨 AGENT COUNT MISMATCH: {registered} loaded, "
-                f"{EXPECTED_ACTIVE_AGENT_COUNT} expected. "
-                f"Check agents/ directory and pipeline.active_agents in settings.py. "
+                f"{EXPECTED_ACTIVE_AGENT_COUNT} expected from settings.pipeline.active_agents. "
+                f"Missing: {sorted(missing) if missing else 'none'} | "
+                f"Extra: {sorted(extra) if extra else 'none'} | "
                 f"Active: {sorted(self.agents.keys())}"
             )
 

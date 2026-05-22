@@ -18,6 +18,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 from models.signals import Signal, SignalType, Direction
 from config.settings import Settings
+from core.session_guard import orchestrator
 
 logger = logging.getLogger("telegram_controller")
 
@@ -356,6 +357,7 @@ class TelegramController:
                 # Clear halt states
                 state_mgr.force_activate("Operator force reconcile cleared all halts")
                 self.system.trading_enabled = True
+                orchestrator.resume()
                 
                 # Clear position manager halt state if it exists
                 pos_mgr = getattr(self.system, "position_manager", None)
@@ -446,6 +448,7 @@ class TelegramController:
         # 5. Halt the system gracefully
         self.system.running = False
         self.system.trading_enabled = False
+        orchestrator.halt()
         
         # Give async tasks 2s to clean up, then hard exit
         await asyncio.sleep(2)
@@ -466,6 +469,7 @@ class TelegramController:
         # If system was halted, we re-enable it here
         if not self.system.trading_enabled:
             self.system.trading_enabled = True
+            orchestrator.resume()
             logger.info("🟢 System RE-ENABLED via Telegram /start")
 
         msg = (
@@ -480,6 +484,7 @@ class TelegramController:
         """Emergency Stop Control (Remote Kill Switch)."""
         if not self._is_authorized(update): return
         self.system.trading_enabled = False
+        orchestrator.halt()
         logger.critical("🛑 SYSTEM HALTED via Telegram /stop")
         await update.message.reply_text("🛑 <b>EMERGENCY STOP:</b> Trading has been HALTED. AI Agent is now in monitor-only mode. Use /start to re-enable.", parse_mode='HTML')
 
@@ -515,6 +520,7 @@ class TelegramController:
         
         if hasattr(self, "system") and self.system:
             self.system.trading_enabled = True
+            orchestrator.resume()
             pos_mgr = getattr(self.system, "position_manager", None)
             if pos_mgr:
                 pos_mgr.is_halted = False

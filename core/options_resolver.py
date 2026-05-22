@@ -71,15 +71,40 @@ class OptionStrikeSelector:
 class OptionContractBuilder:
     """Builds the Dhan-compatible symbol and resolves security IDs."""
 
-    @staticmethod
-    def get_expiry_str() -> str:
-        """Calculates the upcoming Thursday expiry. Format: YYYY-MM-DD"""
+    _cached_expiry = None
+    _cached_expiry_date = None
+
+    @classmethod
+    def get_expiry_str(cls) -> str:
+        """Fetches the exact active expiry from Dhan API to prevent 811 errors."""
+        from datetime import date
         today = date.today()
+        if cls._cached_expiry and cls._cached_expiry_date == today:
+            return cls._cached_expiry
+            
+        try:
+            from dhan_client import get_dhan_client
+            dhan = get_dhan_client()
+            resp = dhan.expiry_list(13, "IDX_I") # 13 = NIFTY 50
+            if resp.get("status") == "success" and resp.get("data"):
+                raw_data = resp["data"]
+                expiry_list = raw_data.get("data", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
+                if expiry_list:
+                    cls._cached_expiry = expiry_list[0]
+                    cls._cached_expiry_date = today
+                    return cls._cached_expiry
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Expiry resolution fallback triggered due to: {e}")
+            pass
+            
+        # Fallback math if API fails
         days_to_thursday = (3 - today.weekday()) % 7
         if days_to_thursday == 0:
             from datetime import datetime as _dt
             if _dt.now().hour >= 16:
                 days_to_thursday = 7
+        from datetime import timedelta
         expiry = today + timedelta(days=days_to_thursday)
         return expiry.strftime("%Y-%m-%d")
 
