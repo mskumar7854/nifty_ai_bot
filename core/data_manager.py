@@ -24,6 +24,89 @@ from core.regime_classifier import RegimeClassifier
 from core.regime_state_manager import RegimeStateManager
 from config.config import OPTION_CHAIN_SEGMENT, CANDLE_SEGMENT
 
+# ── Bounded executor for Dhan API calls ──
+# All dhan.option_chain() / dhan.get_order_book() calls run here.
+# max_workers=2: one for OI analytics, one for quote fetch.
+# This prevents threadpool exhaustion even if Dhan hangs repeatedly.
+import concurrent.futures as _cf
+_DHAN_FETCH_TIMEOUT: float = 10.0          # Hard cap: never wait more than 10s for Dhan REST
+_OI_EXECUTOR = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="dhan_oi")
+
+
+def normalize_option_chain(chain, spot: float = 0.0, atm_radius: float = 500.0) -> list:
+    """
+    🔧 CANONICAL OPTION CHAIN NORMALIZER
+
+    Converts either API response format into a uniform list of row dicts:
+        [
+            {"strike": 23800.0, "ce": {...}, "pe": {...}},
+            ...
+        ]
+
+    Handles two formats returned by the Dhan option_chain() endpoint:
+
+    Format A — dict keyed by strike string (current Dhan API):
+        {
+            "23800.000000": {"ce": {"oi": ..., "last_price": ...}, "pe": {...}},
+            ...
+        }
+
+    Format B — list of row dicts (legacy / possible future format):
+        [
+            {"strikePrice": 23800, "callOption": {...}, "putOption": {...}},
+            ...
+        ]
+
+    Args:
+        chain:       Raw chain data from response['data']['data'] (dict or list).
+        spot:        Current spot price. Used for ATM-relative filtering.
+                     Pass 0.0 to disable filtering.
+        atm_radius:  Only include strikes within spot ± atm_radius.
+                     Default 500 covers ATM±500 for intraday NIFTY.
+                     Pass float('inf') to include all strikes.
+
+    Returns:
+        List of normalized row dicts, sorted ascending by strike.
+        Empty list if chain is neither dict nor list.
+    """
+    normalized = []
+
+    if isinstance(chain, dict):
+        # Format A: keys are strike price strings
+        for strike_key, value in chain.items():
+            try:
+                strike = float(strike_key)
+            except (TypeError, ValueError):
+                continue  # Skip malformed keys
+            if not isinstance(value, dict):
+                continue  # Skip unexpected values
+            normalized.append({
+                "strike": strike,
+                "ce": value.get("ce", {}),
+                "pe": value.get("pe", {}),
+            })
+
+    elif isinstance(chain, list):
+        # Format B: list of row dicts with strikePrice/callOption/putOption
+        for row in chain:
+            if not isinstance(row, dict):
+                continue  # Skip if somehow a string slipped in
+            strike = float(row.get("strikePrice", row.get("strike_price", 0)) or 0)
+            normalized.append({
+                "strike": strike,
+                "ce": row.get("callOption", row.get("ce", {})),
+                "pe": row.get("putOption", row.get("pe", {})),
+            })
+
+    # ATM-relative filtering (skip if spot not provided)
+    if spot > 0 and atm_radius < float('inf'):
+        lo = spot - atm_radius
+        hi = spot + atm_radius
+        normalized = [r for r in normalized if lo <= r["strike"] <= hi]
+
+    normalized.sort(key=lambda r: r["strike"])
+    return normalized
+
 
 class DataManager:
     """
@@ -55,12 +138,32 @@ class DataManager:
         self._logged_fo_auth_warning = False
         self._api_failures = 0
         self._api_circuit_breaker_until = 0.0
-        self.oi_circuit = {
+
+        # --- System State (Operational Persistence) ---
+        import core.system_state as system_state
+        op_state = system_state.load_operational_state()
+        
+        self.oi_circuit = op_state.get("oi_circuit", {
             "open_until": 0.0,
             "reason": None,
             "failure_count": 0,
-            "last_error": None
-        }
+            "last_error": None,
+            "warning_logged": False,
+        })
+        self.quote_circuit = op_state.get("quote_circuit", {
+            "open_until": 0.0,
+            "reason": None,
+            "failure_count": 0,
+            "last_error": None,
+        })
+        # ── SPLIT CIRCUIT BREAKER ──
+        # quote_circuit guards fetch_option_quote (per-trade execution path).
+        # oi_circuit guards _get_oi_data (60s analytics path).
+        # A rate-limit on one path never silences the other.
+
+        # Consecutive timeout counter — after 3 hung requests, trip the circuit.
+        self._oi_timeout_count: int = 0
+        self._quote_timeout_count: int = 0
 
         # ── API Polling Telemetry & Cadence Cooldown (Phase 2 Optimization) ──
         self._last_api_fetch_ts = 0.0
@@ -87,6 +190,16 @@ class DataManager:
         self._oi_cache: dict = {}
         self._oi_last_fetch: float = 0.0
         self._oi_fetch_interval: float = 60.0  # seconds
+        # ── Last-good OI snapshot (stale-cache for degraded resilience) ──
+        # Survives API spikes. Serves stale-but-real data instead of pure simulation.
+        self._last_good_oi_snapshot: dict = {}
+        self._last_good_oi_ts: float = 0.0
+
+        # ── OI Updater State ──
+        self._oi_updater_running = False
+        self._oi_updater_task = None
+        self._oi_updater_last_tick = 0.0
+
 
         # ── OI Health Tracking ──
         self._oi_fail_count: int = 0      # total failures this session
@@ -118,6 +231,43 @@ class DataManager:
 
     # Removed legacy get_latest_data, get_snapshot, and fetch_latest
 
+
+    def _save_circuit_state(self):
+        try:
+            import core.system_state as system_state
+            data = system_state.load_state()
+            data["oi_circuit"] = self.oi_circuit
+            data["quote_circuit"] = self.quote_circuit
+            system_state.save_operational_state(data)
+        except Exception as e:
+            self.logger.error(f"Failed to persist circuit state: {e}")
+
+    async def start_oi_updater(self):
+        """Starts the background OI updater task."""
+        if self.data_source != "api":
+            return
+        if not self._oi_updater_running:
+            self.logger.info("🚀 Starting background OI Updater loop...")
+            self._oi_updater_running = True
+            import time
+            self._oi_updater_last_tick = time.time()
+            import asyncio
+            self._oi_updater_task = asyncio.create_task(self._oi_updater_loop())
+
+    async def stop_oi_updater(self):
+        """Stops the background OI updater task."""
+        if self._oi_updater_running:
+            self.logger.info("🛑 Stopping background OI Updater loop...")
+            self._oi_updater_running = False
+            if self._oi_updater_task:
+                self._oi_updater_task.cancel()
+                import asyncio
+                try:
+                    await self._oi_updater_task
+                except asyncio.CancelledError:
+                    pass
+                self._oi_updater_task = None
+            self.logger.info("🛑 OI Updater stopped.")
     async def startup_bootstrap(self, session: aiohttp.ClientSession = None) -> None:
         """BOOT-TIME ONLY: Fetch historical data, initialize dataframe, and validate warmup."""
         import asyncio
@@ -185,264 +335,228 @@ class DataManager:
         snapshot = await asyncio.to_thread(self.get_snapshot_incremental, df)
         return df, snapshot
 
+
     def _get_oi_data(self) -> dict:
         """
-        🟢 REAL OI DATA FETCHER
-        Pulls option chain from Dhan API and extracts:
-          - total_ce_oi, total_pe_oi, pcr, max_pain, india_vix
-          - max_ce_oi_strike, max_pe_oi_strike
-
-        - Runs on a 60s cache to avoid API rate limits.
-        - Retries up to 3 times on transient failure (with 1s/2s/4s backoff).
-        - Logs every 5th failure at WARNING (not just the first).
-        - Falls back to simulated data only after all retries exhausted.
-        - Sets DataSource.REAL flag when successful.
-        - Tracks OI health metrics: _oi_fail_count, _oi_success_count, _oi_last_fetch_ms.
-
-        Segment: NSE_FNO (required for option chain — IDX_I is index spot only).
-        security_id: cast to int before API call (Dhan API is type-strict).
+        🟢 REAL OI DATA FETCHER (Snapshot Accessor)
+        O(1) read from the background cache.
+        Appends dynamic freshness metadata so the strategy engine can apply penalties.
         """
         import time as _time
         now = _time.time()
-
-        # Return cache if fresh
-        if self._oi_cache and (now - self._oi_last_fetch) < self._oi_fetch_interval:
-            return self._oi_cache
-
-        if self.data_source != "api":
-            return {'data_source': DataSource.SIMULATED}  # Caller will use simulated fallback
-
-        # Check circuit breaker
-        if now < self.oi_circuit["open_until"]:
-            if not self.oi_circuit.get("warning_logged", False):
-                cooldown_rem = int(self.oi_circuit["open_until"] - now)
-                self.logger.warning(
-                    f"[DATAMANAGER] OI circuit breaker OPEN — skipping fetch. "
-                    f"Cooldown remaining: {cooldown_rem}s. Last error: {self.oi_circuit['last_error']}"
-                )
-                self.oi_circuit["warning_logged"] = True
+        
+        # Determine source
+        source_data = self._oi_cache if self._oi_cache else self._last_good_oi_snapshot
+        
+        if not source_data or self.data_source != "api":
+            return {'data_source': DataSource.SIMULATED}
             
-            # Cache the circuit breaker simulated result to reduce CPU and check interval
-            fallback = {'data_source': DataSource.SIMULATED}
-            self._oi_cache = fallback
-            self._oi_last_fetch = now
-            return fallback
+        age_sec = round(now - self._oi_last_fetch, 1)
+        
+        if age_sec <= 60:
+            quality = "LIVE"
+        elif age_sec <= 180:
+            quality = "SLIGHTLY_STALE"
+        elif age_sec <= 300:
+            quality = "STALE"
+        elif age_sec <= 900:
+            quality = "DEGRADED"
         else:
-            self.oi_circuit["warning_logged"] = False
+            quality = "INVALID"
+            # Hard cutoff: do not propagate >900s stale data
+            self.logger.error(f"🚨 OI data completely INVALID (age={age_sec}s). Purging snapshot.")
+            self._oi_cache = {}
+            self._last_good_oi_snapshot = {}
+            return {'data_source': DataSource.SIMULATED}
+            
+        # Append metadata
+        result = dict(source_data)  # shallow copy
+        result["age_sec"] = age_sec
+        result["quality"] = quality
+        return result
 
-        # ── Expiry resolution (Dynamic via Resolver) ──
+    async def _oi_updater_loop(self):
+        """
+        Background task that updates OI every 60s independently of the cycle.
+        """
+        import asyncio, random, time as _time
         from core.options_resolver import OptionContractBuilder
-        expiry_str = OptionContractBuilder.get_expiry_str()
-
-        try:
-            dhan = get_dhan_client()
-
-            if self._api_security_id is None:
-                self._api_security_id = self._discover_nifty_id(dhan)
-
-            # ── FIX: security_id must be int for Dhan API ──
-            security_id_int = int(self._api_security_id)
-
-            # Construct and log the full raw request payload
-            payload_log = {
-                "security_id": security_id_int,
-                "exchange_segment": "IDX_I",
-                "expiry": expiry_str,
-                "underlying": "NIFTY",
-                "request_json": {
-                    "UnderlyingScrip": security_id_int,
-                    "UnderlyingSeg": "IDX_I",
-                    "Expiry": expiry_str
-                }
-            }
-            self.logger.info(f"📤 Sending Option Chain Request: {payload_log}")
-
-            # ── Retry loop: 3 attempts with exponential backoff ──
-            response = None
-            last_error = None
-            t_fetch_start = _time.perf_counter()
-
-            for attempt in range(3):
-                try:
-                    response = dhan.option_chain(
-                        under_security_id=security_id_int,
-                        under_exchange_segment="IDX_I",
-                        expiry=expiry_str
-                    )
-                    # Log the full raw response body
-                    self.logger.info(f"📥 Received Option Chain Response: {response}")
-
-                    if response.get('status') == 'success':
-                        break  # Success — exit retry loop
-                    
-                    last_error = response.get('remarks', 'unknown')
-                    
-                    # Inspect the response for non-retryable errors
-                    inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
-                    error_str = str(last_error) + " " + str(inner_data) + " " + str(response)
-                    
-                    is_non_retryable = False
-                    error_code = None
-                    for err in ["805", "808", "permission_denied", "invalid_client"]:
-                        if err in error_str:
-                            error_code = err
-                            is_non_retryable = True
-                            break
-                            
-                    if is_non_retryable:
-                        self.oi_circuit.update({
-                            "open_until": _time.time() + 900,
-                            "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT" if error_code == "805" else "PERMISSION_DENIED",
-                            "failure_count": self.oi_circuit["failure_count"] + 1,
-                            "last_error": error_code
-                        })
-                        self.logger.warning(
-                            f"🚨 DataManager: Non-retryable error {error_code} detected! "
-                            f"Tripping circuit breaker for 15 minutes."
-                        )
-                        break  # Halt retries immediately
-                    
-                    if attempt < 2:
-                        _time.sleep(2 ** attempt)  # 1s, 2s backoff
-                except Exception as retry_exc:
-                    last_error = str(retry_exc)
-                    # Also check exception message for non-retryable errors
-                    is_non_retryable = False
-                    error_code = None
-                    for err in ["805", "808", "permission_denied", "invalid_client"]:
-                        if err in last_error:
-                            error_code = err
-                            is_non_retryable = True
-                            break
-                            
-                    if is_non_retryable:
-                        self.oi_circuit.update({
-                            "open_until": _time.time() + 900,
-                            "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT" if error_code == "805" else "PERMISSION_DENIED",
-                            "failure_count": self.oi_circuit["failure_count"] + 1,
-                            "last_error": error_code
-                        })
-                        self.logger.warning(
-                            f"🚨 DataManager: Non-retryable exception {error_code} detected! "
-                            f"Tripping circuit breaker for 15 minutes."
-                        )
-                        break  # Immediately halt further retries
-                        
-                    if attempt < 2:
-                        _time.sleep(2 ** attempt)
-
-            self._oi_last_fetch_ms = ((_time.perf_counter() - t_fetch_start) * 1000)
-
-            if response is None or response.get('status') != 'success':
-                # Parse and inspect the response for F&O authorization error (nested code 808 or auth fails)
-                is_fo_auth_failure = False
-                if response is not None:
-                    inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
-                    if "808" in inner_data or any("Authentication Failed" in str(v) for v in inner_data.values()):
-                        is_fo_auth_failure = True
+        
+        # Initial wait to let bootstrap finish
+        await asyncio.sleep(2)
+        
+        while self._oi_updater_running:
+            self._oi_updater_last_tick = _time.time()
+            try:
+                now = _time.time()
                 
-                if is_fo_auth_failure:
-                    if not self._logged_fo_auth_warning:
+                # Check circuit breaker
+                if now < self.oi_circuit["open_until"]:
+                    if not self.oi_circuit.get("warning_logged", False):
+                        cooldown_rem = int(self.oi_circuit["open_until"] - now)
                         self.logger.warning(
-                            "🚨 Dhan account F&O segment API access is not active. "
-                            "Falling back to simulated/estimated option chain metrics for session continuation."
+                            f"[OI UPDATER] Circuit breaker OPEN — skipping fetch. "
+                            f"Cooldown remaining: {cooldown_rem}s. Last error: {self.oi_circuit['last_error']}"
                         )
-                        self._logged_fo_auth_warning = True
-
-                # ── Per-count failure logging (not just first-occurrence) ──
-                self._oi_fail_count += 1
-                if self._oi_fail_count % 5 == 1:  # log 1st, 6th, 11th...
-                    self.logger.warning(
-                        f"⚠️ OI Fetch FAILED (#{self._oi_fail_count}) | "
-                        f"security_id={security_id_int} | "
-                        f"segment={OPTION_CHAIN_SEGMENT} | "
-                        f"expiry={expiry_str} | "
-                        f"status={response.get('status') if response else 'no_response'} | "
-                        f"remarks={response.get('remarks') if response else last_error} | "
-                        f"fetch_ms={self._oi_last_fetch_ms:.0f}"
-                    )
+                        self.oi_circuit["warning_logged"] = True
+                    # Sleep 5s and check breaker again
+                    await asyncio.sleep(5)
+                    continue
                 else:
-                    self.logger.debug(
-                        f"OI Fetch failed (#{self._oi_fail_count}): {last_error}"
-                    )
-                
-                # Cache the failure fallback result to reduce processing and checks
-                fallback = {'data_source': DataSource.SIMULATED, 'fetch_ms': self._oi_last_fetch_ms}
-                self._oi_cache = fallback
-                self._oi_last_fetch = now
-                return fallback
+                    self.oi_circuit["warning_logged"] = False
 
-            # ── Parse option chain ──
-            # Handle both: response['data']['data'] and response['data'] as list
-            raw_data = response.get('data', {})
-            if isinstance(raw_data, dict):
-                chain = raw_data.get('data', [])
-            elif isinstance(raw_data, list):
-                chain = raw_data
-            else:
-                chain = []
+                expiry_str = OptionContractBuilder.get_expiry_str()
+                dhan = get_dhan_client()
 
-            if not chain:
-                self._oi_fail_count += 1
-                self.logger.warning(
-                    f"⚠️ OI Fetch: API success but chain is EMPTY (#{self._oi_fail_count}) | "
-                    f"expiry={expiry_str} | data_type={type(raw_data).__name__} | "
-                    f"data_keys={list(raw_data.keys()) if isinstance(raw_data, dict) else 'N/A'}"
-                )
-                return {'data_source': DataSource.SIMULATED, 'fetch_ms': self._oi_last_fetch_ms}
+                if self._api_security_id is None:
+                    self._api_security_id = self._discover_nifty_id(dhan)
 
-            total_ce_oi, total_pe_oi = 0.0, 0.0
-            max_ce_oi, max_pe_oi = 0.0, 0.0
-            max_ce_strike, max_pe_strike = 0, 0
-            max_pain_strike = 0
+                security_id_int = int(self._api_security_id)
+                self.logger.debug(f"📤 OI Updater | security_id={security_id_int} | expiry={expiry_str}")
 
-            for row in chain:
-                ce = row.get('callOption', row.get('ce', {}))
-                pe = row.get('putOption', row.get('pe', {}))
-                strike = row.get('strikePrice', row.get('strike_price', 0))
+                # ── Retry loop: 3 attempts with exponential backoff ──
+                response = None
+                last_error = None
+                t_fetch_start = _time.perf_counter()
 
-                ce_oi = float(ce.get('openInterest', ce.get('oi', 0)))
-                pe_oi = float(pe.get('openInterest', pe.get('oi', 0)))
+                for attempt in range(3):
+                    try:
+                        future = _OI_EXECUTOR.submit(
+                            dhan.option_chain,
+                            under_security_id=security_id_int,
+                            under_exchange_segment="IDX_I",
+                            expiry=expiry_str
+                        )
+                        # We use asyncio.to_thread here to not block the updater loop on future.result()
+                        response = await asyncio.to_thread(future.result, _DHAN_FETCH_TIMEOUT)
+                        self._oi_timeout_count = 0  # Reset on success
+                        
+                        if response.get('status') == 'success':
+                            break
+                        
+                        last_error = response.get('remarks', 'unknown')
+                        inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
+                        error_str = str(last_error) + " " + str(inner_data) + " " + str(response)
 
-                total_ce_oi += ce_oi
-                total_pe_oi += pe_oi
+                        is_non_retryable = False
+                        error_code = None
+                        for err in ["805", "808", "permission_denied", "invalid_client"]:
+                            if err in error_str:
+                                error_code = err
+                                is_non_retryable = True
+                                break
 
-                if ce_oi > max_ce_oi:
-                    max_ce_oi = ce_oi
-                    max_ce_strike = strike
-                if pe_oi > max_pe_oi:
-                    max_pe_oi = pe_oi
-                    max_pe_strike = strike
+                        if is_non_retryable:
+                            self.oi_circuit.update({
+                                "open_until": _time.time() + 900,
+                                "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT" if error_code == "805" else "PERMISSION_DENIED",
+                                "failure_count": self.oi_circuit["failure_count"] + 1,
+                                "last_error": error_code
+                            })
+                            self.logger.warning(f"🚨 OI Updater: Non-retryable error {error_code}! Tripping circuit.")
+                            self._save_circuit_state()
+                            break
+                            
+                        if attempt < 2:
+                            await asyncio.sleep(1 << attempt)
 
-            pcr = round(total_pe_oi / max(total_ce_oi, 1), 3)
+                    except _cf.TimeoutError:
+                        future.cancel()
+                        self._oi_timeout_count += 1
+                        last_error = f"TimeoutError (>{_DHAN_FETCH_TIMEOUT:.0f}s)"
+                        self.logger.error(
+                            f"⏱️ OI Updater TIMEOUT after {_DHAN_FETCH_TIMEOUT:.0f}s | "
+                            f"attempt={attempt+1} | consecutive={self._oi_timeout_count} | Worker abandoned."
+                        )
+                        if self._oi_timeout_count >= 3:
+                            self.oi_circuit.update({
+                                "open_until": _time.time() + 300,
+                                "reason": "TIMEOUT_STORM",
+                                "failure_count": self.oi_circuit["failure_count"] + 1,
+                                "last_error": "TIMEOUT"
+                            })
+                            self.logger.warning(f"🚨 OI circuit tripped: 3 timeouts.")
+                            self._save_circuit_state()
+                            self._oi_timeout_count = 0
+                            break
+                        if attempt < 2:
+                            await asyncio.sleep(1 << attempt)
+                            
+                    except Exception as retry_exc:
+                        last_error = str(retry_exc)
+                        if attempt < 2:
+                            await asyncio.sleep(1 << attempt)
 
-            result = {
-                'total_ce_oi': total_ce_oi,
-                'total_pe_oi': total_pe_oi,
-                'pcr': pcr,
-                'max_pain': max_pain_strike or max_pe_strike,
-                'max_ce_oi_strike': max_ce_strike,
-                'max_pe_oi_strike': max_pe_strike,
-                'india_vix': self._sim_vix,  # VIX from separate Dhan call if needed
-                'data_source': DataSource.REAL,
-                'fetch_ms': self._oi_last_fetch_ms,
-            }
+                self._oi_last_fetch_ms = ((_time.perf_counter() - t_fetch_start) * 1000)
 
-            self._oi_cache = result
-            self._oi_last_fetch = now
-            self._oi_success_count += 1
-            self._oi_last_success_ts = now
-            self.logger.info(
-                f"🟢 REAL OI Fetched: CE={total_ce_oi/1e6:.1f}M | "
-                f"PE={total_pe_oi/1e6:.1f}M | PCR={pcr} | "
-                f"fetch_ms={self._oi_last_fetch_ms:.0f}"
-            )
-            return result
+                if response is None or response.get('status') != 'success':
+                    self._oi_fail_count += 1
+                    self.logger.warning(f"⚠️ OI Updater fail: {last_error}")
+                else:
+                    self._oi_success_count += 1
+                    self._oi_last_success_ts = _time.time()
+                    self._oi_last_fetch = _time.time()
+                    
+                    try:
+                        chain_data = response['data']['data']['oc']
+                        spot_price = response['data']['data']['last_price']
+                        
+                        chain_list = normalize_option_chain(chain_data, spot=spot_price, atm_radius=500.0)
+                        
+                        total_ce_oi = 0
+                        total_pe_oi = 0
+                        max_ce_oi = 0
+                        max_pe_oi = 0
+                        max_ce_strike = 0
+                        max_pe_strike = 0
 
-        except Exception as e:
-            self._oi_fail_count += 1
-            self.logger.warning(f"⚠️ OI Fetch exception (#{self._oi_fail_count}, using simulated): {e}")
-            return {'data_source': DataSource.SIMULATED, 'fetch_ms': getattr(self, '_oi_last_fetch_ms', 0)}
+                        for row in chain_list:
+                            ce = row['ce']
+                            pe = row['pe']
+                            strike = row['strike']
+
+                            ce_oi = float(ce.get('openInterest', ce.get('oi', 0)))
+                            pe_oi = float(pe.get('openInterest', pe.get('oi', 0)))
+
+                            total_ce_oi += ce_oi
+                            total_pe_oi += pe_oi
+
+                            if ce_oi > max_ce_oi:
+                                max_ce_oi = ce_oi
+                                max_ce_strike = strike
+                            if pe_oi > max_pe_oi:
+                                max_pe_oi = pe_oi
+                                max_pe_strike = strike
+
+                        pcr = round(total_pe_oi / max(total_ce_oi, 1), 3)
+
+                        result = {
+                            'total_ce_oi': total_ce_oi,
+                            'total_pe_oi': total_pe_oi,
+                            'max_ce_oi': max_ce_oi,
+                            'max_pe_oi': max_pe_oi,
+                            'max_ce_strike': max_ce_strike,
+                            'max_pe_strike': max_pe_strike,
+                            'pcr': pcr,
+                            'data_source': DataSource.REAL
+                        }
+                        
+                        self._oi_cache = result
+                        self._last_good_oi_snapshot = result
+                        self._last_good_oi_ts = _time.time()
+                        
+                    except Exception as e:
+                        self.logger.error(f"⚠️ OI Updater parsing exception: {e}")
+
+                # Jittered sleep: 60s +/- 3s
+                jitter_sleep = 60 + random.uniform(-3, 3)
+                await asyncio.sleep(jitter_sleep)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.exception(f"💥 Uncaught exception in _oi_updater_loop: {e}")
+                await asyncio.sleep(5)  # Prevent tight loop crash
 
     def fetch_option_quote(self, strike: int, opt_type: str, expiry: str) -> "OptionQuote":
         """
@@ -457,42 +571,68 @@ class DataManager:
         # 1. LIVE API MODE
         if self.data_source == "api":
             now = _time.time()
-            if now < self.oi_circuit["open_until"]:
-                self.logger.warning("OI circuit breaker OPEN — skipping live quote fetch and falling back to synthetic quote")
+            if now < self.quote_circuit["open_until"]:
+                cooldown_q = int(self.quote_circuit["open_until"] - now)
+                self.logger.warning(
+                    f"OI quote_circuit OPEN — skipping live quote fetch | "
+                    f"cooldown={cooldown_q}s | last_err={self.quote_circuit['last_error']}"
+                )
             else:
                 try:
                     dhan = get_dhan_client()
-                    
+
                     # Fetch option chain once to find the specific contract
                     if self._api_security_id is None:
                         self._api_security_id = self._discover_nifty_id(dhan)
-                        
+
                     security_id_int = int(self._api_security_id)
-                    
-                    payload_log = {
-                        "security_id": security_id_int,
-                        "exchange_segment": "IDX_I",
-                        "expiry": expiry,
-                        "underlying": "NIFTY",
-                        "request_json": {
-                            "UnderlyingScrip": security_id_int,
-                            "UnderlyingSeg": "IDX_I",
-                            "Expiry": expiry
-                        }
-                    }
-                    self.logger.info(f"📤 Sending Option Chain Request for Quote: {payload_log}")
-                    
-                    response = dhan.option_chain(
+
+                    self.logger.debug(
+                        f"📤 OC quote request | security_id={security_id_int} | "
+                        f"expiry={expiry} | strike={strike} {opt_type}"
+                    )
+
+                    # 🔒 SAFETY: Run in bounded executor with hard timeout.
+                    # Uses quote_circuit (separate from oi_circuit) so a rate-limit
+                    # here never silences the 60s OI analytics fetch.
+                    future = _OI_EXECUTOR.submit(
+                        dhan.option_chain,
                         under_security_id=security_id_int,
                         under_exchange_segment="IDX_I",
                         expiry=expiry
                     )
-                    self.logger.info(f"📥 Received Option Chain Response for Quote: {response}")
-                    
+                    try:
+                        response = future.result(timeout=_DHAN_FETCH_TIMEOUT)
+                        self._quote_timeout_count = 0  # Reset on success
+                    except _cf.TimeoutError:
+                        future.cancel()
+                        self._quote_timeout_count += 1
+                        self.logger.error(
+                            f"⏱️ Quote fetch TIMEOUT after {_DHAN_FETCH_TIMEOUT:.0f}s | "
+                            f"consecutive={self._quote_timeout_count} | Worker abandoned."
+                        )
+                        if self._quote_timeout_count >= 3:
+                            self.quote_circuit.update({
+                                "open_until": _time.time() + 300,
+                                "reason": "TIMEOUT_STORM",
+                                "failure_count": self.quote_circuit["failure_count"] + 1,
+                                "last_error": "TIMEOUT"
+                            })
+                            self._quote_timeout_count = 0
+                            self.logger.warning(
+                                "🚨 quote_circuit tripped: 3 consecutive timeouts. 5-min cooldown."
+                            )
+                            self._save_circuit_state()
+                        raise  # Fall through to except block below
+
+                    self.logger.debug(
+                        f"📥 OC quote response | status={response.get('status')}"
+                    )
+
                     # Inspect the response for non-retryable errors
                     inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
                     error_str = str(response.get('remarks', '')) + " " + str(inner_data) + " " + str(response)
-                    
+
                     is_non_retryable = False
                     error_code = None
                     for err in ["805", "808", "permission_denied", "invalid_client"]:
@@ -500,32 +640,41 @@ class DataManager:
                             error_code = err
                             is_non_retryable = True
                             break
-                            
+
                     if is_non_retryable:
-                        self.oi_circuit.update({
+                        # ── Use quote_circuit (NOT oi_circuit) ──
+                        self.quote_circuit.update({
                             "open_until": _time.time() + 900,
                             "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT",
-                            "failure_count": self.oi_circuit["failure_count"] + 1,
+                            "failure_count": self.quote_circuit["failure_count"] + 1,
                             "last_error": error_code
                         })
                         self.logger.warning(
-                            f"🚨 DataManager: Non-retryable error {error_code} detected during option quote fetch! "
-                            f"Tripping circuit breaker for 15 minutes."
+                            f"🚨 DataManager: Non-retryable quote error {error_code}! "
+                            f"Tripping quote_circuit for 15 minutes."
                         )
                     
                     if response.get('status') == 'success':
-                        # Handle both: response['data']['data'] and response['data'] as list
                         raw_data = response.get('data', {})
-                        if isinstance(raw_data, dict):
-                            chain = raw_data.get('data', [])
+                        data_block = raw_data.get('data', {}) if isinstance(raw_data, dict) else {}
+
+                        # Primary path: response['data']['data']['oc']
+                        if isinstance(data_block, dict) and 'oc' in data_block:
+                            chain_raw = data_block['oc']
+                        elif isinstance(data_block, (dict, list)):
+                            chain_raw = data_block
                         elif isinstance(raw_data, list):
-                            chain = raw_data
+                            chain_raw = raw_data
                         else:
-                            chain = []
-                            
+                            chain_raw = {}
+
+                        # Normalize — no ATM filter; we need exact requested strike
+                        chain = normalize_option_chain(chain_raw, spot=0.0)
+
+                        target_strike = float(strike)
                         for row in chain:
-                            if row.get('strikePrice', row.get('strike_price', 0)) == strike:
-                                opt_data = row.get('callOption', row.get('ce', {})) if opt_type == 'CE' else row.get('putOption', row.get('pe', {}))
+                            if row['strike'] == target_strike:
+                                opt_data = row['ce'] if opt_type == 'CE' else row['pe']
                                 return OptionQuote(
                                     security_id=opt_data.get('securityId', opt_data.get('security_id', '')),
                                     symbol=opt_data.get('tradingSymbol', opt_data.get('trading_symbol', f"NIFTY {strike} {opt_type}")),
@@ -764,23 +913,32 @@ class DataManager:
         if self._api_fetch_count > 0:
             avg_latency = self._api_total_latency_ms / self._api_fetch_count
             
-        now = time.time()
-        oi_circuit_status = "CLOSED"
-        cooldown_remaining = 0
-        if now < self.oi_circuit["open_until"]:
-            oi_circuit_status = "OPEN"
-            cooldown_remaining = int(self.oi_circuit["open_until"] - now)
-            
+        now_cb = time.time()
+        oi_circuit_status = "OPEN" if now_cb < self.oi_circuit["open_until"] else "CLOSED"
+        quote_circuit_status = "OPEN" if now_cb < self.quote_circuit["open_until"] else "CLOSED"
+        oi_cooldown = max(0, int(self.oi_circuit["open_until"] - now_cb))
+        quote_cooldown = max(0, int(self.quote_circuit["open_until"] - now_cb))
+
         return {
             "last_api_fetch_ts": self._last_api_fetch_ts,
             "cache_hit_count": self._api_cache_hit_count,
             "api_fetch_count": self._api_fetch_count,
             "avg_fetch_latency": avg_latency,
             "oi_circuit": oi_circuit_status,
-            "cooldown_remaining_seconds": cooldown_remaining,
-            "cooldown_remaining_formatted": f"{cooldown_remaining // 60}m {cooldown_remaining % 60}s" if cooldown_remaining > 0 else "0s",
+            "quote_circuit": quote_circuit_status,
+            "oi_cooldown_seconds": oi_cooldown,
+            "quote_cooldown_seconds": quote_cooldown,
+            "cooldown_remaining_seconds": oi_cooldown,
+            "cooldown_remaining_formatted": f"{oi_cooldown // 60}m {oi_cooldown % 60}s" if oi_cooldown > 0 else "0s",
             "last_oi_error": self.oi_circuit["last_error"],
-            "last_oi_success": datetime.fromtimestamp(self._oi_last_success_ts).strftime("%Y-%m-%d %H:%M:%S") if self._oi_last_success_ts > 0 else None
+            "last_quote_error": self.quote_circuit["last_error"],
+            "last_oi_success": datetime.fromtimestamp(self._oi_last_success_ts).strftime("%Y-%m-%d %H:%M:%S") if self._oi_last_success_ts > 0 else None,
+            "executor_active_threads": len(_OI_EXECUTOR._threads),
+
+            "executor_pending_tasks": _OI_EXECUTOR._work_queue.qsize(),
+            "oi_updater_alive": self._oi_updater_running and (time.time() - self._oi_updater_last_tick < 120),
+            "oi_updater_age_sec": int(time.time() - self._oi_updater_last_tick) if self._oi_updater_last_tick > 0 else -1,
+
         }
 
     # ============================================

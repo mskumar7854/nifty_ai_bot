@@ -22,8 +22,8 @@ Hierarchy:
 Session States
 --------------
   CLOSED          — nights, weekends          — poll 1800s
-  PRE_MARKET      — 08:00–09:00              — poll  60s
-  OPENING_SESSION — 09:00–09:20              — poll  15s
+  PRE_MARKET      — 08:00–09:15              — poll  60s
+  OPEN_STORM — 09:15–09:28              — poll  15s
   LIVE_MARKET     — 09:20–14:00              — poll   1s
   LUNCH_DRIFT     — 14:00–14:15 (signals ON, -10% conf) — poll 5s
   POWER_HOUR      — 14:15–15:30             — poll   1s
@@ -60,7 +60,7 @@ class MarketSessionState(Enum):
     CLOSED          = auto()   # Weekday nights
     WEEKEND_CLOSED  = auto()   # Saturday/Sunday or detected holidays
     PRE_MARKET      = auto()
-    OPENING_SESSION = auto()
+    OPEN_STORM = auto()
     LIVE_MARKET     = auto()
     LUNCH_DRIFT     = auto()
     POWER_HOUR      = auto()
@@ -86,7 +86,7 @@ _POLL_INTERVALS = {
     MarketSessionState.CLOSED:           300,   # 5 min — weekday nights
     MarketSessionState.WEEKEND_CLOSED:  1800,   # 30 min — weekends/holidays
     MarketSessionState.PRE_MARKET:        60,   # 1 min
-    MarketSessionState.OPENING_SESSION:   15,   # 15 s
+    MarketSessionState.OPEN_STORM:   15,   # 15 s
     MarketSessionState.LIVE_MARKET:        1,   # 1 s
     MarketSessionState.LUNCH_DRIFT:        5,   # 5 s
     MarketSessionState.POWER_HOUR:         1,   # 1 s
@@ -98,7 +98,7 @@ _SESSION_LABELS = {
     MarketSessionState.CLOSED:          "🔴 MARKET CLOSED — Standby",
     MarketSessionState.WEEKEND_CLOSED:  "🔴 MARKET CLOSED — Weekend/Holiday",
     MarketSessionState.PRE_MARKET:      "🟡 PRE-MARKET — Preparation",
-    MarketSessionState.OPENING_SESSION: "🟠 OPENING SESSION — High Volatility Protection",
+    MarketSessionState.OPEN_STORM: "🟠 OPENING SESSION — High Volatility Protection",
     MarketSessionState.LIVE_MARKET:     "🟢 LIVE MARKET — Active",
     MarketSessionState.LUNCH_DRIFT:     "🟡 LUNCH DRIFT — Reduced Activity",
     MarketSessionState.POWER_HOUR:      "🟢 POWER HOUR — Active",
@@ -215,7 +215,7 @@ class ExchangeSessionOrchestrator:
 
         # Holiday auto-fallback: if we're in a live session but candle
         # data is extremely stale (>1 hr), treat as holiday / closed.
-        if state in (MarketSessionState.OPENING_SESSION,
+        if state in (MarketSessionState.OPEN_STORM,
                      MarketSessionState.LIVE_MARKET,
                      MarketSessionState.LUNCH_DRIFT,
                      MarketSessionState.POWER_HOUR):
@@ -241,7 +241,7 @@ class ExchangeSessionOrchestrator:
                        MarketSessionState.PRE_MARKET,
                        MarketSessionState.POST_MARKET):
             posture = RuntimePosture.STANDBY
-        elif state == MarketSessionState.OPENING_SESSION:
+        elif state == MarketSessionState.OPEN_STORM:
             posture = RuntimePosture.OBSERVATION
         elif state in (MarketSessionState.LIVE_MARKET,
                        MarketSessionState.LUNCH_DRIFT,
@@ -425,10 +425,10 @@ class ExchangeSessionOrchestrator:
         # Weekday session windows (all IST)
         if t < dtime(8, 0):
             return MarketSessionState.CLOSED
-        elif t < dtime(9, 0):
+        elif t < dtime(9, 15):
             return MarketSessionState.PRE_MARKET
-        elif t < dtime(9, 20):
-            return MarketSessionState.OPENING_SESSION
+        elif t < dtime(9, 28):
+            return MarketSessionState.OPEN_STORM
         elif t < dtime(14, 0):
             return MarketSessionState.LIVE_MARKET
         elif t < dtime(14, 15):

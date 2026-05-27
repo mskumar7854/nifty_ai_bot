@@ -38,6 +38,7 @@ from core.decision_engine_v3 import DecisionEngineV3
 from core.alert_manager import AlertManager
 from core.trade_logger import TradeLogger
 from core.position_manager import PositionManager
+from core.reconciliation import ReconciliationEngine
 from core.slippage_model import SlippageModel
 from core.metrics_engine import MetricsEngine
 from core.trade_filter import TradeFilter
@@ -273,7 +274,11 @@ class NiftyAISystem:
         logger.info(f"✅ DB_IDENTITY_VERIFIED — OMS + DBManager → {_oms_path}")
 
         # ── Production ──
+
         self.position_manager = PositionManager(settings)
+        # ── P0: Reconciliation Engine ──
+        self.reconciliator = ReconciliationEngine(self.position_manager, self.position_manager.oms)
+
         # ── Share tuner: engine generates thresholds, PM feeds outcomes ──
         self.position_manager.tuner = self.decision_engine.tuner
         self.risk_manager = RiskManager(settings, self.decision_engine.memory.db)
@@ -434,13 +439,10 @@ class NiftyAISystem:
                 f"{readiness['recommendation']}"
             )
 
-        # ── Warm OI Cache on startup (Priority 1) ──
+        # ── Start Background Tasks ──
         if getattr(self.data_manager, "data_source", None) == "api":
-            logger.info("Warming up OI options data cache on boot...")
-            try:
-                self.data_manager._get_oi_data()
-            except Exception as e:
-                logger.warning(f"OI cache warming failed on boot (will retry in loop): {e}")
+            logger.info("Starting background OI Updater loop...")
+            await self.data_manager.start_oi_updater()
 
         logger.info("🚀 System v4.6.1 Hardened Started")
 
@@ -491,8 +493,12 @@ class NiftyAISystem:
                     if len(self._latency_history) > 100:
                         self._latency_history = self._latency_history[-100:]
 
-                    LATENCY_WARN_MS = 500    # Warning: approaching safe execution window
-                    LATENCY_CRIT_MS = 800    # Critical: exceeding safe execution window
+                    # ── Latency thresholds (Phase 1 calibration) ──
+                    # REST-based Dhan API: full OC payload alone can take 1–3s.
+                    # 800ms was websocket-grade and caused false-positive halts.
+                    # TODO: tighten back to 800ms once OI fetch is moved async.
+                    LATENCY_WARN_MS = 1500   # Warning: REST latency is elevated
+                    LATENCY_CRIT_MS = 3000   # Critical: REST cycle significantly degraded
 
                     if elapsed_ms > LATENCY_CRIT_MS:
                         lat_parts = " | ".join(f"{k}={v}" for k, v in self._current_latencies.items() if v > 0)
@@ -546,6 +552,7 @@ class NiftyAISystem:
             finally:
                 deadman_task.cancel()
                 broker_health_task.cancel()
+                await self.data_manager.stop_oi_updater()
                 await app.updater.stop()
                 await app.stop()
                 await app.shutdown()
@@ -567,7 +574,16 @@ class NiftyAISystem:
     async def _run_cycle_inner(self, session: aiohttp.ClientSession):
         self.cycle_count += 1
 
+
+        # ── Execution Fidelity Audit ──
+        if self.cycle_count % 60 == 0:
+            if orchestrator.is_live():
+                # Run broker reconciliation every ~60 cycles (~1 minute)
+                import asyncio
+                asyncio.create_task(asyncio.to_thread(self.reconciliator.audit_broker_state))
+                
         # ── 0. Risk & Master Kill Switch ──
+
         if not self.trading_enabled:
             if self.cycle_count % 60 == 0:
                 logger.warning("⛔ SYSTEM HALTED: Master switch is OFF. Manual /start required.")
@@ -1029,11 +1045,27 @@ class NiftyAISystem:
             )
             
             # Fetch live premium (Ask for buy)
-            quote = self.data_manager.fetch_option_quote(
-                instrument["strike"], 
-                instrument["type"], 
-                instrument["expiry"]
-            )
+            # 🔒 Run in thread — fetch_option_quote calls dhan.option_chain() (sync/blocking).
+            # wait_for(12s) > inner future.result(10s) to give it room to fail gracefully.
+            try:
+                quote = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.data_manager.fetch_option_quote,
+                        instrument["strike"],
+                        instrument["type"],
+                        instrument["expiry"]
+                    ),
+                    timeout=12.0
+                )
+            except asyncio.TimeoutError:
+                logger.error("[OPTIONS] fetch_option_quote timed out (>12s) — using synthetic quote")
+                quote = None
+            if quote is None:
+                # Synthesise a minimal quote so downstream code doesn't crash
+                from models.signals import OptionQuote
+                quote = OptionQuote(security_id="", symbol=f"NIFTY {instrument['strike']} {instrument['type']}",
+                                    ltp=snapshot.price * 0.01, bid=0.0, ask=snapshot.price * 0.01,
+                                    volume=0, oi=0)
             
             # ── P0.1: Option Liquidity & Spread Protection Layer ──
             spread_pct = quote.spread_pct / 100.0  # property returns 0-100 scale
@@ -1577,7 +1609,7 @@ class NiftyAISystem:
             # Latency Telemetry
             lat = self._latency_history[-1] if hasattr(self, '_latency_history') and self._latency_history else 0
             status["latency_ms"] = round(lat, 0)
-            status["latency_status"] = "CRITICAL" if lat > 800 else "WARNING" if lat > 500 else "NORMAL"
+            status["latency_status"] = "CRITICAL" if lat > 3000 else "WARNING" if lat > 1500 else "NORMAL"
             
             # OI Health Telemetry
             if hasattr(self, 'observer') and hasattr(self.observer, 'get_oi_health'):
@@ -1963,6 +1995,13 @@ def main():
     try:
         asyncio.run(system.start())
     finally:
+        try:
+            import core.system_state as system_state
+            data = system_state.load_operational_state()
+            data["last_clean_shutdown"] = True
+            system_state.save_operational_state(data)
+        except Exception:
+            pass
         release_lock()
 
 

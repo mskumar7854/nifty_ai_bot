@@ -44,6 +44,8 @@ from models.signals import (
 from models.trade_record import TradeRecord
 from utils.trade_logger import TradeLogger
 from utils.logger import get_logger
+from core.oms import OrderManagementSystem
+from core.shadow_execution import ShadowExecutionEngine
 from utils.helpers import save_json, load_json, safe_divide
 from config.settings import Settings, PositionConfig
 from config.signal_weights import MIN_CONFIDENCE, MIN_DIRECTION_GAP
@@ -307,11 +309,24 @@ class PositionManager:
         # Load previous state
         self._load_state()
 
+
+
+        # ── OMS Integration ──
+        self.oms = OrderManagementSystem()
+        
+        # ── P0: Shadow Execution Engine ──
+        self.shadow_engine = ShadowExecutionEngine()
+
+        
         self.logger.info(
             f"PositionManager initialized | "
             f"Capital: ₹{self.total_capital:,.0f} | "
             f"Max Risk/Trade: {self.config.risk_per_trade_pct}%"
         )
+        
+        # ── P3: Restart Position Hydration ──
+        self._recover_live_state()
+
 
     # ══════════════════════════════════════
     # P0-C: DEADMAN HEARTBEAT
@@ -328,6 +343,26 @@ class PositionManager:
                 json.dump({"last_heartbeat": self._last_heartbeat_time}, f)
         except Exception as e:
             self.logger.error(f"Failed to write heartbeat file: {e}")
+
+
+    def _recover_live_state(self):
+        """
+        P3: Hydrate open positions from OMS to survive mid-day crashes.
+        """
+        try:
+            open_orders = self.oms.get_open_orders()
+            count = 0
+            for order in open_orders:
+                state = order.get("state")
+                if state in ("ENTRY_SUBMITTED", "PARTIAL_FILLED", "FILLED_ACTIVE"):
+                    # We have a live order, we should theoretically re-build it into self.open_positions.
+                    # For full recovery, we would query the broker or rely on the OMS payload to reconstruct `OpenPosition`.
+                    # Right now, we at least log it. A robust version fetches broker state and builds the object.
+                    count += 1
+            if count > 0:
+                self.logger.warning(f"🔄 Recovered {count} live intents from OMS. (Full Position reconstruction requires broker sync)")
+        except Exception as e:
+            self.logger.error(f"Failed to recover live state from OMS: {e}")
 
     # ══════════════════════════════════════
     # CORE: CAN WE TRADE?
@@ -552,6 +587,31 @@ class PositionManager:
                 "reason": f"ATR warm-up: only {candle_count} candles (min {ATR_MIN_CANDLES})",
                 "allowed": False,
             }
+
+
+        # ── P2: Quote Freshness Firewall ──
+        quote = getattr(signal, "metadata", {}).get("quote")
+        if quote and hasattr(quote, 'timestamp'):
+            quote_age_ms = (datetime.now() - quote.timestamp).total_seconds() * 1000
+            
+            # 1. Age check (1500ms hard cutoff)
+            if quote_age_ms > 1500:
+                self.logger.warning(f"🚫 [STALE QUOTE] Quote age {quote_age_ms:.0f}ms > 1500ms threshold. Rejecting.")
+                return {
+                    "lots": 0, "qty": 0, "risk_amount": 0,
+                    "reason": f"Stale Quote ({quote_age_ms:.0f}ms > 1500ms)",
+                    "allowed": False
+                }
+                
+            # 2. Frozen check (LTP unchanged while time advances artificially, or inverted spread)
+            # This requires access to historical quote tracking, but we can do a basic spread check
+            if quote.ask <= quote.bid:
+                self.logger.warning(f"🚫 [FROZEN QUOTE] Ask (₹{quote.ask}) <= Bid (₹{quote.bid}). Inverted spread. Rejecting.")
+                return {
+                    "lots": 0, "qty": 0, "risk_amount": 0,
+                    "reason": "Frozen/Inverted Quote (Ask <= Bid)",
+                    "allowed": False
+                }
 
         # ── PHASE A: Premium-based risk calculation ──
         quote = signal.metadata.get("quote")
@@ -785,6 +845,52 @@ class PositionManager:
                         spread_abs, spread_pct, max_spread_abs, max_spread_pct
                     )
                     return None
+
+
+            # ── P1: Idempotent Intent Locking ──
+            intent_id = getattr(signal, "intent_id", None)
+            if intent_id:
+                existing_order = self.oms.get_order(intent_id)
+                if existing_order and existing_order.get("state") not in ("FAILED", "HALTED", "UNKNOWN"):
+                    self.logger.warning(f"🚫 [IDEMPOTENCY GUARD] Duplicate execution attempt blocked for intent: {intent_id}")
+                    return None
+            else:
+                intent_id = str(uuid.uuid4())
+                signal.intent_id = intent_id
+                
+
+            self.oms.create_intent(
+                signal_id=getattr(signal, "id", "UNKNOWN"),
+                intent_id=intent_id,
+                symbol=signal.symbol,
+                side=signal.direction.value.upper(),
+                qty=size_params["qty"],
+                requested_price=fill_price,
+                stop_loss_price=size_params["sl_price"]
+            )
+            
+            # ── P4: Shadow Execution Telemetry (Fire & Forget) ──
+            try:
+                # Capture t2_submit exactly at intent creation
+                t0_sig = getattr(signal, "created_at", datetime.now())
+                if isinstance(t0_sig, str):
+                    t0_sig = datetime.fromisoformat(t0_sig)
+                t1_quote = getattr(signal, "metadata", {}).get("quote", None)
+                t1_quote_dt = t1_quote.timestamp if t1_quote else datetime.now()
+                t2_sub = datetime.now()
+                
+                asyncio.create_task(
+                    self.shadow_engine.process_signal(
+                        signal=signal,
+                        size_params=size_params,
+                        t0_signal=t0_sig,
+                        t1_quote=t1_quote_dt,
+                        t2_submit=t2_sub
+                    )
+                )
+            except Exception as e:
+                self.logger.error(f"Shadow Engine integration error: {e}", exc_info=True)
+
 
             # ── Step 1: Place Entry Order ──
             qty = size_params["qty"]

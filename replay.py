@@ -28,6 +28,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -389,6 +390,159 @@ def cmd_regression(args) -> None:
     print(f"{'═'*70}\n")
 
 
+
+
+def _export_json(prefix: str, analysis_type: str, data: list, sample_size: int):
+    import json
+    import time
+    from datetime import datetime
+    
+    os.makedirs("replay_results", exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%SZ")
+    filename = f"replay_results/{prefix}_{timestamp}.json"
+    
+    envelope = {
+        "generated_at": datetime.now().isoformat(),
+        "strategy_version": CURRENT_STRATEGY_VERSION,
+        "replay_version": "v1.1",
+        "db_source": "trading_v4_sim.db",
+        "sample_size": sample_size,
+        "analysis_type": analysis_type,
+        "results": data
+    }
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(envelope, f, indent=2)
+        
+    print(f"\n{GREEN}💾 Exported results to {filename}{RESET}\n")
+
+def cmd_gate_analysis(args) -> None:
+    """Phase 4A: Analyze Rejection Counterfactuals"""
+    from core.replay_simulator import ReplaySimulator
+    from core.replay_analytics import ReplayAnalytics
+    
+    conn = _get_conn(args.db)
+    rows = conn.execute(
+        "SELECT * FROM decision_snapshots WHERE final_decision = 'REJECTED' ORDER BY timestamp DESC LIMIT ?", (args.last_n,)
+    ).fetchall()
+    conn.close()
+    
+    if not rows:
+        print(f"{YELLOW}No REJECTED snapshots found.{RESET}")
+        return
+        
+    print(f"\n{BOLD}Initializing execution simulator for {len(rows)} snapshots...{RESET}")
+    sim = ReplaySimulator(db_path=args.db)
+    
+    results = []
+    for r in rows:
+        res = sim.simulate_rejection(r)
+        if res:
+            results.append(res)
+            
+    print(f"\n{'═'*80}")
+    print(f"{BOLD}{CYAN}🛡️  GATE ANALYSIS: Protection vs Suppression (Last {args.last_n} REJECTED){RESET}")
+    print(f"{'═'*80}")
+    
+    analysis = ReplayAnalytics.calculate_gate_impact(results)
+    
+    print(f"{BOLD}{'Gate/Reason':<30} | {'Suppressed R':>12} | {'Prevented Loss':>15} | {'Net R':>8} | {'Win %':>7}{RESET}")
+    print("-" * 80)
+    for row in analysis:
+        net = row['net_r']
+        net_color = GREEN if net > 0 else RED if net < 0 else YELLOW
+        print(f"{row['gate']:<30} | {row['suppressed_r']:>12.2f} | {row['prevented_loss_r']:>15.2f} | {net_color}{net:>8.2f}{RESET} | {row['empirical_win_rate']:>6.1f}%")
+        
+    print(f"{'═'*80}\n")
+
+    if getattr(args, "export", False):
+        _export_json("gate_analysis", "gate_impact", analysis, len(results))
+
+
+def cmd_longitudinal(args) -> None:
+    """Phase 4B: Longitudinal Replay Analytics"""
+    from core.replay_simulator import ReplaySimulator
+    from core.replay_analytics import ReplayAnalytics
+    
+    conn = _get_conn(args.db)
+    rows = conn.execute(
+        "SELECT * FROM decision_snapshots WHERE final_decision = 'REJECTED' ORDER BY timestamp DESC LIMIT ?", (args.last_n,)
+    ).fetchall()
+    conn.close()
+    
+    if not rows:
+        print(f"{YELLOW}No snapshots found.{RESET}")
+        return
+        
+    sim = ReplaySimulator(db_path=args.db)
+    results = []
+    for r in rows:
+        res = sim.simulate_rejection(r)
+        if res:
+            results.append(res)
+            
+    print(f"\\n{{'═'*100}}")
+    print(f"{BOLD}{CYAN}📈 LONGITUDINAL EXPECTANCY (Sliced by: {args.slice.upper()}){RESET}")
+    print(f"{'═'*100}")
+    
+    analysis = ReplayAnalytics.analyze_longitudinal(results, slice_by=args.slice)
+    
+    if len(results) < 10:
+        print(f"{YELLOW}⚠️ WARNING: Only {len(results)} samples evaluated. Results are statistically weak and should not be used for tuning.{RESET}\n")
+    
+    print(f"{BOLD}{args.slice.capitalize():<20} | {'Count':>6} | {'Win %':>6} | {'5m AvgR':>8} | {'15m AvgR':>8} | {'30m AvgR':>8} | {'Net R':>8}{RESET}")
+    print("-" * 100)
+    for row in analysis:
+        net = row['net_r']
+        net_color = GREEN if net > 0 else RED if net < 0 else YELLOW
+        print(f"{row['slice_value']:<20} | {row['count']:>6} | {row['win_rate']:>5.1f}% | {row['avg_r_5m']:>8.2f} | {row['avg_r_15m']:>8.2f} | {row['avg_r_30m']:>8.2f} | {net_color}{net:>8.2f}{RESET}")
+        
+    print(f"{'═'*100}\n")
+    
+    if getattr(args, "export", False):
+        _export_json(f"longitudinal_{args.slice}", f"longitudinal_{args.slice}", analysis, len(results))
+
+def cmd_calibrate(args) -> None:
+    """Phase 4A: Analyze Confidence Calibration"""
+    from core.replay_simulator import ReplaySimulator
+    from core.replay_analytics import ReplayAnalytics
+    
+    conn = _get_conn(args.db)
+    # Calibrate needs all trades (exec and rejected) but right now simulator only evaluates rejected.
+    # To evaluate EXECUTE, we can use the same simulator! (Need to slightly tweak simulator if we want it to run on EXECUTE)
+    # But for now, we'll just evaluate REJECTED counterfactuals to see if high-confidence rejections win.
+    rows = conn.execute(
+        "SELECT * FROM decision_snapshots WHERE final_decision = 'REJECTED' ORDER BY timestamp DESC LIMIT ?", (args.last_n,)
+    ).fetchall()
+    conn.close()
+    
+    if not rows:
+        print(f"{YELLOW}No snapshots found.{RESET}")
+        return
+        
+    sim = ReplaySimulator(db_path=args.db)
+    results = []
+    for r in rows:
+        res = sim.simulate_rejection(r)
+        if res:
+            results.append(res)
+            
+    print(f"\n{'═'*60}")
+    print(f"{BOLD}{CYAN}📊 CONFIDENCE CALIBRATION (Counterfactuals){RESET}")
+    print(f"{'═'*60}")
+    
+    analysis = ReplayAnalytics.calibrate_confidence_bands(results)
+    
+    print(f"{BOLD}{'Confidence Band':<16} | {'Count':>6} | {'Win Rate':>9} | {'Expected R':>10}{RESET}")
+    print("-" * 60)
+    for row in analysis:
+        print(f"{row['band']:<16} | {row['count']:>6} | {row['win_rate']:>8.1f}% | {row['avg_r']:>10.2f}")
+        
+    print(f"{'═'*60}\n")
+
+    if getattr(args, "export", False):
+        _export_json("calibration", "confidence_bands", analysis, len(results))
 def cmd_simulate(args) -> None:
     """
     Sandbox Mode: re-score a stored snapshot using CURRENT engine logic.
@@ -515,6 +669,20 @@ def main():
     p_sim = sub.add_parser("simulate", help="Sandbox: re-run current engine against stored snapshot")
     p_sim.add_argument("--snapshot-id", required=True)
 
+
+
+    p_gate = sub.add_parser("gate-analysis", help="Analyze Missed vs Prevented Expectancy per Gate")
+    p_gate.add_argument("--last-n", type=int, default=500)
+    p_gate.add_argument("--export", action="store_true", help="Export to JSON artifact")
+
+    p_calib = sub.add_parser("calibrate", help="Analyze empirical win rates by confidence band")
+    p_calib.add_argument("--last-n", type=int, default=500)
+    p_calib.add_argument("--export", action="store_true", help="Export to JSON artifact")
+    
+    p_long = sub.add_parser("longitudinal", help="Slice counterfactuals longitudinally")
+    p_long.add_argument("--slice", choices=["hour", "regime", "vix"], default="hour")
+    p_long.add_argument("--last-n", type=int, default=500)
+    p_long.add_argument("--export", action="store_true", help="Export to JSON artifact")
     args = parser.parse_args()
 
     if not Path(args.db).exists():
@@ -528,6 +696,10 @@ def main():
         "verify":     cmd_verify,
         "regression": cmd_regression,
         "simulate":   cmd_simulate,
+
+        "gate-analysis": cmd_gate_analysis,
+        "calibrate": cmd_calibrate,
+        "longitudinal": cmd_longitudinal,
     }
     dispatch[args.cmd](args)
 
