@@ -317,6 +317,10 @@ class DataManager:
             # Track whether the latest candle's OHLCV values actually changed.
             # This is the authoritative signal for "market is alive" —
             # NOT the candle timestamp (which stays fixed within each minute).
+            # HOWEVER: we also guarantee last_market_activity_ts is always at
+            # least as fresh as the candle's own timestamp. This prevents
+            # low-volume periods (where OHLCV stays flat for 30-60s) from
+            # causing a false DataHealth=DEAD transition.
             try:
                 last_row = df.iloc[-1]
                 fingerprint = (
@@ -329,8 +333,25 @@ class DataManager:
                 if fingerprint != self._last_ohlcv_fingerprint:
                     self._last_ohlcv_fingerprint = fingerprint
                     self.last_market_activity_ts = datetime.now()
+                else:
+                    # OHLCV unchanged — but use the candle's own timestamp as
+                    # a floor so the orchestrator doesn't see phantom staleness.
+                    # Only refresh if the candle ts is newer than current activity ts.
+                    try:
+                        candle_ts = df.index[-1]
+                        if hasattr(candle_ts, "to_pydatetime"):
+                            candle_ts = candle_ts.to_pydatetime()
+                        # Remove timezone info for comparison with naive datetime.now()
+                        if hasattr(candle_ts, "tzinfo") and candle_ts.tzinfo is not None:
+                            candle_ts = candle_ts.replace(tzinfo=None)
+                        if (self.last_market_activity_ts is None or
+                                candle_ts > self.last_market_activity_ts):
+                            self.last_market_activity_ts = candle_ts
+                    except Exception:
+                        pass  # Candle ts fallback is best-effort
             except Exception:
                 pass  # Don't let mutation tracking break the hot path
+
 
         snapshot = await asyncio.to_thread(self.get_snapshot_incremental, df)
         return df, snapshot

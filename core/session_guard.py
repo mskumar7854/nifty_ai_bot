@@ -172,11 +172,12 @@ class ExchangeSessionOrchestrator:
         # Prevents redundant recomputation within the same cycle.
         # Multiple callers (get_posture, get_poll_interval, dashboard)
         # all see the same consistent snapshot.
+        # TTL=2.0s covers a full 1s polling cycle + REST fetch overhead.
         self._cache_session: MarketSessionState | None = None
         self._cache_posture: RuntimePosture | None = None
         self._cache_data_health: DataHealth | None = None
         self._cache_ts: float = 0.0          # monotonic timestamp
-        self._cache_ttl: float = 0.5         # seconds
+        self._cache_ttl: float = 2.0         # seconds — covers full REST cycle
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -280,19 +281,7 @@ class ExchangeSessionOrchestrator:
         return self._cache_data_health
 
     def _compute_data_health(self, last_candle_ts) -> DataHealth:
-        """Compute data health using timeframe-aware thresholds.
-
-        For 1-min candles (tf=60s):
-            FRESH  — candle age < 120s  (2× interval)
-            STALE  — candle age < 240s  (4× interval)
-            DEAD   — candle age ≥ 420s  (7× interval)
-
-        This correctly models discrete-time candle feeds:
-        a candle timestamp won't advance until the next bar closes,
-        so age naturally grows to ~60s during normal operation.
-        The wider thresholds account for broker API jitter and
-        delayed candle finalization at minute rollovers.
-        """
+        """Compute data health using timeframe-aware thresholds."""
         if last_candle_ts is None:
             return DataHealth.DEAD
 
@@ -300,7 +289,14 @@ class ExchangeSessionOrchestrator:
             if hasattr(last_candle_ts, "to_pydatetime"):
                 last_candle_ts = last_candle_ts.to_pydatetime()
             age_s = (datetime.now() - last_candle_ts).total_seconds()
-        except Exception:
+
+            logger.debug(
+                f"HEALTH_CHECK | now={datetime.now().strftime('%H:%M:%S')} "
+                f"last_candle={last_candle_ts} "
+                f"age={age_s:.1f}s"
+            )
+        except Exception as e:
+            logger.error(f"HEALTH_CHECK | Exception computing age: {e} | last_candle_ts={last_candle_ts}")
             return DataHealth.DEAD
 
         if age_s < self._fresh_threshold_s:
@@ -348,12 +344,19 @@ class ExchangeSessionOrchestrator:
             return 1.0 - LUNCH_CONFIDENCE_PENALTY
         return 1.0
 
-    def is_live(self) -> bool:
+    def is_live(self, last_candle_ts=None) -> bool:
         """
         True only when the pipeline should be fully active.
         Replaces the old _is_market_open_safe() call.
         """
-        session = self.get_session_state()
+        if last_candle_ts is not None:
+            session = self.get_session_state(last_candle_ts)
+        else:
+            # Prevent poisoning the cache with DEAD data health when called without a timestamp
+            session = self._compute_state_for_time(datetime.now().time())
+            if self._is_cache_valid() and self._cache_session == MarketSessionState.WEEKEND_CLOSED:
+                session = MarketSessionState.WEEKEND_CLOSED
+
         return session in (
             MarketSessionState.LIVE_MARKET,
             MarketSessionState.LUNCH_DRIFT,

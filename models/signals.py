@@ -476,7 +476,10 @@ class Signal:
             "warnings": self.warnings,
             "premium_levels": self.metadata.get("premium_levels", {}),
             "symbol": getattr(self, "symbol", ""),
-            "execution_policy": self.execution_policy.to_dict() if self.execution_policy else None
+            "execution_policy": self.execution_policy.to_dict() if self.execution_policy else None,
+            "execution_status": self.execution_status,
+            "rejection_status": self.metadata.get("rejection_status", ""),
+            "rejection_reason": self.metadata.get("rejection_reason", "")
         }
 
     def __str__(self) -> str:

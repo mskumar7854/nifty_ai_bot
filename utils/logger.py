@@ -49,10 +49,14 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
         return name + ".gz"
         
     def gzip_rotator(source, dest):
-        with open(source, "rb") as f_in:
-            with gzip.open(dest, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-        os.remove(source)
+        try:
+            with open(source, "rb") as f_in:
+                with gzip.open(dest, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            os.remove(source)
+        except Exception as e:
+            # On Windows, rotating open files can cause PermissionError (WinError 32)
+            print(f"Log rotation non-fatal error: {e}")
     
     log_dir = "/app/logs" if os.path.exists("/app") else "logs"
     if not os.path.exists(log_dir):

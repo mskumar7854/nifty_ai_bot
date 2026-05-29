@@ -546,7 +546,13 @@ class NiftyAISystem:
                     # ── Dynamic polling via orchestrator ──
                     # Uses mutation-based freshness (not candle timestamp)
                     # so an active candle that's still updating is seen as FRESH.
-                    await orchestrator.sleep_until_next_cycle(self.data_manager.last_market_activity_ts)
+                    interval = orchestrator.get_poll_interval_seconds(self.data_manager.last_market_activity_ts)
+                    sleep_step = 1.0
+                    total_slept = 0.0
+                    while total_slept < interval:
+                        await asyncio.sleep(min(sleep_step, interval - total_slept))
+                        self.position_manager.record_heartbeat()
+                        total_slept += sleep_step
             except asyncio.CancelledError:
                 logger.info("Shutdown signal received")
             finally:
@@ -577,7 +583,7 @@ class NiftyAISystem:
 
         # ── Execution Fidelity Audit ──
         if self.cycle_count % 60 == 0:
-            if orchestrator.is_live():
+            if orchestrator.is_live(self.data_manager.last_market_activity_ts):
                 # Run broker reconciliation every ~60 cycles (~1 minute)
                 import asyncio
                 asyncio.create_task(asyncio.to_thread(self.reconciliator.audit_broker_state))
@@ -835,6 +841,9 @@ class NiftyAISystem:
                 if self.cycle_count % 30 == 0:
                     logger.warning(f"🛡️ Master Gate blocked: {master_result.reason}")
                 self.simulation.record_signal(passed=False)
+                signal.execution_status = "rejected"
+                signal.metadata["rejection_status"] = "Blocked by Master Gate"
+                signal.metadata["rejection_reason"] = master_result.reason
                 self._update_dashboard(snapshot, signal)
                 _log_canonical_truth(False, master_result.reason)
                 return
@@ -900,6 +909,10 @@ class NiftyAISystem:
                 self.perf_logger.log_signal(log_entry)
                 _log_canonical_truth(False, f"Gate Filter: {rej_reason}")
                 
+                signal.execution_status = "rejected"
+                signal.metadata["rejection_status"] = "Blocked by Signal Integrity" if "integrity" in rej_reason.lower() else "Blocked by 10-Gate Filter"
+                signal.metadata["rejection_reason"] = rej_reason
+                
                 # ── P0.6: Shadow Journal — Capture REJECTED signals too ──
                 # These become the most valuable training data later.
                 # We know "what the engine saw but chose not to trade."
@@ -937,6 +950,11 @@ class NiftyAISystem:
                 log_entry["risk_reason"] = f"Regime Block: {signal.execution_policy.reason}"
                 self.perf_logger.log_signal(log_entry)
                 self.simulation.record_signal(passed=False)
+                
+                signal.execution_status = "rejected"
+                signal.metadata["rejection_status"] = "Blocked by Regime Adapter"
+                signal.metadata["rejection_reason"] = signal.execution_policy.reason
+                
                 self._update_dashboard(snapshot, signal)
                 _log_canonical_truth(False, f"RegimeAdapter: {signal.execution_policy.reason}")
                 return
@@ -1809,6 +1827,10 @@ class NiftyAISystem:
         If the main loop hasn't called record_heartbeat() in DEADMAN_TIMEOUT_SECONDS,
         this watchdog triggers emergency position closure.
         """
+        if self.is_simulation:
+            logger.info("Deadman watchdog disabled in SIMULATION mode.")
+            return
+
         while True:
             try:
                 await asyncio.sleep(10)

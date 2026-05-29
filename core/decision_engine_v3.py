@@ -1638,15 +1638,17 @@ class DecisionEngineV3:
         - v3.7: Per-agent concentration cap (no single agent > MAX_SINGLE_WEIGHT_SHARE of budget)
         """
         # ── v3.7: Anti-concentration cap ──────────────────────────────────────
-        # Prevents a single agent from holding >18% of the total weight budget.
+        # Prevents a single agent from holding >25% of the total weight budget.
         # First pass: compute raw weights so we can calculate total and apply cap.
         # This is a two-pass approach to avoid unbounded single-agent influence.
         # ------------------------------------------------------------------
-        MAX_SINGLE_WEIGHT_SHARE = 0.18  # no agent may hold more than 18% of total
+        MAX_SINGLE_WEIGHT_SHARE = 0.25  # no agent may hold more than 25% of total
 
         buy_score = 0.0
         sell_score = 0.0
         total_weight_used = 0.0
+        neutral_weight = 0.0
+        directional_weight = 0.0
         
         agent_pfs = {}
         learning_ag = self.agents.get("learning")
@@ -1700,8 +1702,12 @@ class DecisionEngineV3:
 
             if output.direction == Direction.BULLISH:
                 buy_score += weight * conf
+                directional_weight += weight
             elif output.direction == Direction.BEARISH:
                 sell_score += weight * conf
+                directional_weight += weight
+            else:
+                neutral_weight += weight
             # Neutral/NO_TRADE adds 0 to score but counts toward total_weight
             # which naturally dilutes the final probability (as it should).
 
@@ -1711,6 +1717,17 @@ class DecisionEngineV3:
 
         if total_weight_used == 0:
             return 0.0, 0.0
+            
+        import json
+        self.logger.info(
+            f"[WEIGHT DIAGNOSTICS] " + json.dumps({
+                "buy_raw": round(buy_score, 4),
+                "sell_raw": round(sell_score, 4),
+                "total_weight": round(total_weight_used, 4),
+                "neutral_weight": round(neutral_weight, 4),
+                "directional_weight": round(directional_weight, 4)
+            })
+        )
 
         return buy_score / total_weight_used, sell_score / total_weight_used
 
