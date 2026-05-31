@@ -76,6 +76,26 @@ class DataSource(str, Enum):
     UNKNOWN = "unknown"
 
 
+class SignalStatus(str, Enum):
+    """
+    v4.8: Trade signal lifecycle states for Telegram notifications.
+    Used by signal_formatter to display status and by future
+    lifecycle notification handlers (target hits, trailing, close).
+    """
+    FRESH = "FRESH ✅"
+    ACTIVE = "ACTIVE ✅"
+    EXPIRING = "EXPIRING ⚠️"
+    EXPIRED = "EXPIRED ⛔"
+    T1_HIT = "T1 HIT 🎯"
+    T2_HIT = "T2 HIT 🎯"
+    T3_HIT = "T3 HIT 🎯"
+    TRAILING = "TRAILING 🔄"
+    BREAKEVEN = "BREAKEVEN 🛡️"
+    CLOSED_WIN = "WIN 🏆"
+    CLOSED_LOSS = "LOSS ❌"
+    CLOSED_BREAKEVEN = "BREAKEVEN ⚪"
+
+
 @dataclass
 class AgentOutput:
     agent_name: str

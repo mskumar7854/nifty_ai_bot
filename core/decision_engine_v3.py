@@ -994,6 +994,16 @@ class DecisionEngineV3:
         )
 
         # Attach dynamic sizing metrics to metadata so PositionManager can size properly
+        # ── Agent Sub-Scores (for Telegram signal formatter) ──
+        # Normalised to 0-10 scale from agent confidence (0-1 clamped).
+        # Only populated for active agents; formatter handles missing keys gracefully.
+        def _agent_score_10(name: str) -> float:
+            """Extract agent confidence as 0-10 score, or -1 if unavailable."""
+            out = outputs_dict.get(name)
+            if out is None:
+                return -1.0
+            return round(out.get_clamped_confidence() * 10, 1)
+
         meta = {
             "dominance_pct": dominance_pct,
             "dominance_gap": gap,
@@ -1020,6 +1030,16 @@ class DecisionEngineV3:
             ),
             "decision_path": self._last_decision_path,
             "uncertainty_multiplier": regime_penalty,
+            # ── Agent Sub-Scores for Telegram (v4.8) ──
+            "agent_scores": {
+                "oi": _agent_score_10("oi"),
+                "trend": _agent_score_10("regime"),
+                "flow": _agent_score_10("order_flow"),
+                "volatility": _agent_score_10("volatility"),
+                "momentum": _agent_score_10("momentum"),
+                "structure": _agent_score_10("structure"),
+                "price_action": _agent_score_10("price_action"),
+            },
         }
 
         signal = Signal(
@@ -1042,7 +1062,7 @@ class DecisionEngineV3:
             position_size=trade_params.get("position_size", 0),
             regime=self._classify_market(snapshot, outputs_dict),
             confluence=final_confluence,
-            risk_reward_ratio=3.0, 
+            risk_reward_ratio=self._compute_rr_ratio(trade_params), 
             agent_votes=agent_votes,
             reasons=reasons[:5],
             warnings=warnings[:5],
@@ -1762,6 +1782,27 @@ class DecisionEngineV3:
         )
         self.logger.signal(f"⚪ NO TRADE | {reasons[0]}")
         return signal
+
+    @staticmethod
+    def _compute_rr_ratio(trade_params: dict) -> float:
+        """
+        Compute Risk:Reward ratio from trade parameters.
+        Uses T1 as the primary reward target (conservative estimate).
+        Falls back to 0.0 if entry/SL/T1 are missing or invalid.
+        """
+        entry = trade_params.get("entry", 0)
+        sl = trade_params.get("stop_loss", 0)
+        t1 = trade_params.get("target_1", 0)
+
+        if entry <= 0 or sl <= 0 or t1 <= 0:
+            return 0.0
+
+        risk = abs(entry - sl)
+        if risk < 0.01:  # avoid div by zero
+            return 0.0
+
+        reward = abs(t1 - entry)
+        return round(reward / risk, 1)
 
     def _classify_market(self, snapshot: MarketSnapshot, outputs: Dict[str, AgentOutput]) -> MarketRegime:
         """

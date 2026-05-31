@@ -19,6 +19,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from models.signals import Signal, SignalType, Direction
 from config.settings import Settings
 from core.session_guard import orchestrator
+from core.signal_formatter import format_signal_message, format_trade_close_message
 
 logger = logging.getLogger("telegram_controller")
 
@@ -562,79 +563,20 @@ class TelegramController:
             ]
         ])
 
-        direction_emoji = "🟢" if signal.direction.value.upper() == "BUY" else "🔴"
+        # ── Build snapshot summary for formatter ──
+        snap_summary = signal.metadata.get("snapshot_summary", {})
 
-        # ── Risk Snapshot: pull live context for human operator ──
-        regime_str = signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
-        grade_str  = signal.grade.value  if hasattr(signal.grade,  "value") else str(signal.grade)
-        rr_str     = f"{signal.risk_reward_ratio:.1f}" if signal.risk_reward_ratio else "—"
-        dom_gap    = signal.metadata.get("dominance_gap", 0)
-        dom_str    = f"{dom_gap:.2f}" if dom_gap else "—"
+        # Inject signal expiry seconds so formatter can display validity
+        signal.metadata["signal_expiry_seconds"] = self.settings.alerts.telegram_signal_expiry_seconds
 
-        # Live spread from quote in signal metadata
-        quote = signal.metadata.get("quote")
-        if quote and hasattr(quote, "ask") and hasattr(quote, "bid") and quote.ask > 0:
-            spread_val = quote.ask - quote.bid
-            spread_str = f"₹{spread_val:.1f}"
-            spread_pct = (spread_val / quote.ask * 100) if quote.ask else 0
-            spread_warn = " ⚠️ WIDE" if spread_pct > 5.0 else ""
-        else:
-            spread_str = "—"
-            spread_warn = ""
+        # Build the unified two-section signal message
+        body = format_signal_message(signal, snapshot_summary=snap_summary)
 
-        # Today's average slippage from performance logger
-        try:
-            from performance_logger import PerformanceLogger
-            import json, os
-            from pathlib import Path
-            from datetime import datetime as _dt
-            _log_path = Path("logs") / f"executions_{_dt.now().strftime('%Y-%m-%d')}.json"
-            _slippages = []
-            if _log_path.exists():
-                with open(_log_path) as _f:
-                    for _line in _f:
-                        try:
-                            _rec = json.loads(_line.strip())
-                            _slippages.append(abs(_rec.get("slippage", 0)))
-                        except Exception:
-                            pass
-            avg_slip_str = f"₹{sum(_slippages)/len(_slippages):.2f}" if _slippages else "no data"
-        except Exception:
-            avg_slip_str = "—"
-
-        premium_levels = signal.metadata.get("premium_levels", {})
-        p_entry = premium_levels.get("premium_entry", signal.entry_price)
-        p_sl = premium_levels.get("premium_sl", signal.stop_loss)
-        p_t1 = premium_levels.get("premium_t1", signal.target_1)
-        p_t2 = premium_levels.get("premium_t2", signal.target_2)
-        decay_risk = premium_levels.get("decay_risk", "Moderate")
-        decay_warn = " ⚠️" if decay_risk == "High" else ""
-
+        # Add SEMI_AUTO header + expiry footer
         text = (
-            f"{direction_emoji} <b>⚡ TRADE CONFIRMATION REQUIRED</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Signal:</b>     {signal.signal_type.value}\n"
-            f"<b>Symbol:</b>     {signal.symbol}\n"
-            f"<b>ID:</b>         <code>{signal.id[:8]}</code>\n\n"
-            f"📊 <b>SIGNAL QUALITY</b>\n"
-            f"  Grade:       <b>{grade_str}</b>\n"
-            f"  Confidence:  <b>{signal.confidence:.1f}%</b>\n"
-            f"  Dom. Score:  <b>{dom_str}</b>\n"
-            f"  Regime:      <b>{regime_str}</b>\n"
-            f"  R:R Ratio:   <b>{rr_str}</b>\n\n"
-            f"💰 <b>OPTION PREMIUM LEVELS</b>\n"
-            f"  Entry:   ₹{p_entry:,.1f}\n"
-            f"  SL:      ₹{p_sl:,.1f}\n"
-            f"  Target 1: ₹{p_t1:,.1f}\n"
-            f"  Target 2: ₹{p_t2:,.1f}\n"
-            f"  Qty:     {signal.position_size}\n\n"
-            f"🎯 <b>SPOT CONFIRMATION</b>\n"
-            f"  Spot Trigger: NIFTY {'>' if signal.direction.value == 'BULLISH' else '<'} {signal.entry_price:,.1f}\n"
-            f"  Spot SL:      {signal.stop_loss:,.1f}\n"
-            f"  Spot Target:  {signal.target_1:,.1f}\n\n"
-            f"🔬 <b>LIVE MARKET CHECK</b>\n"
-            f"  Spread:      <b>{spread_str}</b>{spread_warn}\n"
-            f"  Decay Risk:  <b>{decay_risk}</b>{decay_warn}\n"
+            f"⚡ <b>TRADE CONFIRMATION REQUIRED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"{body}\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"⏳ Expires in {self.settings.alerts.telegram_signal_expiry_seconds}s"
         )
@@ -647,7 +589,6 @@ class TelegramController:
                 parse_mode="HTML",
                 reply_markup=keyboard,
             )
-            # Not tracking message ID yet in DB so skip editing for now unless implemented
             logger.info("Interactive signal posted: signal=%s msg=%s", signal.id, msg.message_id)
         except Exception:
             logger.exception("Failed to post interactive signal %s; expiring.", signal.id)
@@ -661,41 +602,38 @@ class TelegramController:
             logger.exception("Error expiring signal %s", signal_id)
 
     async def _notify_auto_signal(self, signal) -> None:
-        direction_emoji = "🟢" if signal.direction.value.upper() == "BUY" else "🔴"
-        premium_levels = signal.metadata.get("premium_levels", {})
-        p_entry = premium_levels.get("premium_entry", signal.entry_price)
-        
-        await self._send_admin_msg(
-            f"{direction_emoji} <b>AUTO Trade Executed</b>\n\n"
-            f"ID:        <code>{signal.id[:8]}</code>\n"
-            f"Symbol:    <b>{signal.symbol}</b>\n"
-            f"Direction: <b>{signal.direction.value.upper()}</b>\n"
-            f"Premium:   ₹{p_entry:,.1f}\n"
-            f"Spot Trigger: ₹{signal.entry_price:,.1f}\n"
-            f"Qty:       {signal.position_size}\n"
+        # ── Build snapshot summary for formatter ──
+        snap_summary = signal.metadata.get("snapshot_summary", {})
+        signal.metadata["signal_expiry_seconds"] = self.settings.alerts.telegram_signal_expiry_seconds
+
+        body = format_signal_message(signal, snapshot_summary=snap_summary)
+
+        text = (
+            f"🤖 <b>AUTO TRADE EXECUTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"{body}"
         )
+
+        await self._send_admin_msg(text)
         logger.info("AUTO signal notified: %s", signal.id)
 
     async def _notify_manual_alert(self, signal) -> None:
-        direction_emoji = "🟢" if signal.direction.value.upper() == "BUY" else "🔴"
-        premium_levels = signal.metadata.get("premium_levels", {})
-        p_entry = premium_levels.get("premium_entry", signal.entry_price)
-        p_sl = premium_levels.get("premium_sl", signal.stop_loss)
-        p_t1 = premium_levels.get("premium_t1", signal.target_1)
-        
+        # ── Build snapshot summary for formatter ──
+        snap_summary = signal.metadata.get("snapshot_summary", {})
+        signal.metadata["signal_expiry_seconds"] = self.settings.alerts.telegram_signal_expiry_seconds
+
+        body = format_signal_message(signal, snapshot_summary=snap_summary)
+
+        text = (
+            f"📋 <b>MANUAL SIGNAL ALERT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"{body}\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"ℹ️ No automatic execution — manual mode active."
+        )
+
         try:
-            await self._send_admin_msg(
-                f"{direction_emoji} <b>Manual Alert</b>\n\n"
-                f"ID:        <code>{signal.id[:8]}</code>\n"
-                f"Symbol:    <b>{signal.symbol}</b>\n"
-                f"Direction: <b>{signal.direction.value.upper()}</b>\n"
-                f"Premium Entry: ₹{p_entry:,.1f}\n"
-                f"Premium SL:    ₹{p_sl:,.1f}\n"
-                f"Premium T1:    ₹{p_t1:,.1f}\n"
-                f"Spot Trigger:  ₹{signal.entry_price:,.1f}\n"
-                f"Qty:       {signal.position_size}\n\n"
-                f"ℹ️ No automatic execution — manual mode active."
-            )
+            await self._send_admin_msg(text)
             await self.db.update_signal_status(signal.id, "notified")
             logger.info("Manual alert sent: %s", signal.id)
         except Exception:
@@ -731,21 +669,8 @@ class TelegramController:
 
     async def notify_trade_close(self, trade_id: str, pnl: float, outcome: str) -> None:
         try:
-            outcome_upper = outcome.upper()
-            if outcome_upper == "WIN":
-                emoji, colour = "🟢", "WIN"
-            elif outcome_upper == "LOSS":
-                emoji, colour = "🔴", "LOSS"
-            else:
-                emoji, colour = "⚪", "BREAKEVEN"
-
-            pnl_sign = "+" if pnl >= 0 else ""
-            await self._send_admin_msg(
-                f"{emoji} <b>Trade Closed — {colour}</b>\n\n"
-                f"ID:     <code>{str(trade_id)[:8]}</code>\n"
-                f"PnL:    <b>₹{pnl_sign}{pnl:,.0f}</b>\n"
-                f"Result: <b>{colour}</b>"
-            )
-            logger.info("notify_trade_close sent: trade=%s pnl=%.0f outcome=%s", trade_id, pnl, outcome_upper)
+            text = format_trade_close_message(trade_id, pnl, outcome)
+            await self._send_admin_msg(text)
+            logger.info("notify_trade_close sent: trade=%s pnl=%.0f outcome=%s", trade_id, pnl, outcome.upper())
         except Exception:
             logger.exception("notify_trade_close failed silently: trade=%s pnl=%.0f", trade_id, pnl)

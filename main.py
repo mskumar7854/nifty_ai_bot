@@ -1151,6 +1151,13 @@ class NiftyAISystem:
             signal.metadata["instrument"] = instrument
             signal.metadata["quote"] = quote
             signal.metadata["premium_levels"] = premium_levels
+            # v4.8: Lightweight snapshot summary for Telegram signal formatter
+            signal.metadata["snapshot_summary"] = {
+                "spot": snapshot.price,
+                "pcr": round(snapshot.pcr, 2) if snapshot.pcr else 0,
+                "vix": round(snapshot.india_vix, 1) if snapshot.india_vix else 0,
+                "vwap": round(snapshot.vwap, 1) if snapshot.vwap else 0,
+            }
             
             logger.info(
                 f"🎯 Execution AUTHORIZED | {instrument['symbol']} ({instrument['moneyness']}) | "
