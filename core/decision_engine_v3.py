@@ -361,6 +361,7 @@ class DecisionEngineV3:
         outputs = []
         outputs_dict = {}
         self._last_decision_path = ["ENV_VALID"]
+        self._sim_track_data = {}
 
         self.logger.debug("⚡ Engine v3 Cycle Started")
 
@@ -699,13 +700,23 @@ class DecisionEngineV3:
         # regime_penalty here is the UNIFIED uncertainty factor (max-of-two, not compounded)
         # v3.8: If conviction exception fired, use _effective_gap_mult for regime_penalty
         _final_regime_penalty = min(_effective_gap_mult, regime_penalty) if _conviction_exception else regime_penalty
-        buy_prob, sell_prob = self.compute_weighted_score(outputs_dict, _final_regime_penalty)
+        adjusted_buy_prob, adjusted_sell_prob = self.compute_weighted_score(outputs_dict, _final_regime_penalty)
+
+        raw_buy_prob = adjusted_buy_prob / _final_regime_penalty if _final_regime_penalty > 0 else 0.0
+        raw_sell_prob = adjusted_sell_prob / _final_regime_penalty if _final_regime_penalty > 0 else 0.0
 
         # Priority 3 Fix: Apply sigmoid normalization BEFORE grading.
         # Multiplicative penalties compress all scores into 0.48–0.62.
         # Sigmoid widens the distribution so elite setups grade distinctly from marginal ones.
-        buy_prob  = _sigmoid_normalize(buy_prob)
-        sell_prob = _sigmoid_normalize(sell_prob)
+        buy_prob  = _sigmoid_normalize(adjusted_buy_prob)
+        sell_prob = _sigmoid_normalize(adjusted_sell_prob)
+        
+        self._sim_track_data = {
+            "raw_buy": raw_buy_prob, "raw_sell": raw_sell_prob,
+            "gap_mult": _final_regime_penalty,
+            "adj_buy": adjusted_buy_prob, "adj_sell": adjusted_sell_prob,
+            "sig_buy": buy_prob, "sig_sell": sell_prob,
+        }
 
         # ── INTEGRITY GATE (data validation — BEFORE any scoring logic) ──
         # This is NOT a quality filter — it's input validation.
@@ -1134,6 +1145,18 @@ class DecisionEngineV3:
             )
         except Exception as e:
             self.logger.error(f"Failed to log signal creation: {e}")
+
+        track = getattr(self, "_sim_track_data", {})
+        if track:
+            self.logger.info(
+                f"[SIMULATION_TRACKING] TradeTaken=TRUE "
+                f"RawBuy={track.get('raw_buy', 0):.4f} RawSell={track.get('raw_sell', 0):.4f} "
+                f"GapMult={track.get('gap_mult', 1):.4f} "
+                f"AdjBuy={track.get('adj_buy', 0):.4f} AdjSell={track.get('adj_sell', 0):.4f} "
+                f"SigmoidBuy={track.get('sig_buy', 0):.4f} SigmoidSell={track.get('sig_sell', 0):.4f} "
+                f"Threshold={getattr(self, '_last_adaptive_threshold', 0):.4f} "
+                f"RejectReason='None'"
+            )
 
         return signal
 
@@ -1691,7 +1714,6 @@ class DecisionEngineV3:
             if name in agent_pfs and agent_pfs[name] < 1.0:
                 weight = 0.0
 
-            weight *= regime_penalty
             raw_weights[name] = max(weight, 0.0)
 
         raw_total = sum(raw_weights.values())
@@ -1738,18 +1760,27 @@ class DecisionEngineV3:
         if total_weight_used == 0:
             return 0.0, 0.0
             
+        raw_buy = buy_score / total_weight_used
+        raw_sell = sell_score / total_weight_used
+        
+        adj_buy = raw_buy * regime_penalty
+        adj_sell = raw_sell * regime_penalty
+
         import json
         self.logger.info(
             f"[WEIGHT DIAGNOSTICS] " + json.dumps({
-                "buy_raw": round(buy_score, 4),
-                "sell_raw": round(sell_score, 4),
+                "buy_raw": round(raw_buy, 4),
+                "sell_raw": round(raw_sell, 4),
+                "adj_buy": round(adj_buy, 4),
+                "adj_sell": round(adj_sell, 4),
                 "total_weight": round(total_weight_used, 4),
                 "neutral_weight": round(neutral_weight, 4),
-                "directional_weight": round(directional_weight, 4)
+                "directional_weight": round(directional_weight, 4),
+                "regime_penalty": regime_penalty
             })
         )
 
-        return buy_score / total_weight_used, sell_score / total_weight_used
+        return adj_buy, adj_sell
 
 
     def _no_trade_signal(self, snapshot: MarketSnapshot, reasons: List[str], outputs: Dict[str, AgentOutput]) -> Signal:
@@ -1761,6 +1792,19 @@ class DecisionEngineV3:
         final_reasons = reasons + blockers
 
         sig_id = getattr(self, "current_signal_id", None) or str(uuid.uuid4())[:8]
+        
+        track = getattr(self, "_sim_track_data", {})
+        if track:
+            reason_str = final_reasons[0] if final_reasons else 'Unknown'
+            self.logger.info(
+                f"[SIMULATION_TRACKING] TradeTaken=FALSE "
+                f"RawBuy={track.get('raw_buy', 0):.4f} RawSell={track.get('raw_sell', 0):.4f} "
+                f"GapMult={track.get('gap_mult', 1):.4f} "
+                f"AdjBuy={track.get('adj_buy', 0):.4f} AdjSell={track.get('adj_sell', 0):.4f} "
+                f"SigmoidBuy={track.get('sig_buy', 0):.4f} SigmoidSell={track.get('sig_sell', 0):.4f} "
+                f"Threshold={getattr(self, '_last_adaptive_threshold', 0):.4f} "
+                f"RejectReason='{reason_str}'"
+            )
         signal = Signal(
             id=sig_id,
             timestamp=datetime.now(),

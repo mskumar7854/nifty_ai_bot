@@ -1,33 +1,43 @@
 import os
-import requests
 from dotenv import load_dotenv
+from dhanhq import dhanhq
 
-load_dotenv()
+def test():
+    load_dotenv()
+    
+    CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+    ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+    
+    print("Initializing DhanHQ Client...")
+    try:
+        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+    except Exception as e:
+        print("Failed to initialize dhanhq:", e)
+        return
 
-CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+    print("\n--- 1. SDK Version & Methods Check ---")
+    print(f"hasattr option_chain: {hasattr(dhan, 'option_chain')}")
+    print(f"hasattr expiry_list: {hasattr(dhan, 'expiry_list')}")
 
-if not CLIENT_ID or not ACCESS_TOKEN:
-    print("FAILED: Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN in .env")
-    exit(1)
+    print("\n--- 2. Token Validation ---")
+    try:
+        funds = dhan.get_fund_limits()
+        print("get_fund_limits():\n", funds)
+    except Exception as e:
+        print("get_fund_limits() failed. Token is likely invalid.\nError:", e)
 
-# Dhan API v2 Expiry List Endpoint
-url = "https://api.dhan.co/v2/expirylist"
-headers = {
-    "access-token": ACCESS_TOKEN,
-    "client-id": CLIENT_ID,
-    "Content-Type": "application/json"
-}
+    print("\n--- 3. Historical Data Validation ---")
+    try:
+        historical = dhan.historical_daily_data(
+            security_id="13",
+            exchange_segment="IDX_I",
+            instrument_type="INDEX",
+            from_date="2026-05-25",
+            to_date="2026-06-01"
+        )
+        print("historical_daily_data():\n", historical)
+    except Exception as e:
+        print("historical_daily_data() failed.\nError:", e)
 
-payload = {
-    "UnderlyingScrip": 13,
-    "UnderlyingSeg": "IDX_I"
-}
-
-print("Fetching Expiry List from Dhan...")
-try:
-    response = requests.post(url, headers=headers, json=payload)
-    print(f"Status Code: {response.status_code}")
-    print(f"Response: {response.json()}")
-except Exception as e:
-    print(f"FAILED: Exception occurred - {e}")
+if __name__ == "__main__":
+    test()

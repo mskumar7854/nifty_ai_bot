@@ -235,7 +235,7 @@ class DataManager:
     def _save_circuit_state(self):
         try:
             import core.system_state as system_state
-            data = system_state.load_state()
+            data = system_state.load_operational_state()
             data["oi_circuit"] = self.oi_circuit
             data["quote_circuit"] = self.quote_circuit
             system_state.save_operational_state(data)
@@ -598,6 +598,7 @@ class DataManager:
                     f"OI quote_circuit OPEN — skipping live quote fetch | "
                     f"cooldown={cooldown_q}s | last_err={self.quote_circuit['last_error']}"
                 )
+                return None
             else:
                 try:
                     dhan = get_dhan_client()
@@ -674,6 +675,7 @@ class DataManager:
                             f"🚨 DataManager: Non-retryable quote error {error_code}! "
                             f"Tripping quote_circuit for 15 minutes."
                         )
+                        raise ValueError(f"Non-retryable Dhan API error: {error_code}")
                     
                     if response.get('status') == 'success':
                         raw_data = response.get('data', {})
@@ -707,10 +709,10 @@ class DataManager:
                                 )
                 except Exception as e:
                     self.logger.error(f"Option quote fetch failed: {e}")
-                    # Fallback to simulation logic below if API fails
+                    return None
 
         # 2. SIMULATION MODE (Synthetic Option Pricing)
-        # This is CRITICAL for realistic paper trading. We cannot use Spot Nifty.
+        # This is CRITICAL for realistic paper trading offline.
         spot = self._sim_price if self.data_source == "simulated" else self.ohlcv_data['close'].iloc[-1]
         
         # Extremely rough Black-Scholes approximation for simulation realism

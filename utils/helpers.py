@@ -39,6 +39,12 @@ def is_pre_market() -> bool:
     return time(9, 0) <= now < time(9, 15)
 
 
+def is_post_market() -> bool:
+    """Check if it's strictly post-market (15:30 to 16:00) to allow clean shutdown."""
+    now = get_ist_now().time()
+    return time(15, 30) <= now <= time(16, 0)
+
+
 def save_json(data: dict, filepath: str):
     """Save dictionary to JSON file"""
     os.makedirs(os.path.dirname(filepath), exist_ok=True)

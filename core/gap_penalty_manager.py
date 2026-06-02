@@ -118,9 +118,12 @@ class GapPenaltyManager:
         for threshold, max_penalty, label in _GAP_SEVERITY_THRESHOLDS:
             if self._gap_strength <= threshold:
                 # Scale within the tier for smoother curve
-                self._initial_penalty = max_penalty * min(
-                    self._gap_strength / threshold, 1.0
-                )
+                if threshold == float("inf"):
+                    self._initial_penalty = max_penalty
+                else:
+                    self._initial_penalty = max_penalty * min(
+                        self._gap_strength / threshold, 1.0
+                    )
                 self._severity_label = label
                 break
 

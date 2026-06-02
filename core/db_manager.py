@@ -7,11 +7,53 @@ blocking the sub-50ms trading loop.
 ============================================
 """
 
+import json
 import aiosqlite
 import logging
-from datetime import datetime
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, date
+from enum import Enum
 
 logger = logging.getLogger("db_manager")
+
+
+class _SafeEncoder(json.JSONEncoder):
+    """Handles numpy, dataclass, Enum, and datetime objects that appear in
+    signal metadata and trade agent dicts.  Falls back to str() so
+    json.dumps() *never* crashes — data integrity over prettiness."""
+
+    def default(self, obj):
+        # numpy scalar types (np.bool_, np.int64, np.float64, etc.)
+        try:
+            import numpy as np
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+
+        # dataclass instances (e.g. OptionQuote, ExecutionPolicy)
+        if is_dataclass(obj) and not isinstance(obj, type):
+            return asdict(obj)
+
+        # Enum members
+        if isinstance(obj, Enum):
+            return obj.value
+
+        # datetime / date
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+
+        # Absolute last resort — never crash
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
 
 class DBManager:
     def __init__(self, db_path=None):
@@ -214,7 +256,6 @@ class DBManager:
 
     async def save_signal(self, signal):
         """Persists a new signal to disk for recovery."""
-        import json
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("""
@@ -237,7 +278,7 @@ class DBManager:
                     signal.created_at,
                     signal.updated_at,
                     signal.queue_position,
-                    json.dumps(signal.metadata)
+                    json.dumps(signal.metadata, cls=_SafeEncoder)
                 ))
                 await db.commit()
         except Exception as e:
@@ -313,7 +354,6 @@ class DBManager:
 
     async def save_trade(self, trade: dict):
         """Fire-and-forget async save to disk."""
-        import json
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("""
@@ -326,7 +366,7 @@ class DBManager:
                     trade["regime"],
                     trade.get("confidence", 0.0),
                     trade.get("signal_type", "UNKNOWN"),
-                    json.dumps(trade.get("agents", {})),
+                    json.dumps(trade.get("agents", {}), cls=_SafeEncoder),
                     trade.get("pev", 0.0),
                     trade.get("slippage", 0.0)
                 ))

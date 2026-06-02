@@ -477,6 +477,14 @@ class NiftyAISystem:
                     # ── P0-C: Record heartbeat for deadman watchdog ──
                     self.position_manager.record_heartbeat()
 
+                    # ── AUTO SHUTDOWN ──
+                    if getattr(settings.trading, 'auto_shutdown_after_market', False):
+                        from utils.helpers import is_post_market
+                        if is_post_market():
+                            logger.info("🛑 Market is closed. Auto-shutdown triggered.")
+                            self.running = False
+                            continue
+
                     await self._run_cycle(session)
                     
                     # ── P0-C: External heartbeat ping (Fire & Forget) ──
@@ -585,7 +593,6 @@ class NiftyAISystem:
         if self.cycle_count % 60 == 0:
             if orchestrator.is_live(self.data_manager.last_market_activity_ts):
                 # Run broker reconciliation every ~60 cycles (~1 minute)
-                import asyncio
                 asyncio.create_task(asyncio.to_thread(self.reconciliator.audit_broker_state))
                 
         # ── 0. Risk & Master Kill Switch ──
@@ -816,6 +823,20 @@ class NiftyAISystem:
 
             # ── Signal passed — reset streak ──
             self.no_trade_streak = 0
+
+            # ── 7.5: Simulation Over-Trading Guard ──
+            if self.is_simulation:
+                active_sim_trades = len(self.simulation.open_trades)
+                max_pos = settings.position.max_open_positions
+                if active_sim_trades >= max_pos:
+                    if self.cycle_count % 30 == 0:
+                        logger.warning(f"🛡️ Simulation Guard: Max open positions reached ({active_sim_trades}/{max_pos})")
+                    self.simulation.record_signal(passed=False)
+                    signal.execution_status = "rejected"
+                    signal.metadata["rejection_status"] = "Blocked by Simulation Guard"
+                    signal.metadata["rejection_reason"] = "Max Open Positions"
+                    self._update_dashboard(snapshot, signal)
+                    return
 
             # ── 8. MASTER GATE: Final signal-level approval ──
             # This is the definitive go/no-go for THIS specific signal.

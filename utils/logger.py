@@ -39,24 +39,9 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
     )
     rich_handler.setLevel(logging.INFO)
 
-    # File handler - Uses TimedRotatingFileHandler for daily log rotation
+    # File handler - Uses ConcurrentRotatingFileHandler for safe multi-process logging
     import os
-    import gzip
-    import shutil
-    from logging.handlers import TimedRotatingFileHandler
-    
-    def gzip_namer(name):
-        return name + ".gz"
-        
-    def gzip_rotator(source, dest):
-        try:
-            with open(source, "rb") as f_in:
-                with gzip.open(dest, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-            os.remove(source)
-        except Exception as e:
-            # On Windows, rotating open files can cause PermissionError (WinError 32)
-            print(f"Log rotation non-fatal error: {e}")
+    from concurrent_log_handler import ConcurrentRotatingFileHandler
     
     log_dir = "/app/logs" if os.path.exists("/app") else "logs"
     if not os.path.exists(log_dir):
@@ -64,32 +49,26 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
         
     log_file = os.path.join(log_dir, "nifty_ai.log")
     
-    file_handler = TimedRotatingFileHandler(
+    file_handler = ConcurrentRotatingFileHandler(
         log_file,
-        when="midnight",
-        interval=1,
+        maxBytes=10 * 1024 * 1024, # 10 MB
         backupCount=14,
-        encoding="utf-8"
+        encoding="utf-8",
+        use_gzip=True
     )
-    file_handler.suffix = "%Y-%m-%d"
-    file_handler.namer = gzip_namer
-    file_handler.rotator = gzip_rotator
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     file_handler.setFormatter(file_formatter)
 
     # Alerts-only file handler (WARNING+)
     alerts_file = os.path.join(log_dir, "alerts.log")
-    alerts_handler = TimedRotatingFileHandler(
+    alerts_handler = ConcurrentRotatingFileHandler(
         alerts_file,
-        when="midnight",
-        interval=1,
+        maxBytes=10 * 1024 * 1024, # 10 MB
         backupCount=30,
-        encoding="utf-8"
+        encoding="utf-8",
+        use_gzip=True
     )
-    alerts_handler.suffix = "%Y-%m-%d"
-    alerts_handler.namer = gzip_namer
-    alerts_handler.rotator = gzip_rotator
     alerts_handler.setLevel(logging.WARNING)
     alerts_handler.setFormatter(file_formatter)
 

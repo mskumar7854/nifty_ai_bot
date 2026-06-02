@@ -420,6 +420,7 @@ class TradingConfig:
     max_daily_loss: float = 3000.0
     default_qty: int = 50
     slippage_buffer: float = 0.5
+    auto_shutdown_after_market: bool = False
 
 
 @dataclass
@@ -835,6 +836,7 @@ class Settings:
             max_risk_per_trade=max_trade_loss,
             max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", 3)),
             max_daily_loss=max_daily_loss,
+            auto_shutdown_after_market=os.getenv("AUTO_SHUTDOWN", "false").lower() == "true",
         )
         self.intervals = AgentIntervals(
             market=int(os.getenv("MARKET_AGENT_INTERVAL", 5)),
