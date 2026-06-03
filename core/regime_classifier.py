@@ -45,7 +45,7 @@ class RegimeClassifier:
     def __init__(self, lookback: int = 20):
         self.lookback = lookback
         
-    def classify(self, df: pd.DataFrame, snapshot_vwap: float, snapshot_atr: float, prev_day_close: float = None) -> RegimeState:
+    def classify(self, df: pd.DataFrame, snapshot_vwap: float, snapshot_atr: float, prev_day_close: float = None, current_state: RegimeState = None) -> RegimeState:
         if df is None or len(df) < self.lookback:
             return RegimeState(MarketRegime.RANGE, 0.0, "NORMAL", 0.0, 0.5)
             
@@ -90,11 +90,23 @@ class RegimeClassifier:
             
         # --- Classification Logic ---
         
-        # Volatility State Mapping for Nifty (approximate points/pct)
-        # Nifty at 22000: 0.1% = 22 pts, 0.2% = 44 pts per candle
-        if atr_pct > 0.15:
+        # Volatility State Mapping with Hysteresis
+        high_threshold = 0.15
+        low_threshold = 0.05
+        
+        if current_state:
+            prev_vol = current_state.volatility_state
+            if prev_vol == "LOW":
+                low_threshold = 0.055  # Harder to exit LOW
+            elif prev_vol == "HIGH":
+                high_threshold = 0.145 # Harder to exit HIGH
+            elif prev_vol == "NORMAL":
+                low_threshold = 0.045  # Harder to enter LOW
+                high_threshold = 0.155 # Harder to enter HIGH
+
+        if atr_pct > high_threshold:
             vol_state = "HIGH"
-        elif atr_pct < 0.05:
+        elif atr_pct < low_threshold:
             vol_state = "LOW"
         else:
             vol_state = "NORMAL"

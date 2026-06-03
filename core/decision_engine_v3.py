@@ -402,7 +402,31 @@ class DecisionEngineV3:
                 # Require range to be at least 30 points AND > 2x ATR for it to be considered a freeze-worthy spike
                 if snapshot.atr > 0 and candle_range > 30 and candle_range > 2 * snapshot.atr:
                     self.spike_freeze_until = time.time() + 600  # 10 minute freeze
-                    self.logger.warning(f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.")
+                    try:
+                        # Extract candle details for diagnostics
+                        c_open = last_candle.get('open', 0)
+                        c_high = last_candle['high']
+                        c_low = last_candle['low']
+                        c_close = last_candle.get('close', 0)
+                        c_vol = last_candle.get('volume', 0)
+                        
+                        # Calculate data staleness
+                        if hasattr(last_candle, 'name') and hasattr(last_candle.name, 'timestamp'):
+                            c_time = last_candle.name.timestamp()
+                        else:
+                            c_time = time.time()
+                        staleness = time.time() - c_time
+                        
+                        # Check for API latency (from snapshot)
+                        snap_latency = getattr(snapshot, 'latency_ms', 0)
+                        
+                        self.logger.warning(
+                            f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.\n"
+                            f"   [DIAGNOSTICS] O:{c_open:.1f} H:{c_high:.1f} L:{c_low:.1f} C:{c_close:.1f} Vol:{c_vol} | "
+                            f"Staleness: {staleness:.1f}s | API Latency: {snap_latency}ms"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.")
         
         if time.time() < self.spike_freeze_until:
             return self._no_trade_signal(snapshot, ["Phase 2 Halt: Intraday Spike Freeze active"], outputs_dict)

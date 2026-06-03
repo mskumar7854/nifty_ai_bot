@@ -27,7 +27,7 @@ class RegimeStateManager:
         
     def classify(self, df: pd.DataFrame, snapshot_vwap: float, snapshot_atr: float, prev_day_close: float = None) -> RegimeState:
         # 1. Get raw classification
-        raw_state = self.classifier.classify(df, snapshot_vwap, snapshot_atr, prev_day_close)
+        raw_state = self.classifier.classify(df, snapshot_vwap, snapshot_atr, prev_day_close, self.current_confirmed_state)
         
         # Initialize if empty
         if self.current_confirmed_state is None:

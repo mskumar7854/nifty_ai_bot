@@ -119,6 +119,26 @@ class TradeFilter:
         if not g0_pass:
             return self._kill(signal, gates, "DAILY_LIMIT_REACHED", 1, 10)
 
+        # ── Compute context signals for overrides & gates ──
+        _votes = signal.agent_votes or {}
+        _direction_val = signal.direction.value if signal.direction else "NEUTRAL"
+        _directional_votes = [
+            v for v in _votes.values()
+            if v.get("direction") in ("BULLISH", "BEARISH")
+        ]
+        _agree_count = sum(1 for v in _directional_votes if v.get("direction") == _direction_val)
+        _oppose_count = len(_directional_votes) - _agree_count
+        _total_directional = len(_directional_votes)
+        _consensus_pct = (_agree_count / _total_directional * 100) if _total_directional > 0 else 0.0
+        _has_structural_event = any(
+            kw in w for w in (signal.warnings or [])
+            for kw in ("Break of Structure", "Change of Character", "BOS", "CHoCH")
+        )
+
+        _high_conviction  = _consensus_pct >= 80.0 and _has_structural_event
+        _strong_consensus = _consensus_pct >= 90.0
+        signal_grade_str = getattr(signal.grade, "value", str(signal.grade)) if hasattr(signal, "grade") and signal.grade else "C"
+
         # ── CHOP ZONE FILTER (Phase 5 — with P2-F override support) ──
         current_time = datetime.now()
         chop_start = current_time.replace(hour=11, minute=30, second=0, microsecond=0)
@@ -135,15 +155,14 @@ class TradeFilter:
                 self.logger.info("Chop zone disabled for scheduled event on %s", today_str)
                 chop_blocked = False
 
-            # Override 2: Exceptional signal quality (A+ grade, 92%+ confidence)
-            CHOP_OVERRIDE_MIN_CONFIDENCE = 92.0
-            CHOP_OVERRIDE_MIN_GRADE = "A+"
-            signal_grade_str = signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade)
-            if (signal.confidence >= CHOP_OVERRIDE_MIN_CONFIDENCE
-                    and signal_grade_str == CHOP_OVERRIDE_MIN_GRADE):
+            # Override 2: High Conviction (Trend Continuation)
+            # Was: confidence >= 92.0 and grade == "A+" (unreachable under penalty)
+            # Now: Grade >= B and either structural event with 80% consensus or 90% consensus
+            is_good_grade = signal_grade_str in ["A+", "A", "B+", "B"]
+            if is_good_grade and (_high_conviction or _strong_consensus):
                 self.logger.info(
-                    "Chop zone override: confidence=%.2f grade=%s",
-                    signal.confidence, signal_grade_str
+                    "Chop zone override: Grade %s with consensus=%.0f%%, structural=%s",
+                    signal_grade_str, _consensus_pct, _has_structural_event
                 )
                 chop_blocked = False
 
@@ -157,67 +176,23 @@ class TradeFilter:
                 return self._kill(signal, gates, "CHOP_ZONE_ACTIVE", 1, 10)
 
         # ── GATE 1: Confidence (Grade + Context Aware Thresholds) ──
-        # v3.7: Base thresholds are grade-driven. The HIGH-CONVICTION relaxation
-        # applies to ALL grades when directional consensus is overwhelming.
-        #
-        # BASE FLOORS (static, no context):
-        #   A+: 40%   A: 45%   B+: 52%   B: 50%   C: cfg.min_signal_confidence
-        #
-        # HIGH-CONVICTION RELAXATION (applied when ALL of):
-        #   • Directional consensus ≥ 80% AND structural event (BOS/CHoCH), OR
-        #   • Directional consensus ≥ 90% (regardless of structure)
-        #   → floor drops to 35% for any grade.
-        #
-        # Rationale: a Grade B signal at 37% confidence with 6/6 agents unanimous
-        # and confirmed BOS/CHoCH is score-COMPRESSED by the regime penalty
-        # (SQUEEZE → 0.875 multiplier), not genuinely low quality. The base floor
-        # should not override a clear multi-agent structural event.
         conf = signal.confidence
-        grade_str = getattr(signal.grade, "value", str(signal.grade)) if hasattr(signal, "grade") and signal.grade else "C"
-
-        # ── Compute context signals ──
-        # CRITICAL: consensus must be calculated over DIRECTIONAL agents only.
-        # With 18 agents, 12 are often NEUTRAL (time_session, regime, learning,
-        # order_flow, institutional, etc.). Counting them in the denominator gives
-        # 6 BEARISH / 18 total = 33% — incorrectly below the 80% relaxation threshold.
-        # Correct: 6 BEARISH / 6 directional = 100% → relaxation fires.
-        _votes = signal.agent_votes or {}
-        _direction_val = signal.direction.value if signal.direction else "NEUTRAL"
-        _directional_votes = [
-            v for v in _votes.values()
-            if v.get("direction") in ("BULLISH", "BEARISH")
-        ]
-        _agree_count = sum(1 for v in _directional_votes if v.get("direction") == _direction_val)
-        _oppose_count = len(_directional_votes) - _agree_count
-        _total_directional = len(_directional_votes)
-        # Consensus = % of opinionated agents that agree with signal direction
-        _consensus_pct = (_agree_count / _total_directional * 100) if _total_directional > 0 else 0.0
-        _has_structural_event = any(
-            kw in w for w in (signal.warnings or [])
-            for kw in ("Break of Structure", "Change of Character", "BOS", "CHoCH")
-        )
-
-        # ── High-conviction context flags ──
-        # High-conviction: ≥80% directional agents agree AND structural break confirmed
-        # Strong-consensus: ≥90% directional agreement even without BOS/CHoCH
-        _high_conviction  = _consensus_pct >= 80.0 and _has_structural_event
-        _strong_consensus = _consensus_pct >= 90.0
-
+        
         # ── Grade-to-base-floor table ──
         _grade_floors = {
             "A+": 40.0,
             "A":  45.0,
             "B+": 52.0,
-            "B":  50.0,   # Explicit floor (was 80 via cfg catch-all — wrong)
+            "B":  50.0,   
             "C":  60.0,
         }
-        base_floor = _grade_floors.get(grade_str, self.cfg.min_signal_confidence)
+        base_floor = _grade_floors.get(signal_grade_str, self.cfg.min_signal_confidence)
 
         # ── Apply high-conviction relaxation ──
         if _high_conviction or _strong_consensus:
             min_conf = 35.0   # Score compressed by regime penalty, not quality failure
             self.logger.info(
-                f"[GATE 1] {grade_str} relaxed → {min_conf}%: "
+                f"[GATE 1] {signal_grade_str} relaxed → {min_conf}%: "
                 f"directional={_total_directional} agree={_agree_count} oppose={_oppose_count} "
                 f"consensus={_consensus_pct:.0f}% structural={_has_structural_event}"
             )
