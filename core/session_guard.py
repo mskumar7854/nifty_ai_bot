@@ -216,10 +216,17 @@ class ExchangeSessionOrchestrator:
 
         # Holiday auto-fallback: if we're in a live session but candle
         # data is extremely stale (>1 hr), treat as holiday / closed.
-        if state in (MarketSessionState.OPEN_STORM,
-                     MarketSessionState.LIVE_MARKET,
-                     MarketSessionState.LUNCH_DRIFT,
-                     MarketSessionState.POWER_HOUR):
+        # v3.9 FIX: Suppress during OPEN_STORM (09:15–09:28) and the first
+        # 15 minutes after market open.  At 09:15 the most recent candle
+        # is ALWAYS from the previous session (possibly 42h+ for Monday).
+        # The holiday check only makes sense once the feed has had time
+        # to deliver its first live candle (typically by 09:20).
+        _holiday_eligible_sessions = (
+            MarketSessionState.LIVE_MARKET,
+            MarketSessionState.LUNCH_DRIFT,
+            MarketSessionState.POWER_HOUR,
+        )
+        if state in _holiday_eligible_sessions:
             if last_candle_ts is not None:
                 try:
                     ts = (last_candle_ts.to_pydatetime()
@@ -227,6 +234,11 @@ class ExchangeSessionOrchestrator:
                           else last_candle_ts)
                     age_s = (datetime.now() - ts).total_seconds()
                     if age_s > _HOLIDAY_THRESHOLD_S:
+                        logger.warning(
+                            f"[HOLIDAY_FALLBACK] Candle age {age_s:.0f}s > "
+                            f"{_HOLIDAY_THRESHOLD_S}s during {state.name} — "
+                            f"assuming holiday/closed. last_candle={ts}"
+                        )
                         state = MarketSessionState.WEEKEND_CLOSED
                 except Exception:
                     pass

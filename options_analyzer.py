@@ -207,9 +207,30 @@ class OptionsAnalyzer:
                     )
                     self._logged_fo_auth_warning = True
 
-            return response.get("expiry_list", [])
+            # Extract expiry list correctly from Dhan's nested format
+            inner_data = response.get('data', {}).get('data', []) if isinstance(response.get('data'), dict) else response.get('data', [])
+            if isinstance(response.get('expiry_list'), list):
+                inner_data = response.get('expiry_list')
+            
+            if inner_data:
+                import time as _time
+                self._cached_expiries = inner_data
+                self._cached_expiries_ts = _time.time()
+            return inner_data
         except Exception as exc:
             logger.error("Options: failed to fetch expiry list — %s", exc)
+            import time as _time
+            if hasattr(self, "_cached_expiries") and self._cached_expiries:
+                import datetime as _dt
+                today_weekday = _dt.datetime.now().weekday()
+                max_age_hours = 4 if today_weekday == 3 else 24
+                
+                age_hours = (_time.time() - getattr(self, "_cached_expiries_ts", 0)) / 3600
+                if age_hours > max_age_hours:
+                    logger.warning(f"⚠️ [OPTIONS] Using STALE expiry cache (>{max_age_hours}h old: {age_hours:.1f}h). May analyze wrong strikes.")
+                else:
+                    logger.info("ℹ️ [OPTIONS] Using cached expiry list due to fetch failure.")
+                return self._cached_expiries
             return []
 
     def _fetch_option_chain(self, underlying_scrip: int, expiry_date: str) -> Dict:
@@ -253,16 +274,25 @@ class OptionsAnalyzer:
                 is_non_retryable = True
 
             if is_non_retryable:
+                import time as _time
+                fail_count = self.oi_circuit.get("failure_count", 0) + 1
+                if error_code == "805":
+                    backoff = min(30 * (2 ** (fail_count - 1)), 300)
+                else:
+                    backoff = 900
                 self.oi_circuit.update({
-                    "open_until": _time.time() + 900,
+                    "open_until": _time.time() + backoff,
                     "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT",
-                    "failure_count": self.oi_circuit["failure_count"] + 1,
+                    "failure_count": fail_count,
                     "last_error": error_code
                 })
                 logger.warning(
                     f"🚨 OptionsAnalyzer: Non-retryable error {error_code} detected! "
-                    f"Tripping circuit breaker for 15 minutes."
+                    f"Tripping circuit breaker for {backoff}s."
                 )
+
+            if response.get('status') == 'success':
+                self.oi_circuit["failure_count"] = 0
 
             # Inspect the response for F&O authorization error (nested code 808 or auth fails)
             is_fo_auth_failure = False

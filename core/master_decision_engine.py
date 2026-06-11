@@ -75,7 +75,7 @@ class ApprovalResult:
     def __str__(self):
         icon = "✅" if self.approved else "❌"
         return (
-            f"{icon} Trade Environment: {'VALID' if self.approved else 'BLOCKED'} | "
+            f"{icon} Trade Environment: {'APPROVED' if self.approved else 'BLOCKED'} | "
             f"{self.reason}"
         )
 

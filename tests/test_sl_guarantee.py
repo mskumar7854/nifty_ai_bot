@@ -21,17 +21,20 @@ class MockPositionManager:
 
 @pytest.fixture
 def manager():
-    with patch("core.position_manager.PositionManager.dhan", new_callable=MagicMock) as mock_dhan:
-        # Avoid running actual broker API
-        from core.position_manager import PositionManager
-        
-        settings = MagicMock()
+    from config.settings import Settings
+    settings = Settings()
+    settings.position.max_daily_trades = 10
+
+    from core.position_manager import PositionManager
+    
+    mock_client = MagicMock()
+    with patch("dhan_client.get_dhan_client", return_value=mock_client):
         pm = PositionManager(settings)
         
         # Patch the async wrapper directly so we can test the logic without real threads
         pm._place_order_async = AsyncMock()
         
-        return pm
+        yield pm
 
 @pytest.fixture
 def fill():
@@ -54,16 +57,16 @@ async def test_sl_timeout_but_exists(manager, fill):
     # 1. Mock place_order to raise TimeoutError
     manager._place_order_async.side_effect = asyncio.TimeoutError
     
-    # 2. Mock get_order_list to return the SL order on the very first verification attempt
-    manager.dhan.get_order_list.return_value = {
-        "status": "success",
-        "data": [{
+    # 2. Mock get_order_list to return empty on first verify, then return the SL order on the second
+    manager.dhan.get_order_list.side_effect = [
+        {"status": "success", "data": []},
+        {"status": "success", "data": [{
             "tradingSymbol": "NIFTY",
             "orderType": "SL-M",
             "orderStatus": "PENDING",
             "triggerPrice": 90.0
-        }]
-    }
+        }]}
+    ]
     
     # Needs to run within an event loop.
     result = await manager._place_sl_with_retry(fill, stop_loss_price=90.0, sl_transaction_type="SELL")
@@ -121,7 +124,7 @@ async def test_order_list_failure(manager, fill):
     """
     manager.dhan.get_order_list.side_effect = Exception("API down")
     
-    result = await manager._verify_sl_order(fill.symbol, expected_trigger=90.0)
+    result = await manager._verify_sl_order(fill.symbol, expected_trigger=90.0, client_id="SL_123")
     
     assert result is False
 
@@ -135,8 +138,12 @@ async def test_emergency_close_called_on_fatal_failure(manager, fill):
     signal.symbol = "NIFTY"
     signal.security_id = "999"
     signal.direction.value = "BUY"
+    signal.metadata = {"quote": None}
     
-    size_params = {"allowed": True, "qty": 50, "sl_price": 90.0, "lots": 1, "risk_per_lot": 500}
+    size_params = {
+        "allowed": True, "qty": 50, "sl_price": 90.0, "lots": 1, "risk_per_lot": 500,
+        "target_1": 120.0, "target_2": 150.0, "risk_amount": 500.0
+    }
     
     # Entry succeeds
     manager._place_order_async.return_value = {"status": "success", "data": {"orderId": "ENT123"}}
@@ -155,11 +162,7 @@ async def test_emergency_close_called_on_fatal_failure(manager, fill):
     
     assert result is None
     manager._halt_trading.assert_called_once()
-    manager._emergency_close_position.assert_called_once_with(
-        # The fill object is passed as first arg
-        # We can check the first arg is an EntryResult
-        # with the correct symbol
-    )
+    assert manager._emergency_close_position.call_count == 1
     args, kwargs = manager._emergency_close_position.call_args
     assert args[0].symbol == "NIFTY"
     assert args[1] == "SELL" # transaction type for SL

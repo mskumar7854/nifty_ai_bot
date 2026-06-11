@@ -280,6 +280,12 @@ class DataManager:
             return
 
         if self.data_source == "api":
+            # ── DNS Guard: Don't attempt bootstrap if DNS is broken ──
+            from utils.dns_health import dns_ok
+            if not dns_ok(force=True):
+                self.logger.error("🌐 DNS_OUTAGE: Skipping bootstrap — DNS resolution failed. Will retry on next cycle.")
+                return
+
             df = await asyncio.to_thread(self._fetch_history_for_bootstrap)
             if df is not None and not df.empty:
                 self.logger.info("✅ Bootstrap completed successfully. Setting _warmup_complete = True")
@@ -298,6 +304,11 @@ class DataManager:
         import asyncio
         
         if not getattr(self, '_warmup_complete', False):
+            # ── DNS Guard: Don't force bootstrap if DNS is broken ──
+            from utils.dns_health import dns_ok
+            if not dns_ok():
+                self.logger.warning("🌐 DNS_OUTAGE: Skipping forced bootstrap — DNS unavailable.")
+                return self.ohlcv_data, self._empty_snapshot()
             self.logger.warning("⚠️ update_latest_candle_async called before warmup! Forcing bootstrap.")
             await self.startup_bootstrap(session)
             
@@ -333,6 +344,7 @@ class DataManager:
                 if fingerprint != self._last_ohlcv_fingerprint:
                     self._last_ohlcv_fingerprint = fingerprint
                     self.last_market_activity_ts = datetime.now()
+                    self.logger.info(f"📡 MARKET_ACTIVITY_UPDATE ts={self.last_market_activity_ts} source=tick (fingerprint changed: {fingerprint})")
                 else:
                     # OHLCV unchanged — but use the candle's own timestamp as
                     # a floor so the orchestrator doesn't see phantom staleness.
@@ -347,6 +359,7 @@ class DataManager:
                         if (self.last_market_activity_ts is None or
                                 candle_ts > self.last_market_activity_ts):
                             self.last_market_activity_ts = candle_ts
+                            self.logger.info(f"📡 MARKET_ACTIVITY_UPDATE ts={self.last_market_activity_ts} source=candle_ts (candle_ts newer)")
                     except Exception:
                         pass  # Candle ts fallback is best-effort
             except Exception:
@@ -410,7 +423,13 @@ class DataManager:
             self._oi_updater_last_tick = _time.time()
             try:
                 now = _time.time()
-                
+
+                # ── DNS Guard: Don't attempt OI fetch if DNS is broken ──
+                from utils.dns_health import dns_ok
+                if not dns_ok():
+                    await asyncio.sleep(10)  # Wait longer during DNS outage
+                    continue
+
                 # Check circuit breaker
                 if now < self.oi_circuit["open_until"]:
                     if not self.oi_circuit.get("warning_logged", False):
@@ -443,10 +462,11 @@ class DataManager:
                 for attempt in range(3):
                     try:
                         future = _OI_EXECUTOR.submit(
-                            dhan.option_chain,
-                            under_security_id=security_id_int,
-                            under_exchange_segment="IDX_I",
-                            expiry=expiry_str
+                            lambda: dhan.option_chain(
+                                under_security_id=security_id_int,
+                                under_exchange_segment="IDX_I",
+                                expiry=expiry_str
+                            )
                         )
                         # We use asyncio.to_thread here to not block the updater loop on future.result()
                         response = await asyncio.to_thread(future.result, _DHAN_FETCH_TIMEOUT)
@@ -468,13 +488,18 @@ class DataManager:
                                 break
 
                         if is_non_retryable:
+                            fail_count = self.oi_circuit.get("failure_count", 0) + 1
+                            if error_code == "805":
+                                backoff = min(30 * (2 ** (fail_count - 1)), 300)
+                            else:
+                                backoff = 900
                             self.oi_circuit.update({
-                                "open_until": _time.time() + 900,
+                                "open_until": _time.time() + backoff,
                                 "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT" if error_code == "805" else "PERMISSION_DENIED",
-                                "failure_count": self.oi_circuit["failure_count"] + 1,
+                                "failure_count": fail_count,
                                 "last_error": error_code
                             })
-                            self.logger.warning(f"🚨 OI Updater: Non-retryable error {error_code}! Tripping circuit.")
+                            self.logger.warning(f"🚨 OI Updater: Non-retryable error {error_code}! Tripping circuit for {backoff}s.")
                             self._save_circuit_state()
                             break
                             
@@ -514,6 +539,7 @@ class DataManager:
                     self._oi_fail_count += 1
                     self.logger.warning(f"⚠️ OI Updater fail: {last_error}")
                 else:
+                    self.oi_circuit["failure_count"] = 0
                     self._oi_success_count += 1
                     self._oi_last_success_ts = _time.time()
                     self._oi_last_fetch = _time.time()
@@ -617,21 +643,29 @@ class DataManager:
                     # 🔒 SAFETY: Run in bounded executor with hard timeout.
                     # Uses quote_circuit (separate from oi_circuit) so a rate-limit
                     # here never silences the 60s OI analytics fetch.
+                    t_start = _time.perf_counter()
                     future = _OI_EXECUTOR.submit(
-                        dhan.option_chain,
-                        under_security_id=security_id_int,
-                        under_exchange_segment="IDX_I",
-                        expiry=expiry
+                        lambda: dhan.option_chain(
+                            under_security_id=security_id_int,
+                            under_exchange_segment="IDX_I",
+                            expiry=expiry,
+                            is_execution=True  # type: ignore
+                        )
                     )
                     try:
                         response = future.result(timeout=_DHAN_FETCH_TIMEOUT)
+                        fetch_time_ms = (_time.perf_counter() - t_start) * 1000
                         self._quote_timeout_count = 0  # Reset on success
                     except _cf.TimeoutError:
+                        fetch_time_ms = (_time.perf_counter() - t_start) * 1000
                         future.cancel()
                         self._quote_timeout_count += 1
                         self.logger.error(
-                            f"⏱️ Quote fetch TIMEOUT after {_DHAN_FETCH_TIMEOUT:.0f}s | "
+                            f"⏱️ Quote fetch TIMEOUT after {_DHAN_FETCH_TIMEOUT:.0f}s ({fetch_time_ms:.1f}ms) | "
                             f"consecutive={self._quote_timeout_count} | Worker abandoned."
+                        )
+                        self.logger.warning(
+                            f"🔍 QUOTE DEBUG | strike={strike} {opt_type} TIMEOUT | time={fetch_time_ms:.1f}ms"
                         )
                         if self._quote_timeout_count >= 3:
                             self.quote_circuit.update({
@@ -664,20 +698,26 @@ class DataManager:
                             break
 
                     if is_non_retryable:
+                        fail_count = self.quote_circuit.get("failure_count", 0) + 1
+                        if error_code == "805":
+                            backoff = min(30 * (2 ** (fail_count - 1)), 300)
+                        else:
+                            backoff = 900
                         # ── Use quote_circuit (NOT oi_circuit) ──
                         self.quote_circuit.update({
-                            "open_until": _time.time() + 900,
+                            "open_until": _time.time() + backoff,
                             "reason": "AUTH_FAILURE" if error_code == "808" else "RATE_LIMIT",
-                            "failure_count": self.quote_circuit["failure_count"] + 1,
+                            "failure_count": fail_count,
                             "last_error": error_code
                         })
                         self.logger.warning(
                             f"🚨 DataManager: Non-retryable quote error {error_code}! "
-                            f"Tripping quote_circuit for 15 minutes."
+                            f"Tripping quote_circuit for {backoff}s."
                         )
                         raise ValueError(f"Non-retryable Dhan API error: {error_code}")
                     
                     if response.get('status') == 'success':
+                        self.quote_circuit["failure_count"] = 0
                         raw_data = response.get('data', {})
                         data_block = raw_data.get('data', {}) if isinstance(raw_data, dict) else {}
 
@@ -698,17 +738,39 @@ class DataManager:
                         for row in chain:
                             if row['strike'] == target_strike:
                                 opt_data = row['ce'] if opt_type == 'CE' else row['pe']
-                                return OptionQuote(
+                                
+                                ltp = float(opt_data.get('lastPrice', opt_data.get('last_price', 0)))
+                                bid = float(opt_data.get('bidPrice', opt_data.get('bid_price', 0)) or ltp)
+                                ask = float(opt_data.get('askPrice', opt_data.get('ask_price', 0)) or ltp)
+                                
+                                self.logger.info(
+                                    f"🔍 QUOTE DEBUG | strike={strike} | expiry={expiry} | "
+                                    f"type={opt_type} | bid={bid} | ask={ask} | ltp={ltp} | "
+                                    f"time={fetch_time_ms:.1f}ms"
+                                )
+                                
+                                quote_obj = OptionQuote(
                                     security_id=opt_data.get('securityId', opt_data.get('security_id', '')),
                                     symbol=opt_data.get('tradingSymbol', opt_data.get('trading_symbol', f"NIFTY {strike} {opt_type}")),
-                                    ltp=float(opt_data.get('lastPrice', opt_data.get('last_price', 0))),
-                                    bid=float(opt_data.get('bidPrice', opt_data.get('bid_price', 0)) or opt_data.get('lastPrice', opt_data.get('last_price', 0))),
-                                    ask=float(opt_data.get('askPrice', opt_data.get('ask_price', 0)) or opt_data.get('lastPrice', opt_data.get('last_price', 0))),
+                                    ltp=ltp,
+                                    bid=bid,
+                                    ask=ask,
                                     volume=int(opt_data.get('volume', 0)),
                                     oi=int(opt_data.get('openInterest', opt_data.get('oi', 0)))
                                 )
+                                if isinstance(response, dict) and "cache_metadata" in response:
+                                    meta = response["cache_metadata"]
+                                    quote_obj.is_stale = meta.get("is_stale", False)
+                                    quote_obj.cache_age = meta.get("cache_age", 0.0)
+                                    quote_obj.cache_source = meta.get("source", "api")
+                                return quote_obj
+                        
+                        self.logger.warning(
+                            f"🔍 QUOTE DEBUG | strike={strike} {opt_type} NOT FOUND in chain | time={fetch_time_ms:.1f}ms"
+                        )
                 except Exception as e:
                     self.logger.error(f"Option quote fetch failed: {e}")
+                    self.logger.warning(f"🔍 QUOTE DEBUG | strike={strike} {opt_type} FAILED | error={str(e)}")
                     return None
 
         # 2. SIMULATION MODE (Synthetic Option Pricing)
@@ -932,6 +994,8 @@ class DataManager:
         """
         Exposes active API cadence & polling metrics for characterization.
         """
+        from utils.dns_health import get_dns_status
+
         avg_latency = 0.0
         if self._api_fetch_count > 0:
             avg_latency = self._api_total_latency_ms / self._api_fetch_count
@@ -942,7 +1006,7 @@ class DataManager:
         oi_cooldown = max(0, int(self.oi_circuit["open_until"] - now_cb))
         quote_cooldown = max(0, int(self.quote_circuit["open_until"] - now_cb))
 
-        return {
+        result = {
             "last_api_fetch_ts": self._last_api_fetch_ts,
             "cache_hit_count": self._api_cache_hit_count,
             "api_fetch_count": self._api_fetch_count,
@@ -957,12 +1021,12 @@ class DataManager:
             "last_quote_error": self.quote_circuit["last_error"],
             "last_oi_success": datetime.fromtimestamp(self._oi_last_success_ts).strftime("%Y-%m-%d %H:%M:%S") if self._oi_last_success_ts > 0 else None,
             "executor_active_threads": len(_OI_EXECUTOR._threads),
-
             "executor_pending_tasks": _OI_EXECUTOR._work_queue.qsize(),
             "oi_updater_alive": self._oi_updater_running and (time.time() - self._oi_updater_last_tick < 120),
             "oi_updater_age_sec": int(time.time() - self._oi_updater_last_tick) if self._oi_updater_last_tick > 0 else -1,
-
         }
+        result.update(get_dns_status())
+        return result
 
     # ============================================
     # SIMULATED DATA (for development/testing)
@@ -1145,7 +1209,25 @@ class DataManager:
             self.df_1m = df
             self.df_5m = self._resample_data(df, self.settings.trend_timeframe)
             self.ohlcv_data = df
-            
+
+            # ── CRITICAL: Seed last_market_activity_ts from bootstrap ──
+            # Without this, the orchestrator sees None → DataHealth.DEAD
+            # and the system stays DEGRADED until an incremental fetch
+            # succeeds (which itself requires LIVE session + is_market_open).
+            # This breaks the chicken-and-egg deadlock.
+            try:
+                last_ts = df.index[-1]
+                if hasattr(last_ts, "to_pydatetime"):
+                    last_ts = last_ts.to_pydatetime()
+                if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is not None:
+                    last_ts = last_ts.replace(tzinfo=None)
+                self.last_market_activity_ts = last_ts
+                self.logger.info(
+                    f"📌 Bootstrap seeded last_market_activity_ts = {last_ts}"
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to seed last_market_activity_ts from bootstrap: {e}")
+
             # Capping memory
             MAX_CANDLES = 2000
             if len(self.ohlcv_data) > MAX_CANDLES:
@@ -1158,6 +1240,20 @@ class DataManager:
             return pd.DataFrame()
 
 
+    @staticmethod
+    def _classify_api_failure(error: Exception) -> str:
+        """Classify API failure for circuit breaker decisions."""
+        err_str = str(error).lower()
+        if "getaddrinfo" in err_str or "name resolution" in err_str or "resolve" in err_str:
+            return "DNS_FAILURE"
+        if "connection" in err_str or "timeout" in err_str or "reset" in err_str:
+            return "NETWORK_FAILURE"
+        if "401" in err_str or "403" in err_str or "808" in err_str or "dh-901" in err_str:
+            return "AUTH_FAILURE"
+        if "429" in err_str or "805" in err_str or "rate" in err_str:
+            return "RATE_LIMIT"
+        return "API_FAILURE"
+
     def _fetch_from_api_incremental(self) -> pd.DataFrame:
         """
         🚀 RUNTIME OPTIMIZATION: Incremental streaming update.
@@ -1165,6 +1261,11 @@ class DataManager:
         """
         import time
         if not self._is_market_open_safe():
+            return self.ohlcv_data
+
+        # ── DNS Guard: Don't attempt API call if DNS is broken ──
+        from utils.dns_health import dns_ok
+        if not dns_ok():
             return self.ohlcv_data
 
         if time.time() < self._api_circuit_breaker_until:
@@ -1176,6 +1277,11 @@ class DataManager:
             return self.ohlcv_data
 
         try:
+            now = time.time()
+            if hasattr(self, '_last_api_fetch_ts') and (now - self._last_api_fetch_ts) < 0.9:
+                if self.ohlcv_data is not None and not self.ohlcv_data.empty:
+                    return self.ohlcv_data
+
             dhan = get_dhan_client()
 
             if self._api_security_id is None:
@@ -1230,8 +1336,9 @@ class DataManager:
             df_new.sort_index(inplace=True)
             df_new = df_new[~df_new.index.duplicated(keep="last")]
 
-            if len(df_new) > 1:
-                df_new = df_new.iloc[:-1]
+            # Keep all candles, including the active mutating one
+            # if len(df_new) > 1:
+            #     df_new = df_new.iloc[:-1]
 
             if df_new.empty:
                 return self.ohlcv_data
@@ -1264,9 +1371,14 @@ class DataManager:
             return self.ohlcv_data
 
         except Exception as e:
+            failure_type = self._classify_api_failure(e)
             self._api_failures += 1
-            self.logger.error(f"Incremental fetch exception: {e}")
-            if self._api_failures >= 3:
+            self.logger.error(f"Incremental fetch exception [{failure_type}]: {e}")
+            if failure_type == "DNS_FAILURE":
+                # Don't trip circuit breaker for DNS — it's infrastructure, not API.
+                # dns_health.py will gate future calls anyway.
+                pass
+            elif self._api_failures >= 3:
                 self._api_circuit_breaker_until = time.time() + 60
             return self.ohlcv_data
 

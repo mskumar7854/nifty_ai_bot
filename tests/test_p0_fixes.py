@@ -75,7 +75,9 @@ class TestReconciliation:
         system.trading_enabled = True
         
         # Mock broker returning an orphan
-        with patch("dhan_client.get_dhan_client") as mock_get_dhan:
+        with patch("dhan_client.get_dhan_client") as mock_get_dhan, \
+             patch("core.system_state.get_state_manager") as mock_get_state_mgr:
+            
             mock_dhan = MagicMock()
             mock_dhan.get_positions.return_value = {
                 "status": "success",
@@ -86,11 +88,17 @@ class TestReconciliation:
             }
             mock_get_dhan.return_value = mock_dhan
             
-            from main import NiftyAISystem
-            with pytest.raises(SystemExit):
-                asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
+            mock_state_mgr = MagicMock()
+            mock_get_state_mgr.return_value = mock_state_mgr
             
+            from main import NiftyAISystem
+            result = asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
+            
+            assert result is False
             assert system.trading_enabled is False, "Trading must halt on orphan"
+            mock_state_mgr.trigger_structural_halt.assert_called_with(
+                "Orphaned positions detected on broker: NIFTY24500CE (Qty: 50)"
+            )
     
     def test_simulation_skips_reconciliation(self):
         system = MagicMock()
@@ -103,13 +111,14 @@ class TestReconciliation:
         assert system.trading_enabled is True  # Still enabled
 
     def test_failed_fetch_halts_startup_in_live(self):
-        """Failure to fetch positions at startup in LIVE mode must halt startup and raise SystemExit."""
+        """Failure to fetch positions at startup in LIVE mode must halt startup."""
         system = MagicMock()
         system.is_simulation = False
         system.trading_enabled = True
-        system.state_mgr = MagicMock()
         
-        with patch("dhan_client.get_dhan_client") as mock_get_dhan:
+        with patch("dhan_client.get_dhan_client") as mock_get_dhan, \
+             patch("core.system_state.get_state_manager") as mock_get_state_mgr:
+            
             mock_dhan = MagicMock()
             mock_dhan.get_positions.return_value = {
                 "status": "failure",
@@ -117,12 +126,16 @@ class TestReconciliation:
             }
             mock_get_dhan.return_value = mock_dhan
             
-            from main import NiftyAISystem
-            with pytest.raises(SystemExit):
-                asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
+            mock_state_mgr = MagicMock()
+            mock_get_state_mgr.return_value = mock_state_mgr
             
-            system.state_mgr.set_state.assert_called_with(
-                "HALTED", "Startup Broker Reconciliation Failed: Could not fetch broker positions for reconciliation", source="system"
+            from main import NiftyAISystem
+            result = asyncio.run(NiftyAISystem._reconcile_broker_positions(system))
+            
+            assert result is False
+            assert system.trading_enabled is False
+            mock_state_mgr.set_state.assert_called_with(
+                "HALTED", "Startup Broker Reconciliation Failed: Could not fetch broker positions for reconciliation after 3 attempts", source="system"
             )
 
 # Miss 1 - Agent Abstain test

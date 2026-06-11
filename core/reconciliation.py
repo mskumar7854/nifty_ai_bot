@@ -123,12 +123,23 @@ class ReconciliationEngine:
             i_symbols = {p.symbol for p in internal_positions}
             for sym, b_pos in b_map.items():
                 if sym not in i_symbols:
+                    orphan_key = f"{sym}"
+                    if not hasattr(self.pm, "_acknowledged_orphans"):
+                        self.pm._acknowledged_orphans = set()
+                    
+                    if orphan_key in self.pm._acknowledged_orphans:
+                        continue
+
                     self._journal_event(
-                        Severity.FATAL,
-                        "HALT_SYSTEM",
+                        Severity.DANGEROUS,
+                        "DEGRADE_AND_BLOCK",
                         {"internal_qty": 0, "broker_qty": b_pos.get("netQty"), "symbol": sym, "reason": "Unknown live exposure"}
                     )
-                    self.pm._halt_trading(f"FATAL RECON: Unknown live exposure {sym}")
+                    self.pm.is_halted = True
+                    self.pm.halt_reason = f"DANGEROUS: Unknown live exposure {sym}"
+                    self.pm._acknowledged_orphans.add(orphan_key)
+                    import time as _time
+                    self.pm.halt_auto_resume_ts = _time.time() + 1800 # 30 mins auto-resume
                     return
 
             # Note: Checking if Broker SL is missing would require pulling `dhan.get_order_list()`

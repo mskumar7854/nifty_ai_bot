@@ -120,13 +120,17 @@ class TradeFilter:
             failed_gates_count += 1
             if not primary_kill_reason: primary_kill_reason = "DAILY_LIMIT_REACHED"
 
-        # ── CHOP ZONE FILTER (Phase 5 — with P2-F override support) ──
+        # ── CHOP ZONE FILTER (Phase 5 — with consensus-based override) ──
+        # v3.9: Ported from trade_filter_rewrite.py. The old override required
+        # A+ grade + 92% confidence — unreachable under regime penalty compression
+        # (SQUEEZE → 0.875 multiplier caps all scores well below 92%).
+        # New: Override fires on directional consensus, which is the real signal.
         current_time = datetime.now()
         chop_start = current_time.replace(hour=11, minute=30, second=0, microsecond=0)
         chop_end = current_time.replace(hour=13, minute=30, second=0, microsecond=0)
         if chop_start <= current_time <= chop_end:
-            # P2-F: Check override conditions before blocking
             chop_blocked = True
+            _chop_override_reason = ""
 
             # Override 1: Scheduled event date (RBI day, budget, etc.)
             import os
@@ -135,25 +139,73 @@ class TradeFilter:
             if disable_chop_date and today_str == disable_chop_date:
                 self.logger.info("Chop zone disabled for scheduled event on %s", today_str)
                 chop_blocked = False
+                _chop_override_reason = "SCHEDULED_EVENT"
 
-            # Override 2: Exceptional signal quality (A+ grade, 92%+ confidence)
-            CHOP_OVERRIDE_MIN_CONFIDENCE = 92.0
-            CHOP_OVERRIDE_MIN_GRADE = "A+"
+            # Override 2: High Conviction (Consensus-Based)
+            # Compute directional consensus from agent_votes
+            _chop_votes = signal.agent_votes or {}
+            _chop_direction_val = signal.direction.value if signal.direction else "NEUTRAL"
+            _chop_directional = [
+                v for v in _chop_votes.values()
+                if v.get("direction") in ("BULLISH", "BEARISH")
+            ]
+            _chop_agree = sum(1 for v in _chop_directional if v.get("direction") == _chop_direction_val)
+            _chop_total_dir = len(_chop_directional)
+            _chop_consensus = (_chop_agree / _chop_total_dir * 100) if _chop_total_dir > 0 else 0.0
+            _chop_structural = any(
+                kw in w for w in (signal.warnings or [])
+                for kw in ("Break of Structure", "Change of Character", "BOS", "CHoCH")
+            )
+
+            # High conviction: ≥80% consensus AND structural event
+            _chop_high_conviction = _chop_consensus >= 80.0 and _chop_structural
+            # Strong consensus: ≥90% agreement (structural not required)
+            _chop_strong_consensus = _chop_consensus >= 90.0
+
             signal_grade_str = signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade)
-            if (signal.confidence >= CHOP_OVERRIDE_MIN_CONFIDENCE
-                    and signal_grade_str == CHOP_OVERRIDE_MIN_GRADE):
+            is_good_grade = signal_grade_str in ["A+", "A", "B+", "B"]
+
+            if chop_blocked and is_good_grade and (_chop_high_conviction or _chop_strong_consensus):
                 self.logger.info(
-                    "Chop zone override: confidence=%.2f grade=%s",
-                    signal.confidence, signal_grade_str
+                    "Chop zone override: Grade %s with consensus=%.0f%%, structural=%s",
+                    signal_grade_str, _chop_consensus, _chop_structural
                 )
                 chop_blocked = False
+                _chop_override_reason = (
+                    f"HIGH_CONVICTION(consensus={_chop_consensus:.0f}%,structural={_chop_structural})"
+                    if _chop_high_conviction
+                    else f"STRONG_CONSENSUS(consensus={_chop_consensus:.0f}%)"
+                )
+
+            # ── Diagnostic log: always fires during chop window ──
+            _chop_decision = "ALLOW" if not chop_blocked else "BLOCK"
+            self.logger.info(
+                f"[CHOP_ZONE] grade={signal_grade_str} conf={signal.confidence:.1f} "
+                f"consensus={_chop_consensus:.1f} structural={_chop_structural} "
+                f"good_grade={is_good_grade} strong_consensus={_chop_strong_consensus} "
+                f"high_conviction={_chop_high_conviction} "
+                f"decision={_chop_decision} override_reason={_chop_override_reason or 'NONE'}"
+            )
+
+            # ── Track chop zone stats for daily summary ──
+            if not hasattr(self, '_chop_stats'):
+                self._chop_stats = {"blocked": 0, "overridden": 0, "allowed": 0}
+            if chop_blocked:
+                self._chop_stats["blocked"] += 1
+            elif _chop_override_reason:
+                self._chop_stats["overridden"] += 1
+            else:
+                self._chop_stats["allowed"] += 1
 
             if chop_blocked:
                 gates.append({
                     "gate": "Chop Zone",
                     "pass": False,
                     "score": 0,
-                    "detail": "11:30 to 1:30 IST Chop Zone blocking entries.",
+                    "detail": (
+                        f"11:30-13:30 IST Chop Zone | consensus={_chop_consensus:.0f}% "
+                        f"grade={signal_grade_str} structural={_chop_structural}"
+                    ),
                 })
                 failed_gates_count += 1
                 if not primary_kill_reason: primary_kill_reason = "CHOP_ZONE_ACTIVE"
@@ -614,4 +666,5 @@ class TradeFilter:
                     reverse=True,
                 )[:5]
             ),
+            "chop_zone_stats": getattr(self, '_chop_stats', {"blocked": 0, "overridden": 0, "allowed": 0}),
         }

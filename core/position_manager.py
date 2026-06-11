@@ -299,6 +299,7 @@ class PositionManager:
         self.is_halted = False
         self.halt_reason = ""
         self.last_loss_time: Optional[datetime] = None
+        self._acknowledged_orphans: set[str] = set()
 
         # ── P0-C: Deadman watchdog heartbeat ──
         self._last_heartbeat_time: float = time.time()
@@ -386,7 +387,17 @@ class PositionManager:
 
         # Check halt
         if self.is_halted:
-            return False, f"HALTED: {self.halt_reason}"
+            if hasattr(self, 'halt_auto_resume_ts') and self.halt_auto_resume_ts:
+                import time
+                if time.time() > self.halt_auto_resume_ts:
+                    self.is_halted = False
+                    self.halt_reason = ""
+                    self.halt_auto_resume_ts = 0
+                    self.logger.info("✅ Auto-resume timeout reached. System un-halted.")
+                else:
+                    return False, f"HALTED: {self.halt_reason}"
+            else:
+                return False, f"HALTED: {self.halt_reason}"
 
         # Check daily trade limit
         if self.today_stats.trades_taken >= \
@@ -724,6 +735,10 @@ class PositionManager:
     ) -> Optional[OpenPosition]:
         """Open a new position"""
 
+        if self.is_halted:
+            self.logger.warning(f"Position entry blocked: SYSTEM HALTED ({self.halt_reason})")
+            return None
+
         if not size_params.get("allowed", False):
             self.logger.warning(
                 f"Position blocked: {size_params.get('reason')}"
@@ -959,8 +974,6 @@ class PositionManager:
                             break
                 except Exception as pe:
                     self.logger.warning(f"Error polling recovery status: {pe}")
-                # Use a small non-blocking delay since this is a synchronous sleep in async function
-                import asyncio
                 await asyncio.sleep(1.0)
                 
             if fill_found:

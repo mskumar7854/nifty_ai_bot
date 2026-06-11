@@ -242,6 +242,7 @@ class NiftyAISystem:
         self.last_cycle_time = 0
         self.no_trade_streak = 0  # Fix #4: Trade Frequency Guard counter
         self.last_candle_timestamp = None
+        self._last_telemetry_log_ts = 0.0 # Force log telemetry on first cycle status
 
         logger.info(
             f"Initializing v4.6.1 | "
@@ -705,16 +706,13 @@ class NiftyAISystem:
                 if self.cycle_count % 300 == 0:
                     logger.info(f"📡 Posture is {posture.name}. Monitoring only.")
                 await self._monitor_only_async(session)
-                # We do NOT return here, so that data fetch and dashboard update still occur!
-                # We will prevent trade entry execution further down instead.
-                trade_allowed = False
+                return
             else:
                 if not pre_check.approved:
                     if self.cycle_count % 300 == 0:
                         logger.info(f"⛔ Master Gate: {pre_check.reason}")
                     await self._monitor_only_async(session)
-                    # Same logic: continue cycle for telemetry but block execution
-                    trade_allowed = False
+                    return
                 else:
                     trade_allowed = True
 
@@ -735,7 +733,7 @@ class NiftyAISystem:
                 self.observer.on_oi_update(source_str)
 
             # ── 4. Monitor positions ──
-            self._monitor_positions(snapshot, df)
+            await self._monitor_positions(snapshot, df)
 
             # ── 5. Check pending entries ──
             confirmed = self.entry_engine.check_confirmations(
@@ -925,7 +923,7 @@ class NiftyAISystem:
             self.simulation.record_signal(passed=filter_result.passed)
 
             if not filter_result.passed:
-                rej_reason = filter_result.rejection_reason if hasattr(filter_result, 'rejection_reason') else '10-Gate Filter'
+                rej_reason = filter_result.kill_reason or '10-Gate Filter'
                 log_entry["risk_reason"] = f"Filter Rejected: {rej_reason}"
                 self.perf_logger.log_signal(log_entry)
                 _log_canonical_truth(False, f"Gate Filter: {rej_reason}")
@@ -1066,7 +1064,6 @@ class NiftyAISystem:
                 
             # Filter passed -> assign trade ID
             trade_id = f"{int(time.time())}_{signal.signal_type.value}"
-            log_entry["trade_executed"] = True
             log_entry["entry_price"] = snapshot.price
             log_entry["trade_id"] = trade_id
             signal.id = trade_id  # Attach to signal so exit logging can map it
@@ -1113,7 +1110,9 @@ class NiftyAISystem:
             liquidity_blocked = False
             reject_reason = ""
             
-            if quote_age_ms > 1000 and self.data_manager.data_source == "api":
+            if getattr(quote, "is_stale", False) and getattr(quote, "cache_age", 0.0) > 15.0:
+                liquidity_blocked, reject_reason = True, f"Stale cache quote ({quote.cache_age:.1f}s)"
+            elif quote_age_ms > 1000 and self.data_manager.data_source == "api":
                 liquidity_blocked, reject_reason = True, f"Stale quote ({quote_age_ms:.0f}ms)"
             elif quote.bid <= 0:
                 liquidity_blocked, reject_reason = True, "Bid <= 0"
@@ -1129,6 +1128,12 @@ class NiftyAISystem:
                     f"🛡️ [LIQUIDITY GATE] Trade rejected: {reject_reason} | "
                     f"Bid: {quote.bid}, Ask: {quote.ask}, Vol: {quote.volume}"
                 )
+                
+                # Increment telemetry metrics for signal blocks due to quote issues
+                from dhan_client import get_dhan_telemetry
+                t_meta = get_dhan_telemetry()
+                if "Stale" in reject_reason or "Bid" in reject_reason or "Spread" in reject_reason or "Ask" in reject_reason:
+                    t_meta["signals_blocked_by_quotes"] += 1
                 
                 # Emit Rejection Telemetry for Spread Gate
                 regime_val = signal.regime.value if hasattr(signal.regime, "value") else str(getattr(signal, "regime", "UNKNOWN"))
@@ -1166,6 +1171,11 @@ class NiftyAISystem:
                 _log_canonical_truth(False, f"Liquidity Block: {reject_reason}")
                 return
             
+            # Increment telemetry if setup saved by cached quote
+            if getattr(quote, "cache_source", "api") == "cache":
+                from dhan_client import get_dhan_telemetry
+                get_dhan_telemetry()["signals_saved_by_cache"] += 1
+            
             # Translate Spot targets to Premium targets
             premium_levels = OptionExecutionTranslator.translate_levels(signal, quote, instrument)
             
@@ -1187,6 +1197,7 @@ class NiftyAISystem:
             )
             _log_canonical_truth(True, "APPROVED")
             
+            log_entry["trade_executed"] = True
             self.perf_logger.log_signal(log_entry)
 
             # ── P0.6: DECISION SNAPSHOT (Pre-Execution Truth Capture) ──
@@ -1483,15 +1494,23 @@ class NiftyAISystem:
                         if not breaker.check_position_mismatch(internal_count, broker_count):
                             self.trading_enabled = False
 
-                    # Feed staleness: compare against last data fetch
-                    _, snap = await self.data_manager.update_latest_candle_async(None)
-                    if snap:
-                        age_s = (datetime.now() - snap.timestamp).total_seconds()
+                    # Feed staleness: read-only check against last data mutation
+                    # (Previously called update_latest_candle_async(None) which
+                    # was side-effecting AND blocked during pre-market)
+                    if self.data_manager.last_market_activity_ts:
+                        age_s = (datetime.now() - self.data_manager.last_market_activity_ts).total_seconds()
                         self.broker_health.feed_delay_s = age_s
-                        if age_s > 60:
+
+                        # Only warn during active sessions — stale data during
+                        # STANDBY/PRE_MARKET is expected, not an anomaly.
+                        posture = orchestrator.get_posture(self.data_manager.last_market_activity_ts)
+                        logger.info(f"🩺 DataHealth Check | last_activity={self.data_manager.last_market_activity_ts} age={age_s:.1f}s")
+                        if age_s > 60 and posture not in (RuntimePosture.STANDBY, RuntimePosture.OBSERVATION):
                             logger.warning(
                                 "⚠️ [BROKER HEALTH] Feed stale by %.0fs", age_s
                             )
+                    else:
+                        self.broker_health.feed_delay_s = -1  # No data yet
                 except asyncio.TimeoutError:
                     latency_ms = 5000.0  # Treat timeout as 5s
                     self.broker_health.record_api_latency(latency_ms)
@@ -1537,7 +1556,7 @@ class NiftyAISystem:
             logger.error("[OPTIONS] fetch_options_sentiment failed: %s", exc)
             return {"available": False, "sentiment": "neutral"}
 
-    def _monitor_positions(self, snapshot, df):
+    async def _monitor_positions(self, snapshot, df):
         if self.is_simulation:
             closed = self.simulation.update_open_trades(snapshot.price, snapshot, self.data_manager)
             for trade in closed:
@@ -1575,10 +1594,11 @@ class NiftyAISystem:
                         label=f"notify_trade_close:{trade_id}"
                     )
         else:
-            actions = self.position_manager.update_positions(snapshot.price)
+            actions = await asyncio.to_thread(self.position_manager.update_positions, snapshot.price)
             for action in actions:
                 if action["action"] in ("CLOSE", "FULL_CLOSE"):
-                    result = self.position_manager.close_position(
+                    result = await asyncio.to_thread(
+                        self.position_manager.close_position,
                         action["position_id"], action["price"], action.get("reason", "")
                     )
                     if result and result.get("type") == "full":
@@ -1627,7 +1647,7 @@ class NiftyAISystem:
         try:
             df, snapshot = await self.data_manager.update_latest_candle_async(session)
             if snapshot and snapshot.price > 0:
-                self._monitor_positions(snapshot, df)
+                await self._monitor_positions(snapshot, df)
                 self._update_dashboard(snapshot, None)
                 if df is not None and not df.empty:
                     self.last_candle_timestamp = df.index[-1]
@@ -1900,9 +1920,41 @@ class NiftyAISystem:
                 logger.error("Deadman watchdog error: %s", e)
 
     def _log_status(self):
+        import time as _time
+        from dhan_client import get_dhan_telemetry
+
+        # 1. Print base capital status
         if not self.is_simulation:
             pm = self.position_manager
             logger.info(f"Capital: ₹{pm.total_capital:,.0f} | Risk PnL: ₹{self.risk_manager.daily_pnl:,.0f}")
+
+        # 2. Print concise Dhan telemetry status
+        t = get_dhan_telemetry()
+        logger.info(
+            f"📡 Dhan Telemetry | Requests: {t['quote_requests']} | Hit Rate: {t['cache_hit_rate']}% | "
+            f"API Calls: {t['quote_api_calls']} | 805s: {t['quote_805_errors']} | Trips: {t['circuit_breaker_trips']} | "
+            f"Stale: {t['stale_cache_served']} | Blocked: {t['signals_blocked_by_quotes']} | Saved: {t['signals_saved_by_cache']}"
+        )
+
+        # 3. Hourly detailed logging
+        now = _time.time()
+        if now - self._last_telemetry_log_ts >= 3600:
+            self._last_telemetry_log_ts = now
+            logger.info(
+                f"\n{'='*50}\n"
+                f"📊 HOURLY DHAN QUOTE HEALTH REPORT\n"
+                f"{'─'*50}\n"
+                f"  • Total Quote Requests   : {t['quote_requests']}\n"
+                f"  • Cache Hit Rate         : {t['cache_hit_rate']}%\n"
+                f"  • Cache Hits (Fresh)     : {t['quote_cache_hits']}\n"
+                f"  • API Requests Dispatched: {t['quote_api_calls']}\n"
+                f"  • 805 Rate Limit Errors  : {t['quote_805_errors']}\n"
+                f"  • Circuit Breaker Trips  : {t['circuit_breaker_trips']}\n"
+                f"  • Stale Fallback Served  : {t['stale_cache_served']}\n"
+                f"  • Signals Blocked (Quote): {t['signals_blocked_by_quotes']}\n"
+                f"  • Signals Saved (Cache)  : {t['signals_saved_by_cache']}\n"
+                f"{'='*50}\n"
+            )
 
     def stop(self):
         self.running = False

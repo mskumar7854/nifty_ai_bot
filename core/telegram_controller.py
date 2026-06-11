@@ -54,7 +54,10 @@ class TelegramController:
     def _is_authorized(self, update: Update) -> bool:
         """SECURITY: Only the configured admin ID can interact with the bot."""
         chat_id = str(update.effective_chat.id)
-        return chat_id == self.admin_chat_id
+        if chat_id != self.admin_chat_id:
+            logger.warning(f"Unauthorized access attempt from Chat ID: {chat_id}. Expected: {self.admin_chat_id}")
+            return False
+        return True
 
     # ─── BOOT RECOVERY (v4.6.1 Hardened) ───
 
@@ -291,7 +294,14 @@ class TelegramController:
         risk_emoji = "🟢 ACTIVE" if risk['trading_enabled'] else "🛑 BREACHED"
         
         # 3. Broker Margin
-        margin = self.data_manager.get_fund_limits()
+        try:
+            from dhan_client import get_dhan_client
+            dhan = get_dhan_client()
+            funds = dhan.get_fund_limits()
+            margin = float(funds.get("data", {}).get("availabelBalance", 0.0))
+        except Exception as e:
+            logger.error(f"Failed to fetch margin for status cmd: {e}")
+            margin = 0.0
 
         # 4. Broker Health
         broker_h = getattr(self.system, "broker_health", None)
@@ -345,13 +355,16 @@ class TelegramController:
         """Force runs the broker reconciliation and attempts to clear halts if clean."""
         if not self._is_authorized(update): return
         
+        args = getattr(context, 'args', [])
+        is_override = "override" in [str(a).lower() for a in args]
+        
         await update.message.reply_text("🔄 <b>Initiating broker position reconciliation...</b>", parse_mode='HTML')
         
         try:
             # Run reconciliation check (which we've updated to return boolean status)
             is_clean = await self.system._reconcile_broker_positions()
             
-            if is_clean:
+            if is_clean or is_override:
                 from core.system_state import get_state_manager
                 state_mgr = get_state_manager()
                 
@@ -365,18 +378,29 @@ class TelegramController:
                 if pos_mgr:
                     pos_mgr.is_halted = False
                     pos_mgr.halt_reason = ""
+                    pos_mgr.halt_auto_resume_ts = 0
+                    if hasattr(pos_mgr, "_acknowledged_orphans"):
+                        pos_mgr._acknowledged_orphans.clear()
                 
-                msg = (
-                    "✅ <b>RECONCILIATION SUCCESSFUL</b>\n\n"
-                    "No orphaned positions or missing stop losses found.\n"
-                    "<b>System has been re-enabled and is now ACTIVE.</b>"
-                )
+                if is_override and not is_clean:
+                    msg = (
+                        "⚠️ <b>FORCED OVERRIDE SUCCESSFUL</b>\n\n"
+                        "Orphaned positions may still exist, but system has been manually unhalted.\n"
+                        "<b>System has been re-enabled and is now ACTIVE.</b>"
+                    )
+                else:
+                    msg = (
+                        "✅ <b>RECONCILIATION SUCCESSFUL</b>\n\n"
+                        "No orphaned positions or missing stop losses found.\n"
+                        "<b>System has been re-enabled and is now ACTIVE.</b>"
+                    )
                 await update.message.reply_text(msg, parse_mode='HTML')
             else:
                 msg = (
                     "❌ <b>RECONCILIATION FAILED</b>\n\n"
                     "Orphaned positions, missing stop losses, or broker API errors are still present.\n"
-                    "Please check the system logs, resolve any issues on the broker manually, and retry."
+                    "Please check the system logs, resolve any issues on the broker manually, and retry.\n\n"
+                    "<i>To force resume anyway, use:</i> <code>/force_reconcile override</code>"
                 )
                 await update.message.reply_text(msg, parse_mode='HTML')
         except Exception as e:

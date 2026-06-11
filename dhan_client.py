@@ -65,6 +65,9 @@ class _SimulationGuardedClient:
     All read-only methods (get_positions, get_fund_limits, etc.) pass through.
     All order-placing methods (place_order, place_slice_order, modify_order, etc.)
     are blocked in SIMULATION mode with a hard error + full call stack log.
+    
+    Includes an LRU cache for high-frequency methods (option_chain, expiry_list)
+    to prevent Dhan 805 Rate Limit errors across components.
     """
 
     # Methods that can place or modify real orders on the broker
@@ -78,13 +81,191 @@ class _SimulationGuardedClient:
 
     def __init__(self, real_client: dhanhq):
         self._real_client = real_client
+        self._api_cache = {}
+        self._rate_limit_until = 0.0
+        self._failure_count = 0
+        self._telemetry = {
+            "quote_requests": 0,
+            "quote_cache_hits": 0,
+            "quote_api_calls": 0,
+            "quote_805_errors": 0,
+            "circuit_breaker_trips": 0,
+            "stale_cache_served": 0,
+            "signals_blocked_by_quotes": 0,
+            "signals_saved_by_cache": 0,
+            "cache_hit_rate": 0.0
+        }
+
+    def _get_normalized_key(self, method_name: str, *args, **kwargs):
+        # Map positional and keyword args to a stable format to prevent mismatch
+        if method_name == "option_chain":
+            security_id = kwargs.get("under_security_id") or (args[0] if len(args) > 0 else "")
+            segment = kwargs.get("under_exchange_segment") or (args[1] if len(args) > 1 else "")
+            expiry = kwargs.get("expiry") or (args[2] if len(args) > 2 else "")
+            return f"option_chain_{security_id}_{segment}_{expiry}"
+        elif method_name == "expiry_list":
+            security_id = kwargs.get("under_security_id") or (args[0] if len(args) > 0 else "")
+            segment = kwargs.get("under_exchange_segment") or (args[1] if len(args) > 1 else "")
+            return f"expiry_list_{security_id}_{segment}"
+        else:
+            return f"{method_name}_{str(args)}_{str(kwargs)}"
 
     def __getattr__(self, name: str):
         """Intercept attribute access. Guard order methods; pass through everything else."""
         if name in self._ORDER_METHODS:
             return self._guarded_order_call(name)
+        if name in ("option_chain", "expiry_list"):
+            return self._cached_api_call(name)
         # Pass through all other attributes (get_positions, get_fund_limits, etc.)
         return getattr(self._real_client, name)
+
+    def _cached_api_call(self, method_name: str):
+        import time as _time
+        import logging
+        
+        local_logger = logging.getLogger("dhan_client.cache")
+        
+        def _wrapper(*args, **kwargs):
+            # Extract is_execution flag from kwargs (custom flag to determine TTL / risk logic)
+            is_execution = kwargs.pop("is_execution", False)
+            
+            # Key normalization
+            key = self._get_normalized_key(method_name, *args, **kwargs)
+            now = _time.time()
+            
+            # Increment request count
+            self._telemetry["quote_requests"] += 1
+            
+            # Check circuit breaker
+            if now < self._rate_limit_until:
+                self._telemetry["circuit_breaker_trips"] += 1
+                
+                # Check stale cache fallback (up to 60s)
+                if key in self._api_cache:
+                    timestamp, cached_result = self._api_cache[key]
+                    age = now - timestamp
+                    
+                    if age < 60.0:
+                        self._telemetry["stale_cache_served"] += 1
+                        
+                        # Calculate cache hit rate before returning
+                        reqs = self._telemetry["quote_requests"]
+                        hits = self._telemetry["quote_cache_hits"] + self._telemetry["stale_cache_served"]
+                        self._telemetry["cache_hit_rate"] = round((hits / reqs) * 100, 1) if reqs > 0 else 0.0
+                        
+                        # Copy cached result and inject stale metadata
+                        fallback_result = dict(cached_result) if isinstance(cached_result, dict) else cached_result
+                        if isinstance(fallback_result, dict):
+                            fallback_result["cache_metadata"] = {
+                                "is_stale": True,
+                                "cache_age": age,
+                                "source": "cache"
+                            }
+                        
+                        local_logger.warning(
+                            f"⚠️ Central Circuit Breaker ACTIVE. Serving stale cache fallback for {method_name} "
+                            f"(age={age:.1f}s, is_execution={is_execution})"
+                        )
+                        return fallback_result
+
+                # If no cache fallback exists or it is too old, return rate limit error representation
+                local_logger.error(
+                    f"🚨 Central Circuit Breaker ACTIVE and no fresh cache for {method_name}. "
+                    f"Returning rate limit error response."
+                )
+                return {"status": "error", "remarks": "RATE_LIMIT_ACTIVE", "data": {"data": {"error": "805"}}}
+
+            # Determine cache TTL
+            # - For option_chain: 5.0s for execution context, 30.0s for analysis context
+            # - For expiry_list: 1 hour (3600s)
+            if method_name == "option_chain":
+                ttl = 5.0 if is_execution else 30.0
+            else:
+                ttl = 3600.0
+
+            # Check fresh cache hit
+            if key in self._api_cache:
+                timestamp, cached_result = self._api_cache[key]
+                age = now - timestamp
+                if age < ttl:
+                    self._telemetry["quote_cache_hits"] += 1
+                    
+                    # Update hit rate
+                    reqs = self._telemetry["quote_requests"]
+                    hits = self._telemetry["quote_cache_hits"] + self._telemetry["stale_cache_served"]
+                    self._telemetry["cache_hit_rate"] = round((hits / reqs) * 100, 1) if reqs > 0 else 0.0
+                    
+                    # Return cached result with fresh metadata
+                    fresh_result = dict(cached_result) if isinstance(cached_result, dict) else cached_result
+                    if isinstance(fresh_result, dict):
+                        fresh_result["cache_metadata"] = {
+                            "is_stale": False,
+                            "cache_age": age,
+                            "source": "cache"
+                        }
+                    return fresh_result
+
+            # Cache miss: execute actual API call
+            self._telemetry["quote_api_calls"] += 1
+            try:
+                result = getattr(self._real_client, method_name)(*args, **kwargs)
+            except Exception as e:
+                local_logger.error(f"API call to {method_name} failed: {e}")
+                raise e
+
+            # Inspect result for rate limits
+            is_rate_limited = False
+            if isinstance(result, dict):
+                inner_data = result.get("data", {}).get("data", {}) if isinstance(result.get("data"), dict) else {}
+                error_str = str(result.get("remarks", "")) + " " + str(inner_data) + " " + str(result)
+                if "805" in error_str:
+                    is_rate_limited = True
+
+            if is_rate_limited:
+                self._telemetry["quote_805_errors"] += 1
+                self._failure_count += 1
+                backoff = min(30 * (2 ** (self._failure_count - 1)), 300)
+                self._rate_limit_until = now + backoff
+                local_logger.warning(
+                    f"🚨 Dhan API rate limit 805 detected in {method_name}! "
+                    f"Tripping central circuit breaker for {backoff}s."
+                )
+
+                # Serve stale cache if available as emergency fallback
+                if key in self._api_cache:
+                    timestamp, cached_result = self._api_cache[key]
+                    age = now - timestamp
+                    self._telemetry["stale_cache_served"] += 1
+                    
+                    fallback_result = dict(cached_result) if isinstance(cached_result, dict) else cached_result
+                    if isinstance(fallback_result, dict):
+                        fallback_result["cache_metadata"] = {
+                            "is_stale": True,
+                            "cache_age": age,
+                            "source": "cache"
+                        }
+                    return fallback_result
+            else:
+                # Cache successful response
+                if isinstance(result, dict) and (result.get("status") == "success" or "data" in result):
+                    self._api_cache[key] = (now, result)
+                    self._failure_count = 0  # Reset on successful API response
+                    
+                    # Inject fresh API metadata
+                    result["cache_metadata"] = {
+                        "is_stale": False,
+                        "cache_age": 0.0,
+                        "source": "api"
+                    }
+
+            # Update cache hit rate
+            reqs = self._telemetry["quote_requests"]
+            hits = self._telemetry["quote_cache_hits"] + self._telemetry["stale_cache_served"]
+            self._telemetry["cache_hit_rate"] = round((hits / reqs) * 100, 1) if reqs > 0 else 0.0
+
+            return result
+            
+        return _wrapper
 
     def _guarded_order_call(self, method_name: str):
         """Returns a wrapper that checks SYSTEM_MODE before calling the real method."""
@@ -199,3 +380,21 @@ def get_dhan_client() -> dhanhq:
         _client = _SimulationGuardedClient(real_client)
 
     return _client
+
+
+def get_dhan_telemetry() -> dict:
+    """Public helper function to get current telemetry of the central wrapper client."""
+    global _client
+    if _client is not None and hasattr(_client, "_telemetry"):
+        return _client._telemetry
+    return {
+        "quote_requests": 0,
+        "quote_cache_hits": 0,
+        "quote_api_calls": 0,
+        "quote_805_errors": 0,
+        "circuit_breaker_trips": 0,
+        "stale_cache_served": 0,
+        "signals_blocked_by_quotes": 0,
+        "signals_saved_by_cache": 0,
+        "cache_hit_rate": 0.0
+    }

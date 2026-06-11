@@ -145,6 +145,9 @@ class OptionQuote:
     oi: int = 0
     iv: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
+    is_stale: bool = False
+    cache_age: float = 0.0
+    cache_source: str = "api"
 
     @property
     def spread_pct(self) -> float:
