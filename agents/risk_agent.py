@@ -29,7 +29,7 @@ class RiskAgent(BaseAgent):
         # Daily tracking
         self.daily_trades = 0
         self.daily_pnl = 0.0
-        self.current_date = date.today()
+        self.current_date = None
         self.trade_history_today: list = []
 
     def analyze(
@@ -47,8 +47,9 @@ class RiskAgent(BaseAgent):
         details = {}
 
         # Reset daily counters if new day
-        if date.today() != self.current_date:
-            self._reset_daily()
+        current_snap_date = snapshot.timestamp.date() if snapshot.timestamp else date.today()
+        if current_snap_date != self.current_date:
+            self._reset_daily(current_snap_date)
 
         # ── 1. DAILY LIMIT CHECK ──
         can_trade = True
@@ -188,7 +189,7 @@ class RiskAgent(BaseAgent):
 
         return AgentOutput(
             agent_name=self.name,
-            timestamp=datetime.now(),
+            timestamp=snapshot.timestamp,
             direction=direction,
             confidence=round(confidence, 1),
             strength=strength,
@@ -196,19 +197,19 @@ class RiskAgent(BaseAgent):
             warnings=warnings,
         )
 
-    def record_trade(self, pnl: float):
+    def record_trade(self, pnl: float, timestamp: datetime = None):
         """Record a trade result"""
         self.daily_trades += 1
         self.daily_pnl += pnl
         self.trade_history_today.append({
-            "time": datetime.now(),
+            "time": timestamp or datetime.now(),
             "pnl": pnl,
             "cumulative": self.daily_pnl,
         })
 
-    def _reset_daily(self):
+    def _reset_daily(self, new_date: date = None):
         """Reset daily counters"""
-        self.current_date = date.today()
+        self.current_date = new_date or date.today()
         self.daily_trades = 0
         self.daily_pnl = 0.0
         self.trade_history_today = []
@@ -219,13 +220,25 @@ class RiskAgent(BaseAgent):
         """Get specific trade parameters for a signal"""
         sl_distance = atr * 1.5
 
+        capital = self.trading_config.capital
+        risk_pct = self.trading_config.max_risk_per_trade / 100
+        max_risk_amount = capital * risk_pct
+        
+        if atr > 0:
+            risk_per_unit = atr * 1.5
+            position_size = int(max_risk_amount / risk_per_unit)
+            lot_size = self.trading_config.default_qty
+            position_size = max(lot_size, (position_size // lot_size) * lot_size)
+        else:
+            position_size = self.trading_config.default_qty
+
         if direction == Direction.BULLISH:
             return {
                 "entry": price,
                 "stop_loss": round(price - sl_distance, 1),
                 "target_1": round(price + sl_distance * 2, 1),
                 "target_2": round(price + sl_distance * 3, 1),
-                "position_size": self.trading_config.default_qty,
+                "position_size": position_size,
             }
         elif direction == Direction.BEARISH:
             return {
@@ -233,6 +246,6 @@ class RiskAgent(BaseAgent):
                 "stop_loss": round(price + sl_distance, 1),
                 "target_1": round(price - sl_distance * 2, 1),
                 "target_2": round(price - sl_distance * 3, 1),
-                "position_size": self.trading_config.default_qty,
+                "position_size": position_size,
             }
         return {}

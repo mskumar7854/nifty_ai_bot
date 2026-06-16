@@ -189,7 +189,7 @@ class DataManager:
         # ── Real OI Cache (refreshed every 60s) ──
         self._oi_cache: dict = {}
         self._oi_last_fetch: float = 0.0
-        self._oi_fetch_interval: float = 60.0  # seconds
+        self._oi_fetch_interval: float = 300.0  # seconds (increased from 60.0 to avoid 805 rate limit)
         # ── Last-good OI snapshot (stale-cache for degraded resilience) ──
         # Survives API spikes. Serves stale-but-real data instead of pure simulation.
         self._last_good_oi_snapshot: dict = {}
@@ -488,6 +488,12 @@ class DataManager:
                                 break
 
                         if is_non_retryable:
+                            if error_code == "805":
+                                self.logger.error(
+                                    "🚨 RAW DHAN 805 RESPONSE | type=%s | response=%s",
+                                    type(response),
+                                    repr(response)
+                                )
                             fail_count = self.oi_circuit.get("failure_count", 0) + 1
                             if error_code == "805":
                                 backoff = min(30 * (2 ** (fail_count - 1)), 300)
@@ -527,11 +533,18 @@ class DataManager:
                             break
                         if attempt < 2:
                             await asyncio.sleep(1 << attempt)
-                            
-                    except Exception as retry_exc:
-                        last_error = str(retry_exc)
-                        if attempt < 2:
-                            await asyncio.sleep(1 << attempt)
+
+                    except Exception as e:
+                        self.logger.error(
+                            "🚨 DHAN EXCEPTION | type=%s | repr=%s",
+                            type(e).__name__,
+                            repr(e)
+                        )
+                        last_error = f"Exception: {e}"
+                        if attempt >= 2:
+                            raise e
+                        await asyncio.sleep(1 << attempt)
+
 
                 self._oi_last_fetch_ms = ((_time.perf_counter() - t_fetch_start) * 1000)
 
@@ -595,8 +608,8 @@ class DataManager:
                     except Exception as e:
                         self.logger.error(f"⚠️ OI Updater parsing exception: {e}")
 
-                # Jittered sleep: 60s +/- 3s
-                jitter_sleep = 60 + random.uniform(-3, 3)
+                # Jittered sleep: 300s +/- 10s to avoid aggressive rate limits
+                jitter_sleep = 300 + random.uniform(-10, 10)
                 await asyncio.sleep(jitter_sleep)
 
             except asyncio.CancelledError:
@@ -686,20 +699,30 @@ class DataManager:
                     )
 
                     # Inspect the response for non-retryable errors
-                    inner_data = response.get('data', {}).get('data', {}) if isinstance(response.get('data'), dict) else {}
-                    error_str = str(response.get('remarks', '')) + " " + str(inner_data) + " " + str(response)
-
+                    status = str(response.get('status', '')).lower()
                     is_non_retryable = False
                     error_code = None
-                    for err in ["805", "808", "permission_denied", "invalid_client"]:
-                        if err in error_str:
-                            error_code = err
-                            is_non_retryable = True
-                            break
+                    
+                    if status in ('failure', 'error'):
+                        error_str = str(response.get('remarks', '')) + " " + str(response.get('errorCode', '')) + " " + str(response.get('errorMsg', ''))
+                        inner_data = response.get('data', {})
+                        if isinstance(inner_data, dict):
+                            error_str += " " + str(inner_data.get('errorCode', '')) + " " + str(inner_data.get('errorMsg', ''))
+                        
+                        for err in ["805", "808", "permission_denied", "invalid_client"]:
+                            if err in error_str:
+                                error_code = err
+                                is_non_retryable = True
+                                break
 
                     if is_non_retryable:
                         fail_count = self.quote_circuit.get("failure_count", 0) + 1
                         if error_code == "805":
+                            self.logger.error(
+                                "🚨 RAW DHAN 805 RESPONSE (QUOTE) | type=%s | response=%s",
+                                type(response),
+                                repr(response)
+                            )
                             backoff = min(30 * (2 ** (fail_count - 1)), 300)
                         else:
                             backoff = 900
@@ -717,6 +740,7 @@ class DataManager:
                         raise ValueError(f"Non-retryable Dhan API error: {error_code}")
                     
                     if response.get('status') == 'success':
+                        self.logger.info(f"QUOTE_FETCH_RESPONSE_STATUS={response.get('status')}")
                         self.quote_circuit["failure_count"] = 0
                         raw_data = response.get('data', {})
                         data_block = raw_data.get('data', {}) if isinstance(raw_data, dict) else {}
@@ -740,8 +764,8 @@ class DataManager:
                                 opt_data = row['ce'] if opt_type == 'CE' else row['pe']
                                 
                                 ltp = float(opt_data.get('lastPrice', opt_data.get('last_price', 0)))
-                                bid = float(opt_data.get('bidPrice', opt_data.get('bid_price', 0)) or ltp)
-                                ask = float(opt_data.get('askPrice', opt_data.get('ask_price', 0)) or ltp)
+                                bid = float(opt_data.get('bidPrice', opt_data.get('bid_price', opt_data.get('top_bid_price', 0))) or ltp)
+                                ask = float(opt_data.get('askPrice', opt_data.get('ask_price', opt_data.get('top_ask_price', 0))) or ltp)
                                 
                                 self.logger.info(
                                     f"🔍 QUOTE DEBUG | strike={strike} | expiry={expiry} | "
@@ -763,6 +787,8 @@ class DataManager:
                                     quote_obj.is_stale = meta.get("is_stale", False)
                                     quote_obj.cache_age = meta.get("cache_age", 0.0)
                                     quote_obj.cache_source = meta.get("source", "api")
+                                
+                                self.logger.info(f"QUOTE_FETCH_SUCCESS | strike={strike} {opt_type} | premium={ltp}")
                                 return quote_obj
                         
                         self.logger.warning(
@@ -870,6 +896,9 @@ class DataManager:
             prev_day_close=self.prev_day_close
         )
 
+        from core.options_resolver import OptionContractBuilder
+        expiry_ctx = OptionContractBuilder.get_expiry_context()
+
         return MarketSnapshot(
             timestamp=latest.name if isinstance(latest.name, datetime) else pd.to_datetime(latest.name),
             price=price, open=latest['open'], high=high, low=low, close=price,
@@ -888,7 +917,10 @@ class DataManager:
             pcr=oi.get('pcr', self._sim_pcr()),
             max_pain=oi.get('max_pain', round(price / 100) * 100),
             india_vix=oi.get('india_vix', self._sim_vix),
-            expiry_type="weekly",
+            is_expiry_day=expiry_ctx.get("is_expiry_day", False),
+            days_to_expiry=expiry_ctx.get("days_to_expiry", 7),
+            is_monthly_expiry=(expiry_ctx.get("expiry_type") == "monthly"),
+            expiry_type=expiry_ctx.get("expiry_type", "weekly"),
             time_to_expiry_hours=24.0,
             minutes_to_close=180,
             atm_straddle_price=250.0,
@@ -936,6 +968,9 @@ class DataManager:
             prev_day_close=self.prev_day_close
         )
 
+        from core.options_resolver import OptionContractBuilder
+        expiry_ctx = OptionContractBuilder.get_expiry_context()
+
         snapshot = MarketSnapshot(
             timestamp=latest.name if isinstance(latest.name, datetime) else pd.to_datetime(latest.name),
             price=latest['close'],
@@ -958,7 +993,10 @@ class DataManager:
             india_vix=self._sim_vix,
 
             # --- SIMULATED ADVANCED DATA ---
-            expiry_type="weekly",
+            is_expiry_day=expiry_ctx.get("is_expiry_day", False),
+            days_to_expiry=expiry_ctx.get("days_to_expiry", 7),
+            is_monthly_expiry=(expiry_ctx.get("expiry_type") == "monthly"),
+            expiry_type=expiry_ctx.get("expiry_type", "weekly"),
             time_to_expiry_hours=24.0,
             minutes_to_close=180,
             atm_straddle_price=250.0,

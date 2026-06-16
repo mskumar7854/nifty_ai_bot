@@ -267,9 +267,23 @@ class TradeFilter:
         }
         base_floor = _grade_floors.get(grade_str, self.cfg.min_signal_confidence)
 
+        # ── Expiry Penalty (Dynamically raise required confidence) ──
+        _days_to_expiry = getattr(snapshot, "days_to_expiry", 7)
+        _expiry_type = getattr(snapshot, "expiry_type", "weekly")
+        
+        expiry_penalty = 0
+        if _days_to_expiry == 0:
+            expiry_penalty = 5 if _expiry_type == "weekly" else 8
+        elif _days_to_expiry == 1:
+            expiry_penalty = 3 if _expiry_type == "weekly" else 5
+        elif _days_to_expiry == 2:
+            expiry_penalty = 1 if _expiry_type == "weekly" else 2
+            
+        base_floor += expiry_penalty
+
         # ── Apply high-conviction relaxation ──
         if _high_conviction or _strong_consensus:
-            min_conf = 35.0   # Score compressed by regime penalty, not quality failure
+            min_conf = 35.0 + expiry_penalty   # Score compressed by regime penalty, not quality failure
             self.logger.info(
                 f"[GATE 1] {grade_str} relaxed → {min_conf}%: "
                 f"directional={_total_directional} agree={_agree_count} oppose={_oppose_count} "
@@ -277,6 +291,9 @@ class TradeFilter:
             )
         else:
             min_conf = base_floor
+
+        if expiry_penalty > 0:
+            self.logger.info(f"[GATE 1] Expiry Penalty +{expiry_penalty} applied (DTE={_days_to_expiry}, Type={_expiry_type})")
 
         g1_pass = conf >= min_conf
         g1_score = min(100, conf)

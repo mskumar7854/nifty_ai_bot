@@ -224,19 +224,17 @@ class StructureAgent(BaseAgent):
         # Order block proximity score
         ob_score = 50
         if relevant_obs:
-            nearest = relevant_obs[0]
-            if nearest['type'] == 'bullish' and \
-               price <= nearest['level'] * 1.001:
-                ob_score = 80
-                details["ob_verdict"] = (
-                    "At BULLISH order block — buy zone"
-                )
-            elif nearest['type'] == 'bearish' and \
-                 price >= nearest['level'] * 0.999:
-                ob_score = 80
-                details["ob_verdict"] = (
-                    "At BEARISH order block — sell zone"
-                )
+            nearest = min(relevant_obs, key=lambda x: abs(price - x['level']))
+            atr = snapshot.atr or 0
+            buffer = min(max(atr * 0.15, 5), 15)
+            
+            if nearest['low'] - buffer <= price <= nearest['high'] + buffer:
+                if nearest['type'] == 'bullish':
+                    ob_score = 80
+                    details["ob_verdict"] = "At BULLISH order block — buy zone"
+                elif nearest['type'] == 'bearish':
+                    ob_score = 80
+                    details["ob_verdict"] = "At BEARISH order block — sell zone"
 
         # FVG score
         fvg_score = 50

@@ -211,8 +211,8 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
 
     # 3. Smooth with Wilder's method
     tr_smoothed = tr.ewm(alpha=1/period, adjust=False).mean()
-    plus_dm_smoothed = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean()
-    minus_dm_smoothed = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean()
+    plus_dm_smoothed = pd.Series(plus_dm, index=df.index).ewm(alpha=1/period, adjust=False).mean()
+    minus_dm_smoothed = pd.Series(minus_dm, index=df.index).ewm(alpha=1/period, adjust=False).mean()
 
     # 4. Calculate DI+ and DI-
     plus_di = 100 * (plus_dm_smoothed / tr_smoothed)

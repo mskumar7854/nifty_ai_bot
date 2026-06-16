@@ -30,10 +30,15 @@ class ConfluenceScorer:
         total_weight = 0
 
         for output in agent_outputs:
+            result.total_agents += 1
+            
+            if output.is_blocker:
+                result.blocker_agents += 1
+                result.blocker_reasons.append(output.blocker_reason)
+
             if output.direction == Direction.NEUTRAL:
                 continue
 
-            result.total_agents += 1
             weight = self.weights.get(output.agent_name, 0.05)
             
             # Adjust weight based on agent confidence (0 to 1 multiplier)
@@ -49,10 +54,6 @@ class ConfluenceScorer:
                 bear_score += final_weight
                 result.bearish_agents += 1
                 result.disagreeing_agents.append(output.agent_name)
-
-            if output.is_blocker:
-                result.blocker_agents += 1
-                result.blocker_reasons.append(output.blocker_reason)
 
         # Calculate final normalized scores
         if total_weight > 0:

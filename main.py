@@ -870,8 +870,8 @@ class NiftyAISystem:
             # ── 8. Gather context for 10-Gate Filter ──
             outputs = {}
             for name, agent in self.decision_engine.agents.items():
-                if hasattr(agent, '_last_output'):
-                    outputs[name] = agent._last_output
+                if hasattr(agent, 'last_output') and agent.last_output is not None:
+                    outputs[name] = agent.last_output
 
             pm_status = self.position_manager.get_full_status()
             if "today_trades" not in pm_status:
@@ -904,15 +904,45 @@ class NiftyAISystem:
             }
 
             # ── 9. Run 10-Gate Filter ──
+            # v4.9: Wire REAL agent context instead of empty dicts.
+            # Previous code passed {} for regime/structure/decay/learning,
+            # making 4 of 10 gates always pass (rubber stamps).
+            _regime_info = {}
+            if "regime" in outputs:
+                _regime_info = outputs["regime"].details.copy()
+                _regime_info["regime"] = _regime_info.get("regime", "UNKNOWN")
+            
+            _structure_info = {}
+            if "structure" in outputs:
+                _structure_info = outputs["structure"].details.copy()
+                _structure_info["structure"] = _structure_info.get("structure", {}).get("type", "OK") if isinstance(_structure_info.get("structure"), dict) else _structure_info.get("structure", "OK")
+            
+            _learning_info = {
+                "confidence": 50,
+                "current_streak": getattr(self.decision_engine.memory, 'current_streak', 0) if hasattr(self.decision_engine, 'memory') else 0,
+            }
+            if "learning" in outputs:
+                _learning_info["confidence"] = outputs["learning"].confidence
+            
+            _decay_info = {}
+            if "decay" in outputs:
+                _decay_info = outputs["decay"].details.copy()
+            
+            # Dynamic cost estimation based on ATR and spread
+            _est_slippage = max(1.0, snapshot.atr * 0.02) if snapshot.atr > 0 else 2.0
+            _est_brokerage = 40  # Fixed brokerage per trade
+            _total_costs = _est_brokerage + (_est_slippage * max(getattr(signal, 'position_size', 50), 50))
+            _cost_info = {"total_costs": _total_costs, "break_even_points": _est_slippage + 1.0}
+            
             filter_result = self.trade_filter.evaluate(
                 signal=signal,
                 snapshot=snapshot,
                 agent_outputs=outputs,
-                regime_info={}, # Simplified for now
-                structure_info={},
-                learning_info={"confidence": 50, "current_streak": 0},
-                decay_info={},
-                cost_info={"total_costs": 40, "break_even_points": 1.5},
+                regime_info=_regime_info,
+                structure_info=_structure_info,
+                learning_info=_learning_info,
+                decay_info=_decay_info,
+                cost_info=_cost_info,
                 position_manager_status=pm_status,
                 confluence_score=(
                     signal.confluence.confluence_ratio * 100
@@ -937,7 +967,7 @@ class NiftyAISystem:
                 # We know "what the engine saw but chose not to trade."
                 try:
                     from core.snapshot import build_snapshot, persist_snapshot
-                    agent_outs = {n: a._last_output for n, a in self.decision_engine.agents.items() if hasattr(a, '_last_output')}
+                    agent_outs = {n: a.last_output for n, a in self.decision_engine.agents.items() if hasattr(a, 'last_output') and a.last_output is not None}
                     _gap_mgr = getattr(self.decision_engine, "gap_penalty_manager", None)
                     _gap_status = _gap_mgr.get_status() if _gap_mgr else {}
                     _gap_ctx = {
@@ -1033,6 +1063,10 @@ class NiftyAISystem:
                     log_entry["risk_reason"] = "max_pain_distance < 50"
                     self.perf_logger.log_signal(log_entry)
                     
+                    signal.execution_status = "rejected"
+                    signal.metadata["rejection_status"] = "Blocked by Options Filter"
+                    signal.metadata["rejection_reason"] = log_entry["risk_reason"]
+                    
                     self.simulation.record_signal(passed=False)
                     self._update_dashboard(snapshot, signal)
                     _log_canonical_truth(False, "Options: Near Max-Pain")
@@ -1053,6 +1087,10 @@ class NiftyAISystem:
                     log_entry["filter_passed"] = False
                     log_entry["risk_reason"] = f"Low options score ({options_score})"
                     self.perf_logger.log_signal(log_entry)
+                    
+                    signal.execution_status = "rejected"
+                    signal.metadata["rejection_status"] = "Blocked by Options Score"
+                    signal.metadata["rejection_reason"] = log_entry["risk_reason"]
                     
                     self.simulation.record_signal(passed=False)
                     self._update_dashboard(snapshot, signal)
@@ -1081,27 +1119,80 @@ class NiftyAISystem:
             )
             
             # Fetch live premium (Ask for buy)
-            # 🔒 Run in thread — fetch_option_quote calls dhan.option_chain() (sync/blocking).
-            # wait_for(12s) > inner future.result(10s) to give it room to fail gracefully.
-            try:
-                quote = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self.data_manager.fetch_option_quote,
-                        instrument["strike"],
-                        instrument["type"],
-                        instrument["expiry"]
-                    ),
-                    timeout=12.0
-                )
-            except asyncio.TimeoutError:
-                logger.error("[OPTIONS] fetch_option_quote timed out (>12s) — using synthetic quote")
-                quote = None
+            # v4.9: Retry with backoff (2 attempts, 3s gap).
+            # Previous code: single attempt → None → synthetic bid=0 → always blocked.
+            # v4.9.1: Circuit-breaker-aware retry. If fetch_option_quote()
+            # tripped the quote_circuit (e.g. 805 rate-limit with 30s+ backoff),
+            # retrying after 3s is pointless — the circuit is still open.
+            # Check circuit state before spending 3s sleeping for nothing.
+            quote = None
+            _quote_attempts = 0
+            _quote_last_error = None
+            for _q_attempt in range(2):
+                # Pre-check: skip retry if circuit breaker tripped during previous attempt
+                if _q_attempt > 0:
+                    import time as _t
+                    _cb = self.data_manager.quote_circuit
+                    if _t.time() < _cb.get("open_until", 0.0):
+                        _cb_cooldown = int(_cb["open_until"] - _t.time())
+                        _quote_last_error = (
+                            f"quote_circuit OPEN ({_cb.get('reason', 'unknown')}, "
+                            f"cooldown={_cb_cooldown}s) — retry skipped"
+                        )
+                        logger.warning(
+                            f"[OPTIONS] Quote retry skipped: {_quote_last_error}"
+                        )
+                        break
+                    # Backoff only if circuit is still closed
+                    await asyncio.sleep(3.0)
+                
+                _quote_attempts += 1
+                try:
+                    quote = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self.data_manager.fetch_option_quote,
+                            instrument["strike"],
+                            instrument["type"],
+                            instrument["expiry"]
+                        ),
+                        timeout=12.0
+                    )
+                    if quote is not None:
+                        break  # Success
+                    _quote_last_error = "returned None"
+                except asyncio.TimeoutError:
+                    _quote_last_error = "timeout >12s"
+                    logger.warning(
+                        f"[OPTIONS] Quote fetch attempt {_q_attempt+1}/2 timed out (>12s)"
+                    )
+                except Exception as _q_exc:
+                    _quote_last_error = str(_q_exc)
+                    logger.warning(
+                        f"[OPTIONS] Quote fetch attempt {_q_attempt+1}/2 failed: {_q_exc}"
+                    )
+            
+            # v4.9: If quote fetch fails, abort immediately instead of
+            # synthesizing a bid=0 quote that always hits the liquidity gate.
+            # This was the #1 cause of "trade_executed: true, pnl: null" entries.
             if quote is None:
-                # Synthesise a minimal quote so downstream code doesn't crash
-                from models.signals import OptionQuote
-                quote = OptionQuote(security_id="", symbol=f"NIFTY {instrument['strike']} {instrument['type']}",
-                                    ltp=snapshot.price * 0.01, bid=0.0, ask=snapshot.price * 0.01,
-                                    volume=0, oi=0)
+                logger.error(
+                    f"❌ [QUOTE FETCH FAILED] {instrument['symbol']} | "
+                    f"Attempts: {_quote_attempts} | Last error: {_quote_last_error} | "
+                    f"Trade ABORTED — no synthetic fallback."
+                )
+                log_entry["filter_passed"] = False
+                log_entry["trade_executed"] = False
+                log_entry["risk_reason"] = f"Quote Fetch Failed: {_quote_last_error} (after {_quote_attempts} attempts)"
+                self.perf_logger.log_signal(log_entry)
+                
+                signal.execution_status = "rejected"
+                signal.metadata["rejection_status"] = "Quote Fetch Failed"
+                signal.metadata["rejection_reason"] = log_entry["risk_reason"]
+                
+                self.simulation.record_signal(passed=False)
+                self._update_dashboard(snapshot, signal)
+                _log_canonical_truth(False, f"Quote Fetch Failed: {_quote_last_error}")
+                return
             
             # ── P0.1: Option Liquidity & Spread Protection Layer ──
             spread_pct = quote.spread_pct / 100.0  # property returns 0-100 scale
@@ -1166,6 +1257,11 @@ class NiftyAISystem:
                 log_entry["filter_passed"] = False
                 log_entry["risk_reason"] = f"Liquidity Block: {reject_reason}"
                 self.perf_logger.log_signal(log_entry)
+                
+                signal.execution_status = "rejected"
+                signal.metadata["rejection_status"] = "Liquidity Block"
+                signal.metadata["rejection_reason"] = log_entry["risk_reason"]
+                
                 self.simulation.record_signal(passed=False)
                 self._update_dashboard(snapshot, signal)
                 _log_canonical_truth(False, f"Liquidity Block: {reject_reason}")
@@ -1197,6 +1293,9 @@ class NiftyAISystem:
             )
             _log_canonical_truth(True, "APPROVED")
             
+            # v4.9: trade_executed only set AFTER liquidity gate passes.
+            # Previously it was set before the gate, causing misleading
+            # "trade_executed: true, pnl: null" log entries.
             log_entry["trade_executed"] = True
             self.perf_logger.log_signal(log_entry)
 
@@ -1207,8 +1306,8 @@ class NiftyAISystem:
                 from core.snapshot import build_snapshot, persist_snapshot
                 agent_outs = {}
                 for name, agent in self.decision_engine.agents.items():
-                    if hasattr(agent, '_last_output'):
-                        agent_outs[name] = agent._last_output
+                    if hasattr(agent, 'last_output') and agent.last_output is not None:
+                        agent_outs[name] = agent.last_output
 
                 gate_outs = {}
                 if hasattr(self.master, "gate_rejections"):

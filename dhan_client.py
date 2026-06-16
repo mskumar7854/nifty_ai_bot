@@ -82,6 +82,7 @@ class _SimulationGuardedClient:
     def __init__(self, real_client: dhanhq):
         self._real_client = real_client
         self._api_cache = {}
+        self._cache_lock = __import__('threading').Lock()
         self._rate_limit_until = 0.0
         self._failure_count = 0
         self._telemetry = {
@@ -206,64 +207,95 @@ class _SimulationGuardedClient:
                     return fresh_result
 
             # Cache miss: execute actual API call
-            self._telemetry["quote_api_calls"] += 1
-            try:
-                result = getattr(self._real_client, method_name)(*args, **kwargs)
-            except Exception as e:
-                local_logger.error(f"API call to {method_name} failed: {e}")
-                raise e
-
-            # Inspect result for rate limits
-            is_rate_limited = False
-            if isinstance(result, dict):
-                inner_data = result.get("data", {}).get("data", {}) if isinstance(result.get("data"), dict) else {}
-                error_str = str(result.get("remarks", "")) + " " + str(inner_data) + " " + str(result)
-                if "805" in error_str:
-                    is_rate_limited = True
-
-            if is_rate_limited:
-                self._telemetry["quote_805_errors"] += 1
-                self._failure_count += 1
-                backoff = min(30 * (2 ** (self._failure_count - 1)), 300)
-                self._rate_limit_until = now + backoff
-                local_logger.warning(
-                    f"🚨 Dhan API rate limit 805 detected in {method_name}! "
-                    f"Tripping central circuit breaker for {backoff}s."
-                )
-
-                # Serve stale cache if available as emergency fallback
+            with self._cache_lock:
+                # Double-check fresh cache hit inside the lock to prevent cache stampede
+                now = _time.time()
                 if key in self._api_cache:
                     timestamp, cached_result = self._api_cache[key]
                     age = now - timestamp
-                    self._telemetry["stale_cache_served"] += 1
-                    
-                    fallback_result = dict(cached_result) if isinstance(cached_result, dict) else cached_result
-                    if isinstance(fallback_result, dict):
-                        fallback_result["cache_metadata"] = {
-                            "is_stale": True,
-                            "cache_age": age,
-                            "source": "cache"
+                    if age < ttl:
+                        self._telemetry["quote_cache_hits"] += 1
+                        
+                        # Update hit rate
+                        reqs = self._telemetry["quote_requests"]
+                        hits = self._telemetry["quote_cache_hits"] + self._telemetry["stale_cache_served"]
+                        self._telemetry["cache_hit_rate"] = round((hits / reqs) * 100, 1) if reqs > 0 else 0.0
+                        
+                        # Return cached result with fresh metadata
+                        fresh_result = dict(cached_result) if isinstance(cached_result, dict) else cached_result
+                        if isinstance(fresh_result, dict):
+                            fresh_result["cache_metadata"] = {
+                                "is_stale": False,
+                                "cache_age": age,
+                                "source": "cache"
+                            }
+                        return fresh_result
+
+                self._telemetry["quote_api_calls"] += 1
+                try:
+                    result = getattr(self._real_client, method_name)(*args, **kwargs)
+                except Exception as e:
+                    local_logger.error(f"API call to {method_name} failed: {e}")
+                    raise e
+
+                # Inspect result for rate limits
+                is_rate_limited = False
+                if isinstance(result, dict):
+                    status = str(result.get("status", "")).lower()
+                    # Only check for 805 if the API actually reported a failure
+                    if status == "failure" or status == "error":
+                        error_str = str(result.get("remarks", "")) + " " + str(result.get("errorCode", "")) + " " + str(result.get("errorMsg", ""))
+                        inner_data = result.get("data", {})
+                        if isinstance(inner_data, dict):
+                            error_str += " " + str(inner_data.get("errorCode", "")) + " " + str(inner_data.get("errorMsg", ""))
+                        if "805" in error_str:
+                            is_rate_limited = True
+
+                if is_rate_limited:
+                    local_logger.error(f"RAW {method_name.upper()} RESPONSE: %s", repr(result))
+                    local_logger.error(f"RAW {method_name.upper()} TYPE: %s", type(result))
+                    self._telemetry["quote_805_errors"] += 1
+                    self._failure_count += 1
+                    backoff = min(30 * (2 ** (self._failure_count - 1)), 300)
+                    self._rate_limit_until = now + backoff
+                    local_logger.warning(
+                        f"🚨 Dhan API rate limit 805 detected in {method_name}! "
+                        f"Tripping central circuit breaker for {backoff}s."
+                    )
+
+                    # Serve stale cache if available as emergency fallback
+                    if key in self._api_cache:
+                        timestamp, cached_result = self._api_cache[key]
+                        age = now - timestamp
+                        self._telemetry["stale_cache_served"] += 1
+                        
+                        fallback_result = dict(cached_result) if isinstance(cached_result, dict) else cached_result
+                        if isinstance(fallback_result, dict):
+                            fallback_result["cache_metadata"] = {
+                                "is_stale": True,
+                                "cache_age": age,
+                                "source": "cache"
+                            }
+                        return fallback_result
+                else:
+                    # Cache successful response
+                    if isinstance(result, dict) and (result.get("status") == "success" or "data" in result):
+                        self._api_cache[key] = (now, result)
+                        self._failure_count = 0  # Reset on successful API response
+                        
+                        # Inject fresh API metadata
+                        result["cache_metadata"] = {
+                            "is_stale": False,
+                            "cache_age": 0.0,
+                            "source": "api"
                         }
-                    return fallback_result
-            else:
-                # Cache successful response
-                if isinstance(result, dict) and (result.get("status") == "success" or "data" in result):
-                    self._api_cache[key] = (now, result)
-                    self._failure_count = 0  # Reset on successful API response
-                    
-                    # Inject fresh API metadata
-                    result["cache_metadata"] = {
-                        "is_stale": False,
-                        "cache_age": 0.0,
-                        "source": "api"
-                    }
 
-            # Update cache hit rate
-            reqs = self._telemetry["quote_requests"]
-            hits = self._telemetry["quote_cache_hits"] + self._telemetry["stale_cache_served"]
-            self._telemetry["cache_hit_rate"] = round((hits / reqs) * 100, 1) if reqs > 0 else 0.0
+                # Update cache hit rate
+                reqs = self._telemetry["quote_requests"]
+                hits = self._telemetry["quote_cache_hits"] + self._telemetry["stale_cache_served"]
+                self._telemetry["cache_hit_rate"] = round((hits / reqs) * 100, 1) if reqs > 0 else 0.0
 
-            return result
+                return result
             
         return _wrapper
 

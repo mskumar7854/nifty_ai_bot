@@ -276,7 +276,7 @@ class RegimeAgent(BaseAgent):
 
         # Record history
         self.regime_history.append({
-            "time": datetime.now(),
+            "time": snapshot.timestamp,
             "regime": new_regime.value,
             "adx": adx,
         })
@@ -333,7 +333,7 @@ class RegimeAgent(BaseAgent):
 
         return AgentOutput(
             agent_name=self.name,
-            timestamp=datetime.now(),
+            timestamp=snapshot.timestamp,
             direction=direction,
             confidence=round(confidence, 1),
             strength=strength,

@@ -108,6 +108,36 @@ class OptionContractBuilder:
         expiry = today + timedelta(days=days_to_thursday)
         return expiry.strftime("%Y-%m-%d")
 
+    @classmethod
+    def get_expiry_context(cls) -> dict:
+        """Returns detailed context about the active expiry."""
+        expiry_str = cls.get_expiry_str()
+        from datetime import date, datetime, timedelta
+        today = date.today()
+        
+        try:
+            expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+        except Exception:
+            expiry_date = today
+            
+        days_to_expiry = (expiry_date - today).days
+        if days_to_expiry < 0:
+            days_to_expiry = 0
+            
+        is_expiry_day = (days_to_expiry == 0)
+        
+        # Monthly expiry check (if expiry is in the last 7 days of its month)
+        next_week = expiry_date + timedelta(days=7)
+        is_monthly_expiry = (next_week.month != expiry_date.month)
+        expiry_type = "monthly" if is_monthly_expiry else "weekly"
+        
+        return {
+            "is_expiry_day": is_expiry_day,
+            "days_to_expiry": days_to_expiry,
+            "expiry_type": expiry_type,
+            "expiry_date_str": expiry_str
+        }
+
     @staticmethod
     def get_trading_symbol(underlying: str, strike: int, option_type: str) -> str:
         """Builds a human readable symbol (e.g., NIFTY 24400 CE)"""

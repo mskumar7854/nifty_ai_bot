@@ -495,7 +495,16 @@ DASHBOARD_HTML = """
                 const log = document.getElementById('log');
                 const entry = document.createElement('div');
                 entry.className = 'log-entry';
-                entry.textContent = `[${sig.time}] ${sig.signal} | Conf: ${sig.confidence} | ${(sig.reasons || []).join(', ')}`;
+                
+                let text = `[${sig.time}] ${sig.signal} | Conf: ${sig.confidence}`;
+                if (sig.execution_status === 'rejected') {
+                    text += ` | 🚫 REJECTED: ${sig.rejection_reason}`;
+                    entry.style.color = '#ffaaaa';
+                } else if (sig.reasons && sig.reasons.length > 0) {
+                    text += ` | ${sig.reasons.join(', ')}`;
+                }
+                
+                entry.textContent = text;
                 log.prepend(entry);
                 if (log.children.length > 50) log.removeChild(log.lastChild);
             }

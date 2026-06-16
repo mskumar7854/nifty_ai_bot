@@ -479,6 +479,8 @@ class Signal:
             "signal": self.signal_type.value,
             "direction": self.direction.value,
             "confidence": f"{self.confidence:.1f}%",
+            "execution_status": self.execution_status,
+            "rejection_reason": self.metadata.get("rejection_reason", ""),
             "grade": self.grade.value,
             "strength": self.strength.value,
             "entry": self.entry_price,

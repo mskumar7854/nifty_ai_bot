@@ -220,12 +220,6 @@ class NoTradeZoneChecker:
 
         return False, ""
 
-    @staticmethod
-    def is_expiry_day(dt: Optional[datetime] = None) -> bool:
-        """Nifty weekly expiry = Thursday (weekday 3)."""
-        return (dt or datetime.now()).weekday() == 3
-
-
 # ══════════════════════════════════════════
 # 🛡️  SAFETY FILTER  (3 micro-gates)
 # ══════════════════════════════════════════
@@ -430,7 +424,7 @@ class Strategy:
             return result
 
         # Flag expiry day as warning (not a hard block here)
-        result['details']['is_expiry_day'] = self.no_trade_checker.is_expiry_day(now)
+        # Expiry is now dynamic and handled at the gate level via MarketSnapshot.
 
         # ── GATE 2: Trend ─────────────────────────────────
         trend = self.trend_detector.detect(trend_df)

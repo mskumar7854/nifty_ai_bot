@@ -40,11 +40,18 @@ class TimeSessionAgent(BaseAgent):
         warnings = []
         details = {}
 
-        ist = pytz.timezone('Asia/Kolkata')
-        now = datetime.now(ist)
+        if snapshot.timestamp is None:
+            self.logger.warning("Market snapshot timestamp is None — failing safe.")
+            return self._blocker_output("Missing market timestamp")
+
+        now = snapshot.timestamp
         self.logger.debug(f"Current Time: {now}")
         current_time = now.time()
         weekday = now.strftime("%A")
+
+        # ── 0. WEEKEND BLOCKING ──
+        if now.weekday() >= 5:
+            return self._blocker_output("Weekend — market closed")
 
         # ── 1. DETERMINE SESSION PHASE ──
         phase = self._get_session_phase(current_time)

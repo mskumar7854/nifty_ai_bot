@@ -1143,14 +1143,19 @@ class DecisionEngineV3:
             return signal
 
         # Signal Deduplication
-        fingerprint = f"{signal.direction.value}_{signal.entry_price}_{signal.signal_type.value}"
+        # v4.9: Window increased from 60s to 300s. Old 60s window allowed the
+        # same BUY_CE signal to fire every minute, each triggering a new quote
+        # fetch → rate limit → circuit breaker trip.
+        # Fingerprint now uses direction + signal_type only (drops exact price)
+        # so near-identical signals at slightly different prices are caught.
+        fingerprint = f"{signal.direction.value}_{signal.signal_type.value}"
         now_ts = time.time()
         
-        # Clear old fingerprints
-        self.recent_signals = {k: v for k, v in self.recent_signals.items() if now_ts - v < 60}
+        # Clear old fingerprints (5-minute window)
+        self.recent_signals = {k: v for k, v in self.recent_signals.items() if now_ts - v < 300}
         
         if fingerprint in self.recent_signals:
-            return self._no_trade_signal(snapshot, ["Signal Deduplication: Duplicate signal within 60s"], outputs_dict)
+            return self._no_trade_signal(snapshot, ["Signal Deduplication: Same direction signal within 300s"], outputs_dict)
             
         self.recent_signals[fingerprint] = now_ts
         self._record_signal(signal)
