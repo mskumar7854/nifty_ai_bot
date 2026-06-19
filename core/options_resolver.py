@@ -187,16 +187,22 @@ class OptionExecutionTranslator:
         
         # SL Translation
         spot_sl_distance = abs(spot_entry - signal.stop_loss)
-        premium_sl = max(1.0, premium - (spot_sl_distance * delta))
+        raw_premium_sl_dist = spot_sl_distance * delta
         
-        # Targets Translation
+        # Enforce a minimum realistic distance for options (to prevent 3% stops)
+        # PositionManager uses 25% for live; we use a 15% minimum floor here
+        # so that normal premium chop doesn't stop out perfectly good spot signals.
+        safe_sl_dist = max(raw_premium_sl_dist, premium * 0.15, 5.0)
+        premium_sl = max(1.0, premium - safe_sl_dist)
+        
+        # Targets Translation (Relative to the SAFE sl distance)
         spot_t1_distance = abs(signal.target_1 - spot_entry) if signal.target_1 else spot_sl_distance * 1.5
         spot_t2_distance = abs(signal.target_2 - spot_entry) if signal.target_2 else spot_sl_distance * 2.5
         spot_t3_distance = abs(signal.target_3 - spot_entry) if signal.target_3 else spot_sl_distance * 3.5
         
-        premium_t1 = premium + (spot_t1_distance * delta)
-        premium_t2 = premium + (spot_t2_distance * delta)
-        premium_t3 = premium + (spot_t3_distance * delta)
+        premium_t1 = premium + max(spot_t1_distance * delta, safe_sl_dist * 1.5)
+        premium_t2 = premium + max(spot_t2_distance * delta, safe_sl_dist * 2.5)
+        premium_t3 = premium + max(spot_t3_distance * delta, safe_sl_dist * 3.5)
         
         # Decay risk (High IV or expiry day = high decay risk)
         decay_risk = "High" if (quote.iv and quote.iv > 20) else "Moderate"

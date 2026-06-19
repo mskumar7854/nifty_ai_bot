@@ -189,12 +189,23 @@ def format_signal_message(signal, snapshot_summary: Optional[dict] = None) -> st
 
     # ── NIFTY LEVELS ──
     lines.append(f"<b>NIFTY LEVELS</b>")
-    lines.append(f"Entry : {spot_entry:,.0f}")
-    lines.append(f"SL    : {spot_sl:,.0f}")
+    lines.append(f"Signal Spot: {spot_entry:,.2f}")
+    
+    strike = instrument.get("strike", 0)
+    if strike > 0:
+        opt_type = instrument.get("type", "")
+        atm_dist = spot_entry - strike
+        lines.append(f"ATM Strike : {strike} {opt_type}")
+        lines.append(f"Dist to ATM: {atm_dist:+.2f} pts")
+        
+    if symbol and symbol != "NIFTY":
+        lines.append(f"Contract   : {symbol}")
+        
+    lines.append(f"SL         : {spot_sl:,.0f}")
     if spot_t1 > 0:
-        lines.append(f"T1    : {spot_t1:,.0f}")
+        lines.append(f"T1         : {spot_t1:,.0f}")
     if spot_t2 > 0:
-        lines.append(f"T2    : {spot_t2:,.0f}")
+        lines.append(f"T2         : {spot_t2:,.0f}")
     lines.append("")
 
     # ── OPTION PREMIUM ──
@@ -220,7 +231,12 @@ def format_signal_message(signal, snapshot_summary: Optional[dict] = None) -> st
 
     # ── AI Context (essential only) ──
     lines.append(f"<b>📊 AI ANALYSIS</b>")
-    lines.append(f"Confidence : <b>{signal.confidence:.0f}%</b>")
+    raw_conf = signal.metadata.get("raw_confidence")
+    if raw_conf:
+        lines.append(f"Raw Conf   : {raw_conf}%")
+        lines.append(f"Adj Conf   : <b>{signal.confidence:.0f}%</b>")
+    else:
+        lines.append(f"Confidence : <b>{signal.confidence:.0f}%</b>")
     lines.append(f"Regime     : {regime_str}")
     if market_bias:
         lines.append(f"Structure  : {market_bias}")

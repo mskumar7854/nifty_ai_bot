@@ -50,6 +50,8 @@ from utils.helpers import save_json, load_json, safe_divide
 from config.settings import Settings, PositionConfig
 from config.signal_weights import MIN_CONFIDENCE, MIN_DIRECTION_GAP
 
+from analytics.analytics_bus import analytics_bus
+
 
 # ── P0-E: SL Guarantee Config ──
 SL_MAX_RETRIES = 3
@@ -116,6 +118,7 @@ class OpenPosition:
     confidence_at_entry: float = 0
     regime_at_entry: str = ""
     weighted_score: float = 0
+    calibrated_confidence: float = 0
     buy_score: float = 0
     sell_score: float = 0
     agent_breakdown: Dict = field(default_factory=dict)
@@ -177,6 +180,9 @@ class OpenPosition:
             "tsl_trail_pct": f"{self.tsl_current_trail_pct:.1f}%",
             "tsl_peak_premium": f"₹{self.tsl_highest_premium:,.1f}",
             "tsl_breakeven_hit": self.tsl_breakeven_hit,
+            "weighted_score": self.weighted_score,
+            "calibrated_confidence": getattr(self, "calibrated_confidence", self.weighted_score),
+            "regime_at_entry": self.regime_at_entry,
         }
 
 
@@ -782,6 +788,7 @@ class PositionManager:
             confidence_at_entry=signal.confidence,
             regime_at_entry=signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime),
             weighted_score=signal.weighted_score,
+            calibrated_confidence=signal.metadata.get("calibrated_confidence", signal.weighted_score),
             buy_score=signal.buy_score,
             sell_score=signal.sell_score,
             agent_breakdown=signal.agent_breakdown,
@@ -812,6 +819,14 @@ class PositionManager:
             f"Lots: {size_params['lots']} | "
             f"Risk: ₹{size_params['risk_amount']:,.0f}"
         )
+
+        try:
+            analytics_bus.publish("trade_opened", {
+                "position": position.to_dict(),
+                "signal_price": getattr(signal.metadata.get("quote", None), "ask", fill_price) if getattr(signal, "metadata", None) else fill_price,
+            })
+        except Exception as e:
+            self.logger.error(f"Analytics trade_opened publish failed: {e}")
 
         return position
 
@@ -1487,6 +1502,16 @@ class PositionManager:
                 f"Remaining: {pos.qty}"
             )
 
+            try:
+                analytics_bus.publish("trade_closed", {
+                    "position": pos.to_dict(),
+                    "exit_price": exit_price,
+                    "theoretical_exit": exit_price,
+                    "partial": True
+                })
+            except Exception as e:
+                self.logger.error(f"Analytics trade_closed publish failed: {e}")
+
             return {
                 "type": "partial",
                 "pnl": pnl,
@@ -1619,6 +1644,15 @@ class PositionManager:
 
             # Remove from active
             del self.open_positions[position_id]
+
+            try:
+                analytics_bus.publish("trade_closed", {
+                    "position": pos.to_dict(),
+                    "exit_price": exit_price,
+                    "theoretical_exit": exit_price,
+                })
+            except Exception as e:
+                self.logger.error(f"Analytics trade_closed publish failed: {e}")
 
             return result
 

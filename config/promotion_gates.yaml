@@ -1,0 +1,28 @@
+# Machine-enforced configuration for promoting features to production
+
+# Kelly Position Sizing Gate
+kelly_gate:
+  minimum_trades: 300
+  max_calibration_error: 0.05
+  minimum_profit_factor: 1.2
+  enabled: false
+
+# Adaptive Agent Weighting Gate
+adaptive_weight_gate:
+  minimum_trades: 200
+  minimum_agent_stability: 0.7
+  max_weight_change: 0.15 # 15%
+  enabled: false
+
+# LightGBM Meta-Model Gate
+ml_gate:
+  shadow_days: 28
+  minimum_auc_improvement: 0.05
+  max_drawdown_increase: 0.0
+  enabled: false
+
+# Regime Trade Filtering Gate
+regime_filter_gate:
+  minimum_trades_per_regime: 50
+  skip_profit_factor_threshold: 0.7
+  enabled: false

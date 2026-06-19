@@ -292,12 +292,13 @@ class SimulationEngine:
         gates_passed: int,
         gates_total: int,
         costs_estimate: float,
+        data_manager=None,
     ) -> SimulatedTrade:
         """Open a paper trade"""
 
         self._check_daily_reset()
 
-        trade_id = f"SIM-{uuid.uuid4().hex[:6].upper()}"
+        trade_id = f"SIM-{getattr(signal, 'id', uuid.uuid4().hex[:6].upper())}"
 
         # Extract confluence score safely
         confluence_score = 0.0
@@ -318,9 +319,19 @@ class SimulationEngine:
         quote = signal.metadata.get("quote")
         instrument = signal.metadata.get("instrument", {})
 
+        # If quote is missing or invalid, attempt to fetch live from data_manager
+        if not (quote and hasattr(quote, 'ask') and quote.ask > 0) and data_manager and instrument:
+            live_quote = data_manager.fetch_option_quote(
+                instrument.get("strike"),
+                instrument.get("type"),
+                instrument.get("expiry")
+            )
+            if live_quote and hasattr(live_quote, 'ask') and live_quote.ask > 0:
+                quote = live_quote
+
         # Determine base signal price
-        base_price = quote.ask if (quote and quote.ask > 0) else signal.entry_price
-        if not (quote and quote.ask > 0):
+        base_price = quote.ask if (quote and hasattr(quote, 'ask') and quote.ask > 0) else signal.entry_price
+        if not (quote and hasattr(quote, 'ask') and quote.ask > 0):
             self.logger.warning("Simulation fallback to Spot due to missing OptionQuote")
 
         # Classify instrument for moneyness calc
@@ -381,13 +392,36 @@ class SimulationEngine:
         filled_qty = exec_result.filled_qty
 
         # ── Adjust SL/TP relative to actual fill price + Execution Policy ──
-        sl_dist = abs(signal.entry_price - signal.stop_loss) * sl_multiplier
-        t1_dist = abs(signal.target_1 - signal.entry_price)
-        t2_dist = abs(signal.target_2 - signal.entry_price) * tp2_multiplier
+        premium_levels = getattr(signal, "metadata", {}).get("premium_levels", {})
         
-        orig_sl_dist = abs(signal.entry_price - signal.stop_loss)
-        orig_t1_dist = abs(signal.target_1 - signal.entry_price)
-        orig_t2_dist = abs(signal.target_2 - signal.entry_price)
+        if premium_levels and "premium_sl" in premium_levels:
+            # We are trading an option. Use the translated premium distances.
+            expected_entry = premium_levels.get("premium_entry", realistic_entry)
+            expected_sl = premium_levels.get("premium_sl", expected_entry - 5.0)
+            
+            # SL distance in premium space
+            base_sl_dist = abs(expected_entry - expected_sl)
+            sl_dist = base_sl_dist * sl_multiplier
+            
+            # Target distances in premium space
+            expected_t1 = premium_levels.get("premium_t1", expected_entry + base_sl_dist * 1.5)
+            t1_dist = abs(expected_t1 - expected_entry)
+            
+            expected_t2 = premium_levels.get("premium_t2", expected_entry + base_sl_dist * 2.5)
+            t2_dist = abs(expected_t2 - expected_entry) * tp2_multiplier
+            
+            orig_sl_dist = base_sl_dist
+            orig_t1_dist = t1_dist
+            orig_t2_dist = abs(expected_t2 - expected_entry)
+        else:
+            # Fallback for Spot simulation
+            sl_dist = abs(signal.entry_price - signal.stop_loss) * sl_multiplier
+            t1_dist = abs(signal.target_1 - signal.entry_price)
+            t2_dist = abs(signal.target_2 - signal.entry_price) * tp2_multiplier
+            
+            orig_sl_dist = abs(signal.entry_price - signal.stop_loss)
+            orig_t1_dist = abs(signal.target_1 - signal.entry_price)
+            orig_t2_dist = abs(signal.target_2 - signal.entry_price)
 
         adjusted_sl = round(realistic_entry - sl_dist, 2)
         adjusted_t1 = round(realistic_entry + t1_dist, 2)
@@ -498,7 +532,7 @@ class SimulationEngine:
                 trade.original_sl_hit = True
                 trade.baseline_outcome = {
                     "exit_reason": "STOP_LOSS",
-                    "pnl": (trade.original_sl - trade.entry_price) * trade.original_qty if trade.direction == Direction.BULLISH else (trade.entry_price - trade.original_sl) * trade.original_qty
+                    "pnl": (trade.original_sl - trade.entry_price) * trade.original_qty
                 }
             if trade.original_tp1 > 0 and eval_price >= trade.original_tp1 and not trade.original_tp1_hit:
                 trade.original_tp1_hit = True
@@ -506,7 +540,7 @@ class SimulationEngine:
                 if not trade.baseline_outcome:
                     trade.baseline_outcome = {
                         "exit_reason": "TARGET_1",
-                        "pnl": (trade.original_tp1 - trade.entry_price) * trade.original_qty if trade.direction == Direction.BULLISH else (trade.entry_price - trade.original_tp1) * trade.original_qty
+                        "pnl": (trade.original_tp1 - trade.entry_price) * trade.original_qty
                     }
             if trade.original_tp2 > 0 and eval_price >= trade.original_tp2 and not trade.original_tp2_hit:
                 trade.original_tp2_hit = True
@@ -558,15 +592,8 @@ class SimulationEngine:
             datetime.now() - trade.timestamp
         ).total_seconds() / 60
 
-        # Calculate P&L
-        if trade.direction == Direction.BULLISH:
-            trade.gross_pnl = (
-                exit_price - trade.entry_price
-            ) * trade.qty
-        else:
-            trade.gross_pnl = (
-                trade.entry_price - exit_price
-            ) * trade.qty
+        # Calculate P&L (Both BUY_CE and BUY_PE are LONG premium positions)
+        trade.gross_pnl = (exit_price - trade.entry_price) * trade.qty
 
         trade.net_pnl = trade.gross_pnl - trade.costs
 

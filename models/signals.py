@@ -504,7 +504,9 @@ class Signal:
             "execution_policy": self.execution_policy.to_dict() if self.execution_policy else None,
             "execution_status": self.execution_status,
             "rejection_status": self.metadata.get("rejection_status", ""),
-            "rejection_reason": self.metadata.get("rejection_reason", "")
+            "rejection_reason": self.metadata.get("rejection_reason", ""),
+            "raw_confidence": f"{self.metadata.get('raw_confidence', 0):.1f}%" if self.metadata.get("raw_confidence") else None,
+            "instrument": self.metadata.get("instrument", {})
         }
 
     def __str__(self) -> str:

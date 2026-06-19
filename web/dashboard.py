@@ -175,8 +175,12 @@ DASHBOARD_HTML = """
                         <div class="exec-item"><span class="exec-label">Target 2</span><span class="exec-value" id="p-t2">—</span></div>
                     </div>
                     <div class="exec-grid" style="margin-top:10px;">
-                        <div class="exec-item"><span class="exec-label">Spot Trigger</span><span class="exec-value" id="s-trigger">—</span></div>
-                        <div class="exec-item"><span class="exec-label">Confidence</span><span class="exec-value" id="s-conf">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Signal Spot</span><span class="exec-value" id="s-trigger">—</span></div>
+                        <div class="exec-item"><span class="exec-label">ATM Strike</span><span class="exec-value" id="s-atm">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Dist to ATM</span><span class="exec-value" id="s-dist">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Contract</span><span class="exec-value" id="s-contract" style="font-size:11px">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Adj Conf</span><span class="exec-value" id="s-conf">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Raw Conf</span><span class="exec-value" id="s-raw-conf">—</span></div>
                         <div class="exec-item"><span class="exec-label">Grade</span><span class="exec-value" id="s-grade">—</span></div>
                         <div class="exec-item"><span class="exec-label">Decay Risk</span><span class="exec-value" id="s-decay">—</span></div>
                     </div>
@@ -427,7 +431,19 @@ DASHBOARD_HTML = """
                     document.getElementById('p-t2').textContent = pl.premium_t2 ? '₹' + pl.premium_t2 : '—';
                     
                     document.getElementById('s-trigger').textContent = '₹' + sig.entry;
+                    
+                    const inst = sig.instrument || {};
+                    if (inst.strike) {
+                        document.getElementById('s-atm').textContent = inst.strike + ' ' + (inst.type || '');
+                        document.getElementById('s-dist').textContent = (sig.entry - inst.strike).toFixed(2) + ' pts';
+                    } else {
+                        document.getElementById('s-atm').textContent = '—';
+                        document.getElementById('s-dist').textContent = '—';
+                    }
+                    document.getElementById('s-contract').textContent = sig.symbol && sig.symbol !== 'NIFTY' ? sig.symbol : '—';
+                    
                     document.getElementById('s-conf').textContent = sig.confidence;
+                    document.getElementById('s-raw-conf').textContent = sig.raw_confidence || '—';
                     document.getElementById('s-grade').textContent = sig.grade;
                     document.getElementById('s-decay').textContent = pl.decay_risk || 'Moderate';
                     

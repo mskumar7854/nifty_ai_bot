@@ -128,6 +128,12 @@ _HOLIDAY_THRESHOLD_S = 3600  # If >1h stale during live hours, assume holiday
 # Lunch confidence penalty (applied by caller via get_confidence_penalty())
 LUNCH_CONFIDENCE_PENALTY = 0.10   # –10%
 
+# ── P0: EOD Flattening Guard ─────────────────────────────────────────────────
+# No new entries after this time.  All open positions must be force-closed by
+# FORCE_EXIT_TIME.  Both values are IST wall-clock (HH, MM).
+EOD_NO_NEW_ENTRY_TIME = dtime(15, 0)   # 15:00 — entry cutoff
+EOD_FORCE_EXIT_TIME   = dtime(15, 20)  # 15:20 — hard force-exit deadline
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -355,6 +361,32 @@ class ExchangeSessionOrchestrator:
         if state == MarketSessionState.LUNCH_DRIFT:
             return 1.0 - LUNCH_CONFIDENCE_PENALTY
         return 1.0
+
+    # ── P0: EOD Flattening Guard ─────────────────────────────────────────────
+
+    def is_entry_cutoff(self) -> bool:
+        """
+        Returns True when no new entries should be placed.
+
+        Policy: reject all new trade entries at or after 15:00 IST.
+        This prevents the 15:03 class of late entries that risk overnight
+        orphaning and gap exposure.
+
+        Safe to call every cycle — no logging, no state mutation.
+        """
+        return datetime.now().time() >= EOD_NO_NEW_ENTRY_TIME
+
+    def is_force_exit_time(self) -> bool:
+        """
+        Returns True when ALL open positions must be closed immediately.
+
+        Policy: force-flatten at or after 15:20 IST.
+        Any position still open at this time is closed at market.
+        This is a hard deadline — no exceptions, no signals needed.
+
+        Safe to call every cycle — no logging, no state mutation.
+        """
+        return datetime.now().time() >= EOD_FORCE_EXIT_TIME
 
     def is_live(self, last_candle_ts=None) -> bool:
         """

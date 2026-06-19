@@ -45,6 +45,8 @@ import time
 from time import perf_counter
 import uuid
 
+from analytics.analytics_bus import analytics_bus
+
 
 class MarketParticipationMode(Enum):
     """
@@ -83,6 +85,7 @@ from models.signals import MarketRegime
 from config.signal_weights import AGENT_WEIGHTS, MIN_CONFIDENCE, MIN_DIRECTION_GAP
 from core.threshold_tuner import ThresholdTuner
 from core.system_fingerprint import SystemFingerprint
+from core.confidence_calibrator import ConfidenceCalibrator
 
 
 def _sigmoid_normalize(x: float, center: float = 0.55, sharpness: float = 8.0) -> float:
@@ -152,6 +155,7 @@ class DecisionEngineV3:
         self.logger = AgentLogger("decision_v3")
         self.scorer = ConfluenceScorer(settings)
         self.quality_grader = SignalQualityGrader(settings)
+        self.calibrator = ConfidenceCalibrator()
 
         self.spike_freeze_until = 0.0
         self.session_started_date = None
@@ -356,7 +360,28 @@ class DecisionEngineV3:
     def learning_agent(self):
         return self.agents.get("learning")
 
-    def process(self, df, snapshot: MarketSnapshot) -> Signal:
+    def process(self, df, snapshot: "MarketSnapshot") -> "Signal":
+        start_ts = perf_counter()
+        try:
+            signal = self._process_impl(df, snapshot)
+        except Exception as e:
+            raise e
+        finally:
+            latency_ms = int((perf_counter() - start_ts) * 1000)
+            try:
+                sig_val = locals().get('signal')
+                analytics_bus.publish("decision_cycle_completed", {
+                    "cycle_id": getattr(self, "current_signal_id", "unknown"),
+                    "latency_ms": latency_ms,
+                    "signal_generated": sig_val.signal_type.value != "NO_TRADE" if sig_val else False,
+                    "agents_evaluated": len(sig_val.agent_votes) if sig_val and hasattr(sig_val, "agent_votes") else 0,
+                    "agents_skipped": 18 - (len(sig_val.agent_votes) if sig_val and hasattr(sig_val, "agent_votes") else 0)
+                })
+            except Exception as e:
+                self.logger.error(f"Analytics decision_cycle_completed publish failed: {e}")
+        return signal
+
+    def _process_impl(self, df, snapshot: "MarketSnapshot") -> "Signal":
         self.current_signal_id = str(uuid.uuid4())[:8]
         outputs = []
         outputs_dict = {}
@@ -531,7 +556,7 @@ class DecisionEngineV3:
                 self.logger.warning(
                     f"⚠️ Unified uncertainty: gap_mult={gap_mult:.3f} "
                     f"regime_mult={regime_mult:.3f} → combined={regime_penalty:.3f} "
-                    f"| Gap: {gap_status['gap_points']}pts ({gap_status['severity']}) "
+                    f"| Initial Gap Severity: {gap_status['severity']} ({gap_status['gap_points']}pts) "
                     f"| Decay: {gap_status['minutes_since_open']:.0f}min elapsed"
                 )
 
@@ -550,6 +575,12 @@ class DecisionEngineV3:
 
             if regime_val in self.settings.trade_filter.blocked_regimes:
                 return self._no_trade_signal(snapshot, [f"Phase 1 Halt: Bad Regime ({regime_val})"], outputs_dict)
+
+            if regime_val == "VOLATILE_CHOPPY" or "CHOPPY" in str(regime).upper():
+                self.logger.warning(
+                    "ADVISORY: CHOPPY Regime Detected. Historically PF=0.67, ECE=0.55. "
+                    "Confidence scores may be highly unreliable."
+                )
 
         # ─── PHASE 2: CORE DIRECTION ───
         for name in self.settings.pipeline.phase_2_core:
@@ -1028,6 +1059,16 @@ class DecisionEngineV3:
             f"Gap: {gap:.2f}"
         )
 
+        current_regime = str(self._classify_market(snapshot, outputs_dict).value)
+        calibrated_confidence = self.calibrator.calibrate(confidence, current_regime)
+
+        self.logger.info(
+            f"🧠 [CALIBRATION] Signal: {signal_type.value} | "
+            f"Raw Conf: {confidence:.2f} | "
+            f"Calibrated: {calibrated_confidence:.2f} | "
+            f"Regime: {current_regime}"
+        )
+
         # Attach dynamic sizing metrics to metadata so PositionManager can size properly
         # ── Agent Sub-Scores (for Telegram signal formatter) ──
         # Normalised to 0-10 scale from agent confidence (0-1 clamped).
@@ -1051,6 +1092,7 @@ class DecisionEngineV3:
             # Use the post-sigmoid dominant probability so the cap reflects
             # the REAL edge strength, not the raw pre-penalty score.
             "dominant_prob": round(confidence, 4),   # confidence IS dominant_prob at this point
+            "calibrated_confidence": round(calibrated_confidence, 4),
             # ── Runtime Fingerprint (incident replay / regression detection) ──
             "fingerprint": self.fingerprint.capture(
                 active_agents=sorted(self.agents.keys()),
@@ -1059,7 +1101,7 @@ class DecisionEngineV3:
                     "min_gap": self.tuner.get_thresholds()[0],
                     "min_conf": self.tuner.get_thresholds()[1],
                 },
-                regime=str(self._classify_market(snapshot, outputs_dict).value),
+                regime=current_regime,
                 gap_penalty=regime_penalty,
                 system_mode=os.getenv("SYSTEM_MODE", "SIMULATION"),
             ),
@@ -1075,6 +1117,8 @@ class DecisionEngineV3:
                 "structure": _agent_score_10("structure"),
                 "price_action": _agent_score_10("price_action"),
             },
+            "raw_confidence": round(getattr(self, "_last_raw_confidence", 0) * 100, 1),
+            "suppression_reason": "REGIME_UNCERTAINTY" if _final_regime_penalty < 0.85 else ("RISK/VOLATILITY" if _final_regime_penalty < 0.95 else "AGENT_DIVERGENCE"),
         }
 
         signal = Signal(
@@ -1909,6 +1953,17 @@ class DecisionEngineV3:
         if len(self.signal_history) > 100:
             self.signal_history = self.signal_history[-100:]
 
+        try:
+            if signal.signal_type.value != "NO_TRADE":
+                analytics_bus.publish("signal_generated", {
+                    "signal_id": getattr(signal, "id", None) or getattr(signal, "intent_id", None),
+                    "expected_edge_pts": getattr(signal, "expected_profit_pts", 0.0),
+                    "snapshot": getattr(signal, "metadata", {}).get("snapshot_dict", {}),
+                    "metadata": getattr(signal, "metadata", {})
+                })
+        except Exception as e:
+            self.logger.error(f"Analytics signal publish failed: {e}")
+
     def _record_opportunity(
         self,
         blocked_by: str,
@@ -1932,6 +1987,15 @@ class DecisionEngineV3:
         import json as _json
         now = datetime.now()
         entry_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+        try:
+            analytics_bus.publish("signal_blocked", {
+                "signal_id": entry_id,
+                "reason": blocked_by,
+                "theoretical_entry": snapshot.price if snapshot else 0.0,
+            })
+        except Exception as e:
+            self.logger.error(f"Analytics block publish failed: {e}")
 
         # ── 1. Agent Attribution ────────────────────────────────────────────────
         # Compute which agent dragged down the dominant score the most.

@@ -355,6 +355,14 @@ class NiftyAISystem:
             settings.system_mode.mode == "SIMULATION"
         )
 
+        # ── P0: EOD Force-Exit Idempotency Guard ──
+        # Tracks which position IDs have already had a force-exit attempted.
+        # Prevents repeated close() calls every 1-second cycle between 15:20–15:30.
+        # Cleared on __init__ (i.e., per bot session) — sufficient since EOD is a
+        # one-shot daily event.
+        self._eod_force_exit_attempted: set[str] = set()
+
+
         # ── 🩺 Broker Health Monitor (v4.7) ──
         self.broker_health = BrokerHealthMonitor(settings)
 
@@ -402,23 +410,24 @@ class NiftyAISystem:
         # Distinction:
         #   telegram_enabled = True  → app initialized, alerts dispatched
         #   is_simulation = True     → execution blocked downstream (PositionManager hard-lock)
-        self.telegram_enabled = True
+        self.telegram_enabled = settings.alerts.telegram_enabled
 
-        try:
-            await app.initialize()
+        if self.telegram_enabled:
             try:
-                await app.bot.delete_webhook(drop_pending_updates=True)
-            except Exception as weberr:
-                logger.warning(f"Webhook deletion warning: {weberr}")
-            await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
-            if self.is_simulation:
-                logger.info("📱 Telegram Active (SIMULATION mode — alerts only, no real execution)")
-            else:
-                logger.info("📱 Telegram Async Polling Active (LIVE mode)")
-        except Exception as e:
-            logger.error("Telegram init failed: %s", e)
-            self.telegram_enabled = False
+                await app.initialize()
+                try:
+                    await app.bot.delete_webhook(drop_pending_updates=True)
+                except Exception as weberr:
+                    logger.warning(f"Webhook deletion warning: {weberr}")
+                await app.start()
+                await app.updater.start_polling(drop_pending_updates=True)
+                if self.is_simulation:
+                    logger.info("📱 Telegram Active (SIMULATION mode — alerts only, no real execution)")
+                else:
+                    logger.info("📱 Telegram Async Polling Active (LIVE mode)")
+            except Exception as e:
+                logger.error("Telegram init failed: %s", e)
+                self.telegram_enabled = False
 
 
         # 2. Wake up the Brain (Load memory from disk)
@@ -445,7 +454,8 @@ class NiftyAISystem:
             logger.info("Starting background OI Updater loop...")
             await self.data_manager.start_oi_updater()
 
-        logger.info("🚀 System v4.6.1 Hardened Started")
+        import os
+        logger.info(f"🚀 System v4.6.1 Hardened Started | PID={os.getpid()}")
 
         # ── VERIFY SESSION STATE ON BOOT ──
         boot_session = orchestrator.get_session_state()
@@ -568,9 +578,16 @@ class NiftyAISystem:
                 deadman_task.cancel()
                 broker_health_task.cancel()
                 await self.data_manager.stop_oi_updater()
-                await app.updater.stop()
-                await app.stop()
-                await app.shutdown()
+                if getattr(self, "telegram_enabled", False):
+                    try:
+                        await app.updater.stop()
+                    except Exception:
+                        pass
+                try:
+                    await app.stop()
+                    await app.shutdown()
+                except Exception:
+                    pass
                 self.stop()
 
     async def _run_cycle(self, session: aiohttp.ClientSession):
@@ -592,7 +609,7 @@ class NiftyAISystem:
 
         # ── Execution Fidelity Audit ──
         if self.cycle_count % 60 == 0:
-            if orchestrator.is_live(self.data_manager.last_market_activity_ts):
+            if orchestrator.is_live(self.data_manager.last_market_activity_ts) and not self.is_simulation:
                 # Run broker reconciliation every ~60 cycles (~1 minute)
                 asyncio.create_task(asyncio.to_thread(self.reconciliator.audit_broker_state))
                 
@@ -735,6 +752,59 @@ class NiftyAISystem:
             # ── 4. Monitor positions ──
             await self._monitor_positions(snapshot, df)
 
+            # ── P0: EOD Force-Exit Sweep (15:20 hard deadline) ──
+            # If the clock has passed 15:20, close every open position
+            # immediately — simulation and live both.  This prevents overnight
+            # orphaning, state corruption, and gap-risk on restart.
+            if orchestrator.is_force_exit_time():
+                # ── Sim: simulation.open_trades is a live dict; entries are
+                # removed by _close_trade, so the membership check is the
+                # natural guard against re-closing.  We still skip any ID
+                # already in the attempted set to survive partial-close errors.
+                new_sim_ids = [
+                    tid for tid in list(self.simulation.open_trades.keys())
+                    if tid not in self._eod_force_exit_attempted
+                ]
+                if new_sim_ids:
+                    logger.warning(
+                        f"⏰ [EOD-FORCE-EXIT] 15:20 deadline reached. "
+                        f"Force-closing {len(new_sim_ids)} open sim trade(s)."
+                    )
+                    for tid in new_sim_ids:
+                        self._eod_force_exit_attempted.add(tid)
+                        self.simulation._close_trade(
+                            tid,
+                            snapshot.price,
+                            "EOD_FORCE_EXIT",
+                        )
+
+                if not self.is_simulation:
+                    # Live: only attempt each PID once per session.
+                    # A failed close is logged at ERROR so the operator can act,
+                    # but we do NOT retry every 1-second cycle.
+                    new_live_ids = [
+                        pid for pid in list(self.position_manager.open_positions.keys())
+                        if pid not in self._eod_force_exit_attempted
+                    ]
+                    if new_live_ids:
+                        logger.critical(
+                            f"⏰ [EOD-FORCE-EXIT] Closing {len(new_live_ids)} live position(s) "
+                            f"— 15:20 hard deadline."
+                        )
+                        for pid in new_live_ids:
+                            self._eod_force_exit_attempted.add(pid)
+                            try:
+                                await asyncio.to_thread(
+                                    self.position_manager.close_position,
+                                    pid, snapshot.price, "EOD_FORCE_EXIT"
+                                )
+                            except Exception as _eod_err:
+                                logger.error(
+                                    f"[EOD-FORCE-EXIT] Failed to close {pid}: {_eod_err}. "
+                                    f"Manual intervention required."
+                                )
+
+
             # ── 5. Check pending entries ──
             confirmed = self.entry_engine.check_confirmations(
                 snapshot, df
@@ -755,7 +825,20 @@ class NiftyAISystem:
                 return
                 
             self.last_candle_timestamp = current_candle_ts
-            
+
+            # ── P0: EOD Entry Cutoff (15:00 hard gate) ──
+            # Reject ALL new entries at or after 15:00.  This is a hard rule
+            # that sits BEFORE signal generation to guarantee no late entries
+            # can slip through the decision engine or 10-gate filter.
+            if orchestrator.is_entry_cutoff():
+                if self.cycle_count % 60 == 0:  # log once per minute
+                    logger.info(
+                        "⏰ [EOD-ENTRY-CUTOFF] 15:00 reached — "
+                        "no new entries allowed. Monitoring only."
+                    )
+                self._update_dashboard(snapshot, None)
+                return
+
             if not trade_allowed:
                 return  # Skip signal generation and trade entry if blocked
                 
@@ -900,7 +983,10 @@ class NiftyAISystem:
                 "exit_reason": None,
                 "risk_reason": None,
                 "ai_reason": None,
-                "trade_id": None
+                "trade_id": None,
+                "raw_confidence": signal.metadata.get("raw_confidence", signal.confidence),
+                "confidence_suppression": round(signal.metadata.get("raw_confidence", signal.confidence) - signal.confidence, 1),
+                "suppression_reason": signal.metadata.get("suppression_reason", "UNKNOWN")
             }
 
             # ── 9. Run 10-Gate Filter ──
@@ -1296,7 +1382,8 @@ class NiftyAISystem:
             # v4.9: trade_executed only set AFTER liquidity gate passes.
             # Previously it was set before the gate, causing misleading
             # "trade_executed: true, pnl: null" log entries.
-            log_entry["trade_executed"] = True
+            log_entry["trade_executed"] = False
+            log_entry["execution_status"] = "LIQUIDITY_PASSED"
             self.perf_logger.log_signal(log_entry)
 
             # ── P0.6: DECISION SNAPSHOT (Pre-Execution Truth Capture) ──
@@ -1356,7 +1443,7 @@ class NiftyAISystem:
             # 2. TelegramController will handle AUTO mode execution via its internal routing.
             # Simulation tracking (unchanged)
             if self.is_simulation:
-                self.simulation.open_simulated_trade(
+                sim_trade = self.simulation.open_simulated_trade(
                     signal=signal,
                     snapshot=snapshot,
                     filter_score=filter_result.final_score,
@@ -1364,7 +1451,12 @@ class NiftyAISystem:
                     gates_passed=filter_result.filters_passed,
                     gates_total=filter_result.filters_total,
                     costs_estimate=40,
+                    data_manager=self.data_manager,
                 )
+                if sim_trade:
+                    self.perf_logger.mark_trade_executed(signal.id, "EXECUTED")
+                else:
+                    self.perf_logger.mark_trade_executed(signal.id, "FAILED")
 
             self._update_dashboard(snapshot, signal)
             
@@ -1541,11 +1633,13 @@ class NiftyAISystem:
             if pos:
                 logger.info(f"✅ [EXECUTE_SIGNAL] LIVE TRADE EXECUTED | {signal.signal_type.value} @ ₹{price:,.1f}")
                 self.execution_failures = 0 # Reset on success
+                self.perf_logger.mark_trade_executed(getattr(signal, "id", "unknown"), "EXECUTED")
                 if hasattr(self, "broker_health"):
                     self.broker_health.record_order_success()
             else:
                 self.execution_failures += 1
                 logger.warning(f"⚠️ [EXECUTE_SIGNAL] Execution Failure [{self.execution_failures}]")
+                self.perf_logger.mark_trade_executed(getattr(signal, "id", "unknown"), "FAILED")
             return pos
 
     # ───────────────────────────────────────────────────────────
