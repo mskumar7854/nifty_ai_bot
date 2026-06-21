@@ -806,6 +806,7 @@ class NiftyAISystem:
 
 
             # ── 5. Check pending entries ──
+            t_exec = time.perf_counter()
             confirmed = self.entry_engine.check_confirmations(
                 snapshot, df
             )
@@ -814,6 +815,7 @@ class NiftyAISystem:
                     self._sim_execute(pending, snapshot)
                 else:
                     await self._live_execute(eid, pending, snapshot)
+            self._current_latencies["execution_ms"] = int((time.perf_counter() - t_exec) * 1000)
 
             # ── 6. Process only new candles ──
             current_candle_ts = df.index[-1] if df is not None and not df.empty else None
@@ -854,13 +856,18 @@ class NiftyAISystem:
                 cycle_lat = sum(self._current_latencies.values())
                 summary = {
                     "engine_cycle_id": self.cycle_count,
+                    "signal_id": getattr(signal, "id", f"sig_{self.cycle_count}"),
                     "regime": signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime),
                     "regime_confidence": signal.metadata.get("regime_conf", 0.0) if hasattr(signal, "metadata") else 0.0,
                     "environment_valid": True,
                     "opportunity_valid": signal.signal_type != SignalType.NO_TRADE,
                     "execution_authorized": auth,
                     "rejection_reason": reason,
+                    "kill_reason": reason if not auth else None,
                     "adaptive_threshold": round(getattr(self.decision_engine, "_last_adaptive_threshold", 0.0), 3),
+                    "agent_score": round(getattr(self.decision_engine, "_last_agent_score", 0.0), 3),
+                    "gap_multiplier": round(getattr(self.decision_engine, "_last_gap_multiplier", 1.0), 3),
+                    "final_score": round(getattr(self.decision_engine, "_last_raw_confidence", 0.0), 3),
                     "raw_confidence": round(getattr(self.decision_engine, "_last_raw_confidence", 0.0), 3),
                     "buy_score": round(getattr(signal, "buy_score", 0.0), 3),
                     "sell_score": round(getattr(signal, "sell_score", 0.0), 3),
@@ -870,7 +877,9 @@ class NiftyAISystem:
                         "cycle_ms": cycle_lat,
                         "fetch_ms": self._current_latencies.get("fetch_ms", 0),
                         "oi_ms": self._current_latencies.get("oi_ms", 0),
+                        "agents_ms": self._current_latencies.get("agents_ms", 0),
                         "decision_ms": self._current_latencies.get("decision_ms", 0),
+                        "execution_ms": self._current_latencies.get("execution_ms", 0),
                         "dashboard_ms": self._current_latencies.get("dashboard_ms", 0),
                         "db_ms": self._current_latencies.get("db_ms", 0)
                     }

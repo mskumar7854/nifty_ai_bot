@@ -406,8 +406,7 @@ class DecisionEngineV3:
         # ─── PHASE 2: GAP & SPIKE PROTECTION ───
         # Priority 4 Fix: Use ATR-normalised, time-decaying gap penalty.
         # Old model: binary flag → full-session weight reduction (over-suppressive).
-        # New model: GapPenaltyManager computes severity relative to ATR and
-        #            exponentially decays it so gap influence melts away naturally.
+        # New model: GapPenaltyManager computes severity relative to ATR and        #            exponentially decays it so gap influence melts away naturally.
         today_date = datetime.now().date()
         if self.gap_penalty_mgr.is_new_session_needed():
             self.session_started_date = today_date
@@ -416,8 +415,14 @@ class DecisionEngineV3:
                     (snapshot.day_open if snapshot.day_open > 0 else snapshot.price)
                     - snapshot.prev_day_close
                 )
-                atr = snapshot.atr if snapshot.atr > 0 else 100.0
-                self.gap_penalty_mgr.new_session(gap_pts, atr)
+                raw_atr = snapshot.atr if snapshot.atr > 0 else 100.0
+                
+                # Convert intraday ATR to bounded daily estimate.
+                # GapPenaltyManager is tuned for Daily ATR scale (150-300).
+                estimated_daily_atr = max(raw_atr * 10, 80.0)
+                self.logger.info(f"📊 [GAP_PENALTY] Intraday ATR: {raw_atr:.2f} | Estimated Daily ATR: {estimated_daily_atr:.2f}")
+                
+                self.gap_penalty_mgr.new_session(gap_pts, estimated_daily_atr)
                 self.session_gap_detected = gap_pts > 0  # kept for metadata compat
 
         if df is not None and not df.empty:
@@ -676,6 +681,8 @@ class DecisionEngineV3:
         _early_dominant = max(_early_buy, _early_sell)
         
         self._last_raw_confidence = _early_dominant
+        self._last_gap_multiplier = _effective_gap_mult
+        self._last_agent_score = _early_dominant / _effective_gap_mult if _effective_gap_mult > 0 else 0.0
         self._last_adaptive_threshold = MIN_DOMINANT_THRESHOLD
         
         if _early_dominant < MIN_DOMINANT_THRESHOLD:
