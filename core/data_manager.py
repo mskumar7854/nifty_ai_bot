@@ -1397,8 +1397,39 @@ class DataManager:
                         self.ohlcv_data = pd.concat([self.ohlcv_data, new_rows])
                         self.last_new_candle_ts = time.time()
                 else:
-                    # Reject as stale (latency/out-of-order)
-                    self.logger.warning(f"⚠️ Stale candle received! {latest_api_ts} < {last_ts}. Rejecting.")
+                    # ── P1 Fix: Handle Broker Lag (Stale array + live mutation) ──
+                    # Instead of rejecting, we assume the broker's endpoint is lagging behind
+                    # the real world, but the *last row* is still carrying live prices.
+                    self.logger.warning(f"⚠️ [DATA_STATE] BROKER_LAG: Broker API timestamp frozen at {latest_api_ts} while local is {last_ts}.")
+                    # Update the local candle with the live price
+                    live_close = df_new.iloc[-1]['close']
+                    self.ohlcv_data.iloc[-1, self.ohlcv_data.columns.get_loc('close')] = live_close
+                    self.ohlcv_data.iloc[-1, self.ohlcv_data.columns.get_loc('high')] = max(self.ohlcv_data.iloc[-1]['high'], live_close)
+                    self.ohlcv_data.iloc[-1, self.ohlcv_data.columns.get_loc('low')] = min(self.ohlcv_data.iloc[-1]['low'], live_close)
+
+                # ── P2 Fix: Synthetic Candle Fallback (>120s lag) ──
+                # If local time has advanced to a new minute, but the broker hasn't delivered
+                # a new candle for > 120 seconds, we synthesize a candle to prevent dataframe lag.
+                current_minute = pd.Timestamp(datetime.now()).floor('min')
+                local_last_ts = self.ohlcv_data.index[-1]
+                
+                lag_seconds = (datetime.now() - local_last_ts.to_pydatetime()).total_seconds()
+                
+                if lag_seconds > 120 and current_minute > local_last_ts:
+                    self.logger.warning(
+                        f"⚠️ [DATA_STATE] BROKER_LAG > 120s! Synthesizing missing candle for {current_minute} "
+                        f"to prevent indicator distortion."
+                    )
+                    last_close = self.ohlcv_data.iloc[-1]['close']
+                    new_candle = pd.Series({
+                        'open': last_close,
+                        'high': last_close,
+                        'low': last_close,
+                        'close': last_close,
+                        'volume': 0
+                    }, name=current_minute)
+                    self.ohlcv_data.loc[current_minute] = new_candle
+                    self.last_new_candle_ts = time.time()
 
             # Memory limit
             MAX_CANDLES = 2000

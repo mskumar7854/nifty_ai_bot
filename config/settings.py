@@ -61,6 +61,11 @@ class SystemMode:
     small_capital: float = 10000.0
     scaled_capital: float = 100000.0
 
+    # ── P0 Fix: Orchestrator Decoupling ──
+    # If the broker candle timestamp is frozen, how many seconds to wait
+    # before forcing a decision engine cycle anyway?
+    forced_decision_interval_sec: int = 30
+
     # Phase progression
     current_phase: int = 1              # 1=Sim, 2=Small, 3=Scaled
     phase_1_min_days: int = 3

@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Any, Optional
 from datetime import datetime
+from utils.id_generator import TradeIdGenerator
 
 @dataclass
 class TradeRecord:
@@ -10,7 +11,7 @@ class TradeRecord:
     Connects Score -> Market Context -> Outcome
     """
     # Identification
-    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    trade_id: str = field(default_factory=lambda: TradeIdGenerator.generate())
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     system_version: str = "v5.0"
     signal: str = "UNKNOWN"
@@ -53,7 +54,7 @@ class RejectionRecord:
     Logs why a trade was NOT taken (Refinement 5)
     """
     type: str = "REJECTED"
-    trade_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    trade_id: str = field(default_factory=lambda: TradeIdGenerator.generate())
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     system_version: str = "v5.0"
     signal_type: str = "UNKNOWN"

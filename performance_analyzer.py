@@ -7,67 +7,50 @@ def analyze_day(date_str: str = None):
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Load signals
-    log_path = Path(f"logs/trades_{date_str}.csv")
-    if not log_path.exists():
-        print(f"No signal log found for {date_str} at {log_path}")
-        return
-
-    df = pd.read_csv(log_path)
-    
-    # Load exits if they exist and merge
-    exit_path = Path(f"logs/exits_{date_str}.json")
-    if exit_path.exists():
-        with open(exit_path, 'r') as f:
-            exits = [json.loads(line) for line in f if line.strip()]
+    # Load Daily Summary
+    summary_path = Path(f"logs/daily_summary_{date_str}.json")
+    if summary_path.exists():
+        with open(summary_path, 'r') as f:
+            summary = json.load(f)
         
-        if exits:
-            exits_df = pd.DataFrame(exits)
-            # Merge exits into the main dataframe based on trade_id
-            # This updates pnl, exit_price, exit_reason for rows that have matching trade_ids
-            for _, exit_row in exits_df.iterrows():
-                tid = exit_row.get("trade_id")
-                if tid:
-                    mask = df["trade_id"] == tid
-                    if mask.any():
-                        df.loc[mask, "exit_price"] = exit_row.get("exit_price")
-                        df.loc[mask, "pnl"] = exit_row.get("pnl")
-                        df.loc[mask, "exit_reason"] = exit_row.get("exit_reason")
+        print(f"\n📊 Performance Analysis for {date_str} (From Daily Summary)")
+        print("=" * 60)
+        print(f"Total Signals: {summary.get('signals', 0)}")
+        print(f"Trades Taken:  {summary.get('entries', 0)}")
+        print(f"Rejected:      {summary.get('rejections', 0)}")
+        print("-" * 60)
+        print(f"Wins:          {summary.get('wins', 0)}")
+        print(f"Losses:        {summary.get('losses', 0)}")
+        print(f"Net PnL:       ₹{summary.get('net_pnl', 0.0):.2f}")
+        print(f"Expectancy:    {summary.get('expectancy', 0.0):.2f}R")
+        print(f"Avg R:         {summary.get('avg_r', 0.0):.2f}R")
+        
+        if summary.get("best_trade"):
+            print(f"Best Trade:    {summary.get('best_trade')} ")
+        if summary.get("worst_trade"):
+            print(f"Worst Trade:   {summary.get('worst_trade')}")
+        print("=" * 60)
 
-    print(f"\n📊 Performance Analysis for {date_str}")
-    print("=" * 40)
-    
-    total_signals = len(df)
-    executed = df[df['trade_executed'] == True].copy()
-    rejected = df[df['filter_passed'] == False].copy()
-    
-    print(f"Total Signals: {total_signals}")
-    print(f"Trades Taken:  {len(executed)}")
-    print(f"Rejected:      {len(rejected)}")
-    print("-" * 40)
-
-    # Convert PnL to numeric just in case
-    executed['pnl'] = pd.to_numeric(executed['pnl'], errors='coerce')
-    
-    # Calculate executed trades performance
-    if len(executed) > 0:
-        completed = executed.dropna(subset=['pnl'])
-        if len(completed) > 0:
-            win_rate = (completed['pnl'] > 0).mean() * 100
-            avg_pnl = completed['pnl'].mean()
-            total_pnl = completed['pnl'].sum()
-            print(f"Win rate: {win_rate:.1f}% (over {len(completed)} closed trades)")
-            print(f"Avg PnL:  ₹{avg_pnl:.2f}")
-            print(f"Net PnL:  ₹{total_pnl:.2f}")
-        else:
-            print("Trades are open. No closed PnL available yet.")
+    # Load Ledger for detailed breakdown if needed
+    ledger_path = Path(f"logs/ledger_{date_str}.json")
+    if ledger_path.exists():
+        with open(ledger_path, 'r') as f:
+            trades = [json.loads(line) for line in f if line.strip()]
+            
+        if trades:
+            print(f"\nDetailed Ledger Insights ({len(trades)} Trades):")
+            print("-" * 60)
+            for t in trades:
+                tid = t.get("trade_id", "UNKNOWN")
+                outcome = t.get("outcome", "UNKNOWN")
+                financial = t.get("analytics", {}).get("financial", {})
+                net_pnl = financial.get("net_pnl", 0.0)
+                decision = t.get("trade", {}).get("decision", {})
+                grade = decision.get("grade", "U")
+                
+                print(f" - {tid} | Grade: {grade} | Outcome: {outcome:10} | PnL: ₹{net_pnl:>7.2f}")
     else:
-        print("No trades executed.")
-
-    print("-" * 40)
-    print(f"Rejected trades: {len(rejected)}")
-    print("Filter impact (Avoided Loss / Missed Profit) simulation requires historical data exit logic.")
-    # Placeholder for hypothetical PnL simulation on rejected trades.
+        print(f"No ledger records found for {date_str} at {ledger_path}")
 
 if __name__ == "__main__":
     analyze_day()

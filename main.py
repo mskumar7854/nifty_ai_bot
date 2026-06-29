@@ -7,6 +7,9 @@ PRO MODE + SIMULATION + DISCIPLINE
 ============================================
 """
 
+import traceback
+import csv
+import uuid
 import time
 import asyncio
 import aiohttp
@@ -241,6 +244,7 @@ class NiftyAISystem:
         
         self.last_cycle_time = 0
         self.no_trade_streak = 0  # Fix #4: Trade Frequency Guard counter
+        self.trade_sequence = 0
         self.last_candle_timestamp = None
         self._last_telemetry_log_ts = 0.0 # Force log telemetry on first cycle status
 
@@ -692,6 +696,14 @@ class NiftyAISystem:
             "oi_ms": 0,
         }
 
+        # ── Layer 1: Decision Engine Watchdog ──
+        if not hasattr(self, '_last_decision_ts'):
+            self._last_decision_ts = time.time()
+            
+        stall_time = time.time() - self._last_decision_ts
+        if stall_time > 90:
+            logger.critical(f"🚨 [WATCHDOG] Decision engine stalled for {stall_time:.1f}s")
+
         # 🔥 Update Global Risk (PnL from DB)
         t_db = time.perf_counter()
         await self.risk_manager.update_daily_pnl()
@@ -772,9 +784,17 @@ class NiftyAISystem:
                     )
                     for tid in new_sim_ids:
                         self._eod_force_exit_attempted.add(tid)
+                        # P0 Fix: Resolve option premium instead of passing raw spot price
+                        trade = self.simulation.open_trades.get(tid)
+                        if trade:
+                            exit_premium = self.simulation._resolve_exit_premium(
+                                trade, snapshot.price, snapshot, self.data_manager
+                            )
+                        else:
+                            exit_premium = snapshot.price  # Fallback (trade already gone)
                         self.simulation._close_trade(
                             tid,
-                            snapshot.price,
+                            exit_premium,
                             "EOD_FORCE_EXIT",
                         )
 
@@ -817,16 +837,29 @@ class NiftyAISystem:
                     await self._live_execute(eid, pending, snapshot)
             self._current_latencies["execution_ms"] = int((time.perf_counter() - t_exec) * 1000)
 
-            # ── 6. Process only new candles ──
+            # ── 6. Process only new candles (or Force cycle on broker lag) ──
             current_candle_ts = df.index[-1] if df is not None and not df.empty else None
+            
+            # P0 Fix: Decouple decision engine from strict candle rollover
             if self.last_candle_timestamp == current_candle_ts:
-                # Only run heavy decision engine when a new candle closes/opens
-                # Keep updating dashboard periodically
-                if self.cycle_count % 5 == 0:
-                    self._update_dashboard(snapshot, None)
-                return
+                time_since_decision = time.time() - self._last_decision_ts
+                forced_interval = getattr(settings.system_mode, "forced_decision_interval_sec", 30)
+                
+                if time_since_decision > forced_interval:
+                    if self.cycle_count % 30 == 0:
+                        logger.warning(
+                            f"⚠️ [ORCHESTRATOR] Candle stalled for {int(time_since_decision)}s. "
+                            f"Forcing decision cycle with mutated live price to maintain liveliness."
+                        )
+                else:
+                    # Only run heavy decision engine when a new candle closes/opens OR if stalled
+                    # Keep updating dashboard periodically
+                    if self.cycle_count % 5 == 0:
+                        self._update_dashboard(snapshot, None)
+                    return
                 
             self.last_candle_timestamp = current_candle_ts
+            self._last_decision_ts = time.time()
 
             # ── P0: EOD Entry Cutoff (15:00 hard gate) ──
             # Reject ALL new entries at or after 15:00.  This is a hard rule
@@ -848,6 +881,11 @@ class NiftyAISystem:
             t_decision = time.perf_counter()
             signal = self.decision_engine.process(df, snapshot)
             self._current_latencies["decision_ms"] = int((time.perf_counter() - t_decision) * 1000)
+            
+            # ── UNIFIED TRADE ID ──
+            self.trade_sequence += 1
+            signal.id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{self.trade_sequence:03d}-{uuid.uuid4().hex[:4].upper()}"
+            signal.status = "PENDING"
             
             # ── FINAL UNIFIED EXECUTION SUMMARY LOG ──
             def _log_canonical_truth(auth: bool, reason: str):
@@ -985,8 +1023,9 @@ class NiftyAISystem:
                 "max_pain_distance": -1,
                 "filter_passed": False,
                 "trade_executed": False,
-                "entry_price": None,
-                "exit_price": None,
+                "spot_entry_price": None,
+                "option_entry_price": None,
+                "option_exit_price": None,
                 "pnl": None,
                 "would_have_taken_without_filter": True,
                 "exit_reason": None,
@@ -1196,10 +1235,10 @@ class NiftyAISystem:
                 log_entry["filter_passed"] = True
                 
             # Filter passed -> assign trade ID
-            trade_id = f"{int(time.time())}_{signal.signal_type.value}"
-            log_entry["entry_price"] = snapshot.price
+            trade_id = signal.id
+            log_entry["spot_entry_price"] = snapshot.price
             log_entry["trade_id"] = trade_id
-            signal.id = trade_id  # Attach to signal so exit logging can map it
+            # attach to signal so exit logging can map it (already attached, but re-asserting for clarity if needed, not actually needed)
             
             # ── PHASE A: INSTRUMENT RESOLUTION & PREMIUM ──
             from core.options_resolver import OptionContractBuilder, OptionExecutionTranslator
@@ -1373,6 +1412,9 @@ class NiftyAISystem:
             signal.metadata["instrument"] = instrument
             signal.metadata["quote"] = quote
             signal.metadata["premium_levels"] = premium_levels
+            
+            log_entry["option_entry_price"] = premium_levels.get("premium_entry", quote.ask if hasattr(quote, 'ask') else None)
+
             # v4.8: Lightweight snapshot summary for Telegram signal formatter
             signal.metadata["snapshot_summary"] = {
                 "spot": snapshot.price,
@@ -1769,6 +1811,8 @@ class NiftyAISystem:
                 exit_price = trade.get("exit_price") or trade.get("exit", snapshot.price)
                 reason = trade.get("exit_reason", "sim_close")
                 self.perf_logger.log_exit(trade_id, exit_price, pnl, reason)
+                if "ledger_record" in trade:
+                    self.perf_logger.log_final_trade(trade["ledger_record"])
                 
                 # ── Analytics: Track Trade Result ──
                 entry = trade.get("entry", 0)
@@ -1873,6 +1917,11 @@ class NiftyAISystem:
             
             # Session Orchestrator Telemetry (uses mutation-based freshness)
             status["orchestrator"] = orchestrator.get_dashboard_fields(self.data_manager.last_market_activity_ts)
+            
+            # System Health & Watchdog Telemetry
+            status["system_health"] = {
+                "decision_stall_seconds": round(time.time() - getattr(self, "_last_decision_ts", time.time()), 1)
+            }
             
             # Latency Telemetry
             lat = self._latency_history[-1] if hasattr(self, '_latency_history') and self._latency_history else 0

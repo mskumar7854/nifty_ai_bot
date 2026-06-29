@@ -53,6 +53,7 @@ class SimulatedTrade:
 
     # Prices
     entry_price: float
+    spot_entry: float = 0.0
     stop_loss: float
     target_1: float
     target_2: float
@@ -78,6 +79,9 @@ class SimulatedTrade:
     vix: float = 0
     confluence: float = 0
     agreement_pct: float = 0
+    atr: float = 0.0
+    adx: float = 0.0
+    grade_reason: str = ""
 
     # Filter info
     filter_score: float = 0
@@ -161,6 +165,133 @@ class SimulatedTrade:
             "adaptation_pnl_delta": round(self.adaptation_pnl_delta, 2),
         }
 
+    def to_ledger_record(self) -> dict:
+        risk_rupees = abs(self.entry_price - self.stop_loss) * self.qty
+        return {
+            "trade_id": self.trade_id,
+            "schema_version": 2,
+            "status": "CLOSED",
+            "outcome": self.exit_reason,
+            "trade": {
+                "session": {
+                    "trading_day": self.timestamp.strftime("%Y-%m-%d"),
+                    "market": "NSE",
+                    "session": self.session,
+                    "weekday": self.timestamp.strftime("%A").upper(),
+                    "expiry_week": False
+                },
+                "environment": {
+                    "python": "3.12.5",
+                    "git_commit": "unknown",
+                    "hostname": os.environ.get("COMPUTERNAME", "UNKNOWN"),
+                    "build": "v5.0"
+                },
+                "instrument": {
+                    "symbol": self.instrument.get("symbol", "NIFTY"),
+                    "option_type": self.instrument.get("type", "CE"),
+                    "strike": self.instrument.get("strike", 0),
+                    "expiry": self.instrument.get("expiry", ""),
+                    "exchange": "NFO",
+                    "tradingsymbol": self.instrument.get("tradingsymbol", "")
+                },
+                "strategy": {
+                    "engine_version": "5.0",
+                    "strategy": "MasterDecisionEngine",
+                    "mode": "SIMULATION",
+                    "capital_mode": "SIM",
+                    "config_hash": "SIM_CONF"
+                },
+                "signal": {
+                    "direction": self.direction.value,
+                    "strength": self.confidence,
+                    "generated_by": "MasterDecisionEngine"
+                },
+                "market": {
+                    "spot_entry": self.spot_entry,
+                    "regime": self.regime,
+                    "adx": self.adx,
+                    "atr": self.atr,
+                    "vix": self.vix,
+                    "oi_bias": self.instrument.get("oi_bias", "UNKNOWN")
+                },
+                "decision": {
+                    "grade": self.grade,
+                    "confidence": self.confidence,
+                    "agent_agreement": self.agreement_pct,
+                    "filter_score": self.filter_score,
+                    "signal_quality": self.filter_score,
+                    "approved_by": "MasterDecisionEngine",
+                    "gate_version": "v4",
+                    "passed_filters": []
+                },
+                "execution": {
+                    "broker": "SIMULATION",
+                    "entries": [
+                        {
+                            "price": self.entry_price,
+                            "qty": self.qty,
+                            "order_type": "MARKET",
+                            "fill_type": "FULL",
+                            "slippage": self.slippage_pts
+                        }
+                    ],
+                    "exits": [
+                        {
+                            "price": self.simulated_exit_price,
+                            "qty": self.qty,
+                            "reason": self.exit_reason,
+                            "order_type": "LIMIT",
+                            "fill_type": "FULL",
+                            "slippage": self.exit_slippage_pts
+                        }
+                    ]
+                },
+                "risk": {
+                    "initial_sl": self.stop_loss,
+                    "current_sl": self.stop_loss,
+                    "target1": self.target_1,
+                    "target2": self.target_2,
+                    "risk_rupees": round(risk_rupees, 2),
+                    "risk_percent": 0.0
+                },
+                "latency": {
+                    "signal_to_authorization_ms": 0,
+                    "authorization_to_entry_ms": 0,
+                    "entry_to_fill_ms": self.latency_ms,
+                    "cycle_ms": self.latency_ms
+                },
+                "artifacts": {
+                    "snapshot": f"snapshot_{self.trade_id}.json",
+                    "market_state": f"market_state_{self.trade_id}.json",
+                    "decision_trace": f"trace_{self.trade_id}.json"
+                },
+                "timestamps": {
+                    "signal": self.timestamp.isoformat(),
+                    "authorized": self.timestamp.isoformat(),
+                    "entry": self.timestamp.isoformat(),
+                    "target1": None,
+                    "target2": None,
+                    "exit": datetime.now().isoformat(),
+                    "closed": datetime.now().isoformat()
+                }
+            },
+            "analytics": {
+                "financial": {
+                    "gross_pnl": round(self.gross_pnl, 2),
+                    "costs": round(self.costs, 2),
+                    "net_pnl": round(self.net_pnl, 2)
+                },
+                "derived": {
+                    "r_multiple": round(self.net_pnl / risk_rupees, 2) if risk_rupees > 0 else 0.0,
+                    "mae": 0.0,
+                    "mfe": 0.0,
+                    "expectancy_bucket": self.grade,
+                    "holding_minutes": round(self.hold_minutes, 1)
+                }
+            }
+        }
+
+
 
 @dataclass
 class DailySimReport:
@@ -243,6 +374,7 @@ class SimulationEngine:
         self.today_trades = 0
         self.today_pnl = 0.0
         self.today_date = date.today()
+        self.reset_month = self.today_date.month
 
         # ── Equity Curve ──
         self.equity_points: List[Dict] = [{
@@ -298,7 +430,8 @@ class SimulationEngine:
 
         self._check_daily_reset()
 
-        trade_id = f"SIM-{getattr(signal, 'id', uuid.uuid4().hex[:6].upper())}"
+        from utils.id_generator import TradeIdGenerator
+        trade_id = getattr(signal, 'id', None) or TradeIdGenerator.generate()
 
         # Extract confluence score safely
         confluence_score = 0.0
@@ -459,6 +592,11 @@ class SimulationEngine:
             gates_total=gates_total,
             instrument=instrument,
             costs=costs_estimate,
+            spot_entry=snapshot.price,
+            atr=snapshot.atr,
+            adx=getattr(snapshot, 'adx', 0.0),
+            grade_reason=signal.reasons[0] if signal.reasons else "",
+            agreement_pct=confluence_score,
             # ── Execution telemetry ──
             fill_ratio=exec_result.fill_ratio,
             slippage_pts=exec_result.slippage_pts,
@@ -500,12 +638,69 @@ class SimulationEngine:
 
         return trade
 
+    def _resolve_exit_premium(
+        self, trade: SimulatedTrade, current_spot: float,
+        snapshot: MarketSnapshot, data_manager=None
+    ) -> float:
+        """
+        P0 Fix: Resolve the current option premium for exit pricing.
+
+        Uses a 3-tier fallback:
+          Tier 1: Actual contract premium via data_manager.fetch_option_quote()
+          Tier 2: ATM premium proxy from snapshot (atm_ce_premium / atm_pe_premium)
+          Tier 3: Delta approximation from spot movement relative to entry
+
+        NEVER returns raw spot price — that would cause astronomical PnL errors
+        when compared against the option premium stored in trade.entry_price.
+        """
+        # ── Tier 1: Actual contract premium (best accuracy) ──
+        if data_manager and trade.instrument:
+            quote = data_manager.fetch_option_quote(
+                trade.instrument.get("strike"),
+                trade.instrument.get("type"),
+                trade.instrument.get("expiry")
+            )
+            if quote and quote.bid > 0:
+                return quote.bid
+
+        # ── Tier 2: ATM premium proxy from snapshot ──
+        if snapshot:
+            is_ce = trade.signal_type == SignalType.BUY_CE
+            atm_premium = snapshot.atm_ce_premium if is_ce else snapshot.atm_pe_premium
+            if atm_premium and atm_premium > 0:
+                self.logger.debug(
+                    f"⚠️ Premium Tier 2 (ATM proxy): {trade.trade_id} | "
+                    f"Using {'CE' if is_ce else 'PE'} ATM premium ₹{atm_premium:.2f}"
+                )
+                return atm_premium
+
+        # ── Tier 3: Delta approximation (emergency fallback) ──
+        # Estimate premium change from spot movement.
+        # Use a conservative delta of 0.5 for ATM options.
+        spot_move = current_spot - (snapshot.price if snapshot else current_spot)
+        is_ce = trade.signal_type == SignalType.BUY_CE
+        delta = 0.5 if is_ce else -0.5
+        estimated_premium = trade.entry_price + (spot_move * delta)
+        # Floor at 0.05 — option premium cannot go negative
+        estimated_premium = max(0.05, estimated_premium)
+
+        self.logger.warning(
+            f"⚠️ Premium Tier 3 (delta approx): {trade.trade_id} | "
+            f"Entry premium: ₹{trade.entry_price:.2f} | "
+            f"Spot move: {spot_move:+.2f} | "
+            f"Estimated exit premium: ₹{estimated_premium:.2f}"
+        )
+        return round(estimated_premium, 2)
+
     def update_open_trades(
         self, current_price: float, snapshot: MarketSnapshot, data_manager=None
     ) -> List[Dict]:
         """
         Check all open sim trades for SL/TP hits.
         Returns list of closed trade results.
+
+        P0 Fix: All exit paths now use resolved option premium
+        instead of raw spot price for PnL calculation.
         """
 
         closed = []
@@ -514,17 +709,10 @@ class SimulationEngine:
             if trade.result != "OPEN":
                 continue
 
-            eval_price = current_price
-
-            # PHASE A: Option Premium Tracking (sell at BID)
-            if data_manager and trade.instrument:
-                quote = data_manager.fetch_option_quote(
-                    trade.instrument.get("strike"),
-                    trade.instrument.get("type"),
-                    trade.instrument.get("expiry")
-                )
-                if quote and quote.bid > 0:
-                    eval_price = quote.bid
+            # ── P0 Fix: Resolve current option premium (never raw spot) ──
+            eval_price = self._resolve_exit_premium(
+                trade, current_price, snapshot, data_manager
+            )
 
             # ── Phase C: Counterfactual Intrabar Hit Tracking ──
             # Deterministic intrabar assumptions: SL hits before TP if both breached, but we'll mark them as we see them.
@@ -545,24 +733,32 @@ class SimulationEngine:
             if trade.original_tp2 > 0 and eval_price >= trade.original_tp2 and not trade.original_tp2_hit:
                 trade.original_tp2_hit = True
 
-            # Option Premium goes UP on a win
             if eval_price <= trade.stop_loss:
                 self._close_trade(tid, eval_price, "STOP_LOSS")
-                closed.append(self.all_trades[-1].to_dict() if self.all_trades else {})
+                if self.all_trades:
+                    t_dict = self.all_trades[-1].to_dict()
+                    t_dict["ledger_record"] = self.all_trades[-1].to_ledger_record()
+                    closed.append(t_dict)
             elif trade.target_1 > 0 and eval_price >= trade.target_1:
                 self._close_trade(tid, eval_price, "TARGET_1")
-                closed.append(self.all_trades[-1].to_dict() if self.all_trades else {})
+                if self.all_trades:
+                    t_dict = self.all_trades[-1].to_dict()
+                    t_dict["ledger_record"] = self.all_trades[-1].to_ledger_record()
+                    closed.append(t_dict)
 
             # Time-based exit check (only for still-open trades)
+            # P0 Fix: Use eval_price (resolved premium), NOT current_price (spot)
             if tid in self.open_trades:
                 hold_time = (
                     datetime.now() - trade.timestamp
                 ).total_seconds() / 60
 
                 if hold_time > self.settings.exit.max_hold_time_minutes:
-                    self._close_trade(tid, current_price, "TIME_EXIT")
-                    closed.append(self.all_trades[-1].to_dict()
-                                  if self.all_trades else {})
+                    self._close_trade(tid, eval_price, "TIME_EXIT")
+                    if self.all_trades:
+                        t_dict = self.all_trades[-1].to_dict()
+                        t_dict["ledger_record"] = self.all_trades[-1].to_ledger_record()
+                        closed.append(t_dict)
 
         return closed
 
@@ -575,6 +771,22 @@ class SimulationEngine:
             return
 
         trade = self.open_trades[trade_id]
+
+        # ── P0.5 Safety Assertion: Catch spot-vs-premium confusion ──
+        # A Nifty option premium realistically cannot move more than ~500 pts
+        # from entry in a single session. If it does, the exit_price is almost
+        # certainly a raw spot value that leaked through.
+        premium_move = abs(exit_price - trade.entry_price)
+        if premium_move > 500:
+            self.logger.critical(
+                f"🚨 SUSPICIOUS PREMIUM MOVE: {trade_id} | "
+                f"Entry: ₹{trade.entry_price:.2f} → Exit: ₹{exit_price:.2f} | "
+                f"Delta: {premium_move:.2f} pts | Reason: {reason} | "
+                f"This looks like spot price leaked into premium PnL. "
+                f"Clamping exit to entry (PnL=0) to prevent data corruption."
+            )
+            # Clamp to entry price so PnL = 0 rather than ±billions
+            exit_price = trade.entry_price
 
         # ── Phase A: Exit Slippage ──
         exit_result = self.exec_engine.simulate_exit(
@@ -771,6 +983,22 @@ class SimulationEngine:
 
     def _check_daily_reset(self):
         today = date.today()
+        
+        # ── Capital Reset Logic ──
+        # Reset if new month
+        if hasattr(self, 'reset_month') and today.month != self.reset_month:
+            self.logger.info(f"🔄 Monthly Rollover Detected (Old: {self.reset_month}, New: {today.month}). Resetting Simulation Capital to ₹{self.initial_capital:,.0f}.")
+            self.current_capital = self.initial_capital
+            self.peak_capital = self.initial_capital
+            self.reset_month = today.month
+            
+        # Reset if ruin
+        if self.current_capital <= 0:
+            self.logger.warning(f"💥 CAPITAL DEPLETED! Resetting Simulation Capital to ₹{self.initial_capital:,.0f}.")
+            self.current_capital = self.initial_capital
+            self.peak_capital = self.initial_capital
+            self.reset_month = today.month
+
         if self.today_date != today:
             self._generate_daily_report()
             self.today_date = today
@@ -1138,6 +1366,7 @@ class SimulationEngine:
         state = {
             "current_capital": self.current_capital,
             "peak_capital": self.peak_capital,
+            "reset_month": getattr(self, 'reset_month', date.today().month),
             "net_pnl": self.net_pnl,
             "wins": self.wins,
             "losses": self.losses,
@@ -1162,6 +1391,7 @@ class SimulationEngine:
             self.peak_capital = state.get(
                 "peak_capital", self.initial_capital
             )
+            self.reset_month = state.get("reset_month", date.today().month)
             self.net_pnl = state.get("net_pnl", 0)
             self.wins = state.get("wins", 0)
             self.losses = state.get("losses", 0)
