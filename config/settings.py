@@ -729,6 +729,8 @@ class EnginePipelineConfig:
             # Phase 1 gatekeepers
             "time_session",
             "regime",
+            "decay",
+            "expiry_day",
             # Phase 2 core
             "structure",
             "price_action",
@@ -738,8 +740,7 @@ class EnginePipelineConfig:
         ]
         # Temporarily Disabled (Phase 1 Edge Validation):
         # "oi", "trap", "order_flow", "level", "institutional", 
-        # "multi_timeframe", "volatility", "decay", "expiry_day", 
-        # "learning", "market", "sentiment"
+        # "multi_timeframe", "volatility", "learning", "market", "sentiment"
     )
 
     # Phase 1: The Gatekeepers (Fast & Cheap)
@@ -747,7 +748,9 @@ class EnginePipelineConfig:
     phase_1_gatekeepers: List[str] = field(
         default_factory=lambda: [
             "time_session",
-            "regime"
+            "regime",
+            "decay",
+            "expiry_day"
         ]
     )
 
@@ -838,7 +841,7 @@ class Settings:
         self.trading = TradingConfig(
             instrument=self.symbol,
             capital=capital,
-            max_risk_per_trade=max_trade_loss,
+            max_risk_per_trade=float(os.getenv("MAX_RISK_PER_TRADE_PCT", 2.0)),
             max_daily_trades=int(os.getenv("MAX_DAILY_TRADES", 3)),
             max_daily_loss=max_daily_loss,
             auto_shutdown_after_market=os.getenv("AUTO_SHUTDOWN", "false").lower() == "true",

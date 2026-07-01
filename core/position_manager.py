@@ -140,6 +140,14 @@ class OpenPosition:
     tsl_phase: str = "INITIAL"                 # INITIAL|BREAKEVEN|ACTIVE|TIGHTEN_1|TIGHTEN_2|IDLE_TIGHTEN
     tsl_grade: str = "B"                       # Signal grade at entry (additive adjustment)
     tsl_regime: str = "UNKNOWN"                # Regime at entry (additive adjustment)
+    
+    # ── Trade Health & Exits ──
+    health_score: float = 100.0
+    health_state: str = "HEALTHY"
+    iv_at_entry: float = 0.0
+    underlying_price_at_entry: float = 0.0
+    consecutive_iv_drops: int = 0
+    consecutive_critical_cycles: int = 0
 
     def update_pnl(self, current_price: float):
         """Update unrealized P&L"""
@@ -183,6 +191,9 @@ class OpenPosition:
             "weighted_score": self.weighted_score,
             "calibrated_confidence": getattr(self, "calibrated_confidence", self.weighted_score),
             "regime_at_entry": self.regime_at_entry,
+            # ── Health ──
+            "health_score": f"{self.health_score:.1f}",
+            "health_state": self.health_state,
         }
 
 
@@ -273,6 +284,7 @@ class PositionManager:
 
         # ── Open Positions ──
         self.open_positions: Dict[str, OpenPosition] = {}
+        self.closed_positions_today: List[dict] = []
 
         # ── Daily Stats ──
         self.today_stats = DailyStats(
@@ -801,6 +813,8 @@ class PositionManager:
             tsl_highest_premium_time=datetime.now(),
             tsl_grade=signal.grade.value if hasattr(signal.grade, "value") else "B",
             tsl_regime=signal.regime.value if hasattr(signal.regime, "value") else "UNKNOWN",
+            iv_at_entry=signal.metadata.get("snapshot_summary", {}).get("atm_iv", 0.0) if hasattr(signal, "metadata") else 0.0,
+            underlying_price_at_entry=signal.metadata.get("snapshot_summary", {}).get("spot", fill_price) if hasattr(signal, "metadata") else fill_price,
         )
 
         self.open_positions[position_id] = position
@@ -1217,7 +1231,7 @@ class PositionManager:
         except Exception:
             pass
 
-    def update_positions(self, current_price: float) -> List[Dict]:
+    def update_positions(self, current_price: float, snapshot=None, current_signal=None) -> List[Dict]:
         """
         Update all open positions.
         Check for stop loss, targets, trailing.
@@ -1230,6 +1244,51 @@ class PositionManager:
                 continue
 
             pos.update_pnl(current_price)
+            current_premium = pos.entry_premium if pos.entry_premium > 0 else current_price
+
+            # ── 1. Calculate Trade Health ──
+            health_score, health_state, telemetry = self._calculate_trade_health(pos, current_premium, snapshot, current_signal)
+            pos.health_score = health_score
+            pos.health_state = health_state
+            
+            # Volatility Crush Detection
+            if snapshot and hasattr(snapshot, "atm_iv"):
+                if pos.iv_at_entry > 0 and snapshot.atm_iv < pos.iv_at_entry * 0.95: # >5% drop
+                    r_distance = abs(pos.entry_price - pos.original_stop_loss)
+                    entry_risk = r_distance * pos.qty
+                    pnl_in_r = pos.unrealized_pnl / entry_risk if entry_risk > 0 else 0
+                    
+                    if telemetry["efficiency"] < 35.0 and pnl_in_r >= 0.5:
+                        pos.consecutive_iv_drops += 1
+                    else:
+                        pos.consecutive_iv_drops = 0
+                else:
+                    pos.consecutive_iv_drops = 0
+            
+            if pos.consecutive_iv_drops >= 2:
+                actions.append({
+                    "action": "CLOSE",
+                    "position_id": pid,
+                    "reason": "VOLATILITY_CRUSH",
+                    "price": current_price,
+                    "pnl": pos.unrealized_pnl,
+                })
+                continue
+                
+            if health_state == "CRITICAL":
+                pos.consecutive_critical_cycles += 1
+            else:
+                pos.consecutive_critical_cycles = 0
+                
+            if pos.consecutive_critical_cycles >= 3:
+                actions.append({
+                    "action": "CLOSE",
+                    "position_id": pid,
+                    "reason": "HEALTH_SCORE_CRITICAL",
+                    "price": current_price,
+                    "pnl": pos.unrealized_pnl,
+                })
+                continue
 
             # ── Check Stop Loss ──
             if pos.direction == Direction.BULLISH:
@@ -1255,27 +1314,27 @@ class PositionManager:
                     })
                     continue
 
-            # ── P1-D: Theta Protection (MTM P&L in R-multiples) ──
-            # Measurement: MTM P&L (account impact), NOT option premium, NOT underlying move.
-            # Reason: IV crush can suppress premium even on favorable index moves.
-            # If MTM P&L hasn't reached 0.5R within 10 minutes → exit.
+            # ── P1-D: Adaptive Theta Protection ──
             THETA_PROTECTION_MINUTES = 10
-            THETA_PROTECTION_R_THRESHOLD = 0.5
+            if pos.regime_at_entry == "TREND":
+                THETA_PROTECTION_MINUTES = 15
+            elif pos.regime_at_entry in ("CHOP", "RANGE"):
+                THETA_PROTECTION_MINUTES = 8
+            
+            # TODO: Add expiry day flag check from snapshot if available. For now using basic adaptive.
+            if hasattr(snapshot, "is_expiry_day") and snapshot.is_expiry_day:
+                 THETA_PROTECTION_MINUTES = 5
 
+            THETA_PROTECTION_R_THRESHOLD = 0.5
             elapsed_minutes = (datetime.now() - pos.entry_time).total_seconds() / 60.0
             if elapsed_minutes >= THETA_PROTECTION_MINUTES:
-                # entry_risk = initial capital at risk (SL distance in points * qty)
                 r_distance = abs(pos.entry_price - pos.original_stop_loss)
-                entry_risk = r_distance * pos.qty  # R-unit in ₹
-
-                if entry_risk > 0:
-                    pnl_in_r = pos.unrealized_pnl / entry_risk
-                else:
-                    pnl_in_r = 0.0
+                entry_risk = r_distance * pos.qty
+                pnl_in_r = pos.unrealized_pnl / entry_risk if entry_risk > 0 else 0.0
 
                 if pnl_in_r < THETA_PROTECTION_R_THRESHOLD:
                     self.logger.info(
-                        "Theta exit triggered: %.2fR after %.0f min (threshold %.1fR) for %s",
+                        "Adaptive Theta exit: %.2fR after %.0f min (threshold %.1fR) for %s",
                         pnl_in_r, elapsed_minutes, THETA_PROTECTION_R_THRESHOLD, pid
                     )
                     actions.append({
@@ -1351,7 +1410,7 @@ class PositionManager:
                 # Use entry_premium for options (premium-based TSL),
                 # fallback to current_price for non-premium instruments.
                 current_premium = pos.entry_premium if pos.entry_premium > 0 else current_price
-                new_sl = self._compute_tsl(pos, current_premium)
+                new_sl = self._compute_tsl(pos, current_premium, snapshot)
 
                 if new_sl > pos.stop_loss:
                     old_sl = pos.stop_loss
@@ -1381,21 +1440,99 @@ class PositionManager:
 
         return actions
 
-    def _compute_tsl(self, pos: "OpenPosition", current_premium: float) -> float:
+    def _calculate_trade_health(self, pos: "OpenPosition", current_premium: float, snapshot, current_signal) -> Tuple[float, str, dict]:
+        """
+        Calculates Trade Health Score (0-100) and state based on:
+        1. Premium Efficiency (30%)
+        2. Momentum (30%)
+        3. Confidence Decay (20%)
+        4. Regime Compatibility (20%)
+        
+        Returns: (health_score, state, telemetry_dict)
+        """
+        # 1. Premium Efficiency
+        underlying_move = 0.0
+        if snapshot and pos.underlying_price_at_entry > 0:
+            from models.signals import Direction
+            if pos.direction == Direction.BULLISH:
+                underlying_move = snapshot.price - pos.underlying_price_at_entry
+            else:
+                underlying_move = pos.underlying_price_at_entry - snapshot.price
+                
+        expected_premium_gain = max(0.0, underlying_move * 0.5) # Approximate delta 0.5
+        actual_premium_gain = max(0.0, current_premium - pos.entry_premium)
+        
+        efficiency_score = 100.0
+        if expected_premium_gain > 5.0: # Only penalize if expected move is meaningful (>5 pts)
+            efficiency = min(1.0, actual_premium_gain / expected_premium_gain)
+            efficiency_score = efficiency * 100.0
+            
+        # 2. Momentum
+        momentum_score = 50.0
+        if current_signal and hasattr(current_signal, "momentum_score"):
+            momentum_score = max(0.0, min(100.0, current_signal.momentum_score))
+            
+        # 3. Confidence Decay
+        confidence_score = 100.0
+        if current_signal:
+            current_conf = getattr(current_signal, "confidence", 100.0)
+            drop = pos.confidence_at_entry - current_conf
+            if current_conf < 60 and drop >= 20:
+                confidence_score = 0.0
+            elif drop > 0:
+                confidence_score = max(0.0, 100.0 - (drop * 2)) # Scale drop
+                
+        # 4. Regime Compatibility
+        regime_score = 100.0
+        if current_signal and hasattr(current_signal, "regime"):
+            curr_regime = current_signal.regime.value if hasattr(current_signal.regime, "value") else str(current_signal.regime)
+            if pos.regime_at_entry == "TREND" and curr_regime in ("CHOP", "RANGE"):
+                regime_score = 0.0
+            elif pos.regime_at_entry == "TREND" and curr_regime == "PULLBACK":
+                regime_score = 50.0
+            elif pos.regime_at_entry in ("CHOP", "MEAN_REVERSION") and curr_regime == "TREND":
+                regime_score = 0.0
+                
+        final_score = (efficiency_score * 0.3) + (momentum_score * 0.3) + (confidence_score * 0.2) + (regime_score * 0.2)
+        final_score = max(0.0, min(100.0, final_score))
+        
+        state = pos.health_state
+        if state == "HEALTHY":
+            if final_score < 40:
+                state = "CRITICAL"
+            elif final_score < 60:
+                state = "WARNING"
+            elif final_score < 80:
+                state = "WATCH"
+        elif state == "WATCH":
+            if final_score >= 85:
+                state = "HEALTHY"
+            elif final_score < 40:
+                state = "CRITICAL"
+            elif final_score < 60:
+                state = "WARNING"
+        elif state == "WARNING":
+            if final_score >= 65:
+                state = "WATCH"
+            elif final_score < 40:
+                state = "CRITICAL"
+        elif state == "CRITICAL":
+            if final_score >= 45:
+                state = "WARNING"
+            
+        telemetry = {
+            "efficiency": round(efficiency_score, 1),
+            "momentum": round(momentum_score, 1),
+            "confidence": round(confidence_score, 1),
+            "regime": round(regime_score, 1),
+            "total": round(final_score, 1)
+        }
+        return final_score, state, telemetry
+
+    def _compute_tsl(self, pos: "OpenPosition", current_premium: float, snapshot=None) -> float:
         """
         Hybrid Trailing Stop Loss computation engine.
-
-        Determines the new SL price based on:
-          - Profit milestone phase (INITIAL → BREAKEVEN → ACTIVE → TIGHTEN_1 → TIGHTEN_2)
-          - Grade ADDITIVE adjustment (A+ +2%, C -2%)
-          - Regime ADDITIVE adjustment (trend +2%, chop -2%)
-          - Time-based idle tightening (no new high for 15min → -2%)
-
-        Design principles:
-          - ADDITIVE (not multiplicative) adjustments: prevents runaway 18%+ trails
-          - Hard floor (5%) and ceiling (15%) clamps on final trail width
-          - Ratchet: returned value NEVER decreases below pos.stop_loss
-          - Premium-based: operates on option premium, not index price
+        Determines the new SL price based on ATR, Bid/Ask spread, and Health Score.
         """
         cfg = self.config
         entry = pos.entry_premium if pos.entry_premium > 0 else pos.entry_price
@@ -1407,68 +1544,65 @@ class PositionManager:
             pos.tsl_highest_premium_time = now  # Reset idle clock on new high
 
         if entry <= 0:
-            return pos.stop_loss  # Guard: no valid entry reference
+            return pos.stop_loss
 
         profit_pct = (pos.tsl_highest_premium - entry) / entry * 100
 
         # ── Phase determination ──
         if profit_pct >= cfg.tsl_tighten_2_trigger_pct:
             pos.tsl_phase = "TIGHTEN_2"
-            base_trail = cfg.tsl_trail_pct_tighten_2
             pos.tsl_active = True
         elif profit_pct >= cfg.tsl_tighten_1_trigger_pct:
             pos.tsl_phase = "TIGHTEN_1"
-            base_trail = cfg.tsl_trail_pct_tighten_1
             pos.tsl_active = True
         elif profit_pct >= cfg.tsl_activate_trigger_pct:
             pos.tsl_phase = "ACTIVE"
-            base_trail = cfg.tsl_trail_pct_normal
             pos.tsl_active = True
         elif profit_pct >= cfg.tsl_breakeven_trigger_pct:
-            # Break-even: slide SL to entry price, no active trailing yet
             pos.tsl_phase = "BREAKEVEN"
             pos.tsl_breakeven_hit = True
-            new_sl = max(pos.entry_price, pos.stop_loss)  # ratchet
+            new_sl = max(pos.entry_price, pos.stop_loss)
             return round(new_sl, 1)
         else:
             pos.tsl_phase = "INITIAL"
-            return pos.stop_loss  # Hold original SL
+            return pos.stop_loss
 
-        # ── ADDITIVE grade adjustment ──
-        grade_adj = cfg.tsl_grade_adjustments.get(pos.tsl_grade, 0.0)
-
-        # ── ADDITIVE regime adjustment ──
-        regime_adj = cfg.tsl_regime_adjustments.get(pos.tsl_regime, 0.0)
-
-        adjusted_trail = base_trail + grade_adj + regime_adj
-
-        # ── Time-based idle tightening ──
-        # Theta decay silently erodes option premium when price stagnates.
-        # If no new premium high for threshold minutes, tighten trail
-        # proactively to lock remaining value before decay accelerates.
+        # ── Compute Trail Distance ──
+        atr = getattr(snapshot, "atr", 10.0) if snapshot else 10.0
+        # Translate underlying ATR to approximate Option ATR (Delta ~0.5)
+        option_atr = atr * 0.5 
+        
+        bid_ask_spread = (pos.spread_pct_entry / 100.0) * current_premium if pos.spread_pct_entry > 0 else 0.5
+        min_tick = 0.05 * 5  # 5 ticks
+        
+        base_trail_dist = max(0.5 * option_atr, bid_ask_spread, min_tick)
+        
+        # ── Health Score Adjustment ──
+        health_multiplier = 1.0
+        if pos.health_state == "WATCH":
+            health_multiplier = 0.8  # Tighten by 20%
+        elif pos.health_state == "WARNING":
+            health_multiplier = 0.5  # Tighten by 50%
+            
+        # Phase adjustment
+        if pos.tsl_phase == "TIGHTEN_1":
+            health_multiplier *= 0.8
+        elif pos.tsl_phase == "TIGHTEN_2":
+            health_multiplier *= 0.6
+            
+        # Time-based idle tightening
         if cfg.tsl_idle_tighten_enabled and pos.tsl_highest_premium_time:
             idle_minutes = (now - pos.tsl_highest_premium_time).total_seconds() / 60.0
             if idle_minutes >= cfg.tsl_idle_minutes_threshold:
-                adjusted_trail -= cfg.tsl_idle_tighten_by_pct
+                health_multiplier *= 0.7
                 if pos.tsl_phase not in ("TIGHTEN_1", "TIGHTEN_2", "IDLE_TIGHTEN"):
                     pos.tsl_phase = "IDLE_TIGHTEN"
-                    self.logger.info(
-                        f"TSL IDLE_TIGHTEN {pos.position_id}: "
-                        f"No new premium high for {idle_minutes:.0f}min. "
-                        f"Trail tightened by {cfg.tsl_idle_tighten_by_pct}%"
-                    )
-
-        # ── Hard clamps (override all adjustments) ──
-        adjusted_trail = max(adjusted_trail, cfg.tsl_min_trail_pct)   # floor: 5%
-        adjusted_trail = min(adjusted_trail, cfg.tsl_max_trail_pct)   # ceiling: 15%
-        pos.tsl_current_trail_pct = adjusted_trail
-
-        # ── TSL price = peak_premium minus trail% ──
-        new_sl = pos.tsl_highest_premium * (1.0 - adjusted_trail / 100.0)
-
-        # Ratchet: NEVER lower the SL
+                    
+        final_trail_dist = base_trail_dist * health_multiplier
+        
+        pos.tsl_current_trail_pct = (final_trail_dist / pos.tsl_highest_premium) * 100 if pos.tsl_highest_premium > 0 else 0
+        new_sl = pos.tsl_highest_premium - final_trail_dist
         new_sl = max(new_sl, pos.stop_loss)
-
         return round(new_sl, 1)
 
     def close_position(
@@ -1624,6 +1758,7 @@ class PositionManager:
                     time_in_trade=hold_duration
                 )
                 self.trade_logger.log_trade(record)
+                self.closed_positions_today.append(record.to_dict())
             except Exception as e:
                 self.logger.error(f"Failed to log trade to learning layer: {e}")
 
@@ -1798,6 +1933,7 @@ class PositionManager:
                 capital_current=self.total_capital,
                 peak_capital=self.peak_capital,
             )
+            self.closed_positions_today.clear()
             self.is_halted = False
             self.halt_reason = ""
 

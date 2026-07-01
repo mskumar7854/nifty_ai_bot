@@ -53,10 +53,10 @@ class SimulatedTrade:
 
     # Prices
     entry_price: float
-    spot_entry: float = 0.0
     stop_loss: float
     target_1: float
     target_2: float
+    spot_entry: float = 0.0
     simulated_exit_price: float = 0
 
     # Size
@@ -435,8 +435,17 @@ class SimulationEngine:
 
         # Extract confluence score safely
         confluence_score = 0.0
+        agreement_pct = 0.0
         if signal.confluence:
             confluence_score = signal.confluence.confluence_ratio * 100
+            total_agents = signal.confluence.total_agents
+            bullish = signal.confluence.bullish_agents
+            bearish = signal.confluence.bearish_agents
+            direction_agents = (
+                bullish if signal.direction == Direction.BULLISH
+                else bearish
+            )
+            agreement_pct = safe_divide(direction_agents * 100, total_agents)
 
         # Extract regime safely
         regime_str = ""
@@ -586,7 +595,7 @@ class SimulationEngine:
             ),
             vix=snapshot.india_vix,
             confluence=confluence_score,
-            agreement_pct=0.0,
+            agreement_pct=agreement_pct,
             filter_score=filter_score,
             gates_passed=gates_passed,
             gates_total=gates_total,
@@ -596,7 +605,6 @@ class SimulationEngine:
             atr=snapshot.atr,
             adx=getattr(snapshot, 'adx', 0.0),
             grade_reason=signal.reasons[0] if signal.reasons else "",
-            agreement_pct=confluence_score,
             # ── Execution telemetry ──
             fill_ratio=exec_result.fill_ratio,
             slippage_pts=exec_result.slippage_pts,

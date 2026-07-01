@@ -292,6 +292,53 @@ DASHBOARD_HTML = """
         <div id="bi-recs" style="margin-top:15px; background:#101020; padding:12px; border-radius:6px; font-size:12px; color:#aaa;"></div>
     </div>
 
+    <!-- Active Positions -->
+    <div class="panel" id="active-positions-panel">
+        <div class="panel-title">🛡️ ACTIVE POSITIONS & TRADE HEALTH</div>
+        <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:left;">
+                <thead>
+                    <tr style="border-bottom:1px solid #333; color:#888;">
+                        <th style="padding:8px;">ID</th>
+                        <th style="padding:8px;">Direction</th>
+                        <th style="padding:8px;">Qty</th>
+                        <th style="padding:8px;">Entry / Current</th>
+                        <th style="padding:8px;">P&amp;L</th>
+                        <th style="padding:8px;">TSL Phase</th>
+                        <th style="padding:8px;">Health Score</th>
+                        <th style="padding:8px;">Health State</th>
+                    </tr>
+                </thead>
+                <tbody id="active-positions-body">
+                    <tr><td colspan="8" style="padding:8px; color:#555; text-align:center;">No active positions</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Today's Closed Positions -->
+    <div class="panel" id="closed-positions-panel">
+        <div class="panel-title">📚 TODAY'S CLOSED POSITIONS</div>
+        <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:left;">
+                <thead>
+                    <tr style="border-bottom:1px solid #333; color:#888;">
+                        <th style="padding:8px;">ID</th>
+                        <th style="padding:8px;">Signal</th>
+                        <th style="padding:8px;">Entry / Exit</th>
+                        <th style="padding:8px;">P&amp;L</th>
+                        <th style="padding:8px;">Hold Time</th>
+                        <th style="padding:8px;">Max Fav / Adv</th>
+                        <th style="padding:8px;">Time</th>
+                    </tr>
+                </thead>
+                <tbody id="closed-positions-body">
+                    <tr><td colspan="7" style="padding:8px; color:#555; text-align:center;">No closed positions today</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <!-- Priority 1: Trade Replay & Ledger -->
     <div class="panel" id="trade-replay-panel">
         <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center;">
@@ -523,6 +570,61 @@ DASHBOARD_HTML = """
                 entry.textContent = text;
                 log.prepend(entry);
                 if (log.children.length > 50) log.removeChild(log.lastChild);
+            }
+            // Active Positions
+            if (data.positions) {
+                const tbody = document.getElementById('active-positions-body');
+                let html = '';
+                data.positions.forEach(p => {
+                    const dirColor = p.direction === 'BULLISH' ? '#00ff88' : '#ff4444';
+                    
+                    // Parse PnL value which is a formatted string like '₹-1,500' or '₹200'
+                    let pnlVal = 0;
+                    if (typeof p.unrealized_pnl === 'string') {
+                        pnlVal = parseFloat(p.unrealized_pnl.replace(/[^0-9.-]+/g, ""));
+                    } else {
+                        pnlVal = p.unrealized_pnl || 0;
+                    }
+                    const pnlColor = pnlVal >= 0 ? '#00ff88' : '#ff4444';
+                    
+                    const hlthColor = p.health_state === 'HEALTHY' ? '#00ff88' : (p.health_state === 'WATCH' ? '#ffaa00' : (p.health_state === 'WARNING' ? '#ff8800' : '#ff4444'));
+                    
+                    let entryPrice = p.entry ? (typeof p.entry === 'number' ? p.entry.toFixed(1) : p.entry) : '—';
+                    let currentPrice = p.current ? (typeof p.current === 'number' ? p.current.toFixed(1) : p.current) : '—';
+                    
+                    html += `<tr style="border-bottom:1px solid #222;">
+                        <td style="padding:8px; font-weight:bold; color:#00d4ff;">${p.id}</td>
+                        <td style="padding:8px; color:${dirColor}">${p.direction}</td>
+                        <td style="padding:8px;">${p.qty}</td>
+                        <td style="padding:8px;">₹${entryPrice} / ₹${currentPrice}</td>
+                        <td style="padding:8px; color:${pnlColor}; font-weight:bold;">${typeof p.unrealized_pnl === 'string' ? p.unrealized_pnl : ('₹' + pnlVal.toFixed(1))}</td>
+                        <td style="padding:8px; color:#aaa;">${p.tsl_phase || '—'}</td>
+                        <td style="padding:8px;">${p.health_score || '—'}</td>
+                        <td style="padding:8px; color:${hlthColor}; font-weight:bold;">${p.health_state || '—'}</td>
+                    </tr>`;
+                });
+                tbody.innerHTML = html || '<tr><td colspan="8" style="padding:8px; color:#555; text-align:center;">No active positions</td></tr>';
+            }
+
+            // Today's Closed Positions
+            if (data.closed_positions_today) {
+                const tbody = document.getElementById('closed-positions-body');
+                let html = '';
+                data.closed_positions_today.forEach(p => {
+                    const pnlColor = p.pnl > 0 ? '#00ff88' : (p.pnl < 0 ? '#ff4444' : '#aaaaaa');
+                    const signalColor = (p.signal || '').toUpperCase() === 'BULLISH' ? '#00ff88' : '#ff4444';
+                    
+                    html += `<tr style="border-bottom:1px solid #222;">
+                        <td style="padding:8px; font-weight:bold; color:#888;">${p.trade_id || p.id || '—'}</td>
+                        <td style="padding:8px; color:${signalColor}">${p.signal || '—'}</td>
+                        <td style="padding:8px;">₹${(p.entry_price || 0).toFixed(1)} / ₹${(p.exit_price || 0).toFixed(1)}</td>
+                        <td style="padding:8px; color:${pnlColor}; font-weight:bold;">₹${(p.pnl || 0).toFixed(1)}</td>
+                        <td style="padding:8px;">${(p.time_in_trade || 0).toFixed(1)}m</td>
+                        <td style="padding:8px; color:#aaa;">+₹${(p.max_favorable || 0).toFixed(1)} / -₹${Math.abs(p.max_adverse || 0).toFixed(1)}</td>
+                        <td style="padding:8px; color:#aaa;">${p.time_of_day || '—'}</td>
+                    </tr>`;
+                });
+                tbody.innerHTML = html || '<tr><td colspan="7" style="padding:8px; color:#555; text-align:center;">No closed positions today</td></tr>';
             }
         }
         // Burn-In Stats polling

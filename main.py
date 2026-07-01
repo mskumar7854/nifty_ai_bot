@@ -1421,6 +1421,7 @@ class NiftyAISystem:
                 "pcr": round(snapshot.pcr, 2) if snapshot.pcr else 0,
                 "vix": round(snapshot.india_vix, 1) if snapshot.india_vix else 0,
                 "vwap": round(snapshot.vwap, 1) if snapshot.vwap else 0,
+                "atm_iv": round(snapshot.atm_iv, 2) if hasattr(snapshot, "atm_iv") and snapshot.atm_iv else 0,
             }
             
             logger.info(
@@ -1840,7 +1841,8 @@ class NiftyAISystem:
                         label=f"notify_trade_close:{trade_id}"
                     )
         else:
-            actions = await asyncio.to_thread(self.position_manager.update_positions, snapshot.price)
+            current_signal = getattr(self.decision_engine, "last_signal", None) if hasattr(self, "decision_engine") else None
+            actions = await asyncio.to_thread(self.position_manager.update_positions, snapshot.price, snapshot, current_signal)
             for action in actions:
                 if action["action"] in ("CLOSE", "FULL_CLOSE"):
                     result = await asyncio.to_thread(
@@ -1897,6 +1899,7 @@ class NiftyAISystem:
                 self._update_dashboard(snapshot, None)
                 if df is not None and not df.empty:
                     self.last_candle_timestamp = df.index[-1]
+            self._last_decision_ts = time.time()
         except Exception as e:
             logger.error(f"Monitor only fetch failed: {e}")
 
@@ -1912,6 +1915,12 @@ class NiftyAISystem:
             status["entry_stats"] = self.entry_engine.get_stats()
             status["exit_status"] = self.exit_engine.get_status()
             status["risk"] = self.risk_manager.get_status_report()
+            if hasattr(self, "position_manager"):
+                status["positions"] = [p.to_dict() for p in self.position_manager.open_positions.values()]
+                status["closed_positions_today"] = getattr(self.position_manager, "closed_positions_today", [])
+            else:
+                status["positions"] = []
+                status["closed_positions_today"] = []
             status["errors"] = self.error_count
             status["last_cycle"] = self.last_cycle_time
             
