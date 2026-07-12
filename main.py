@@ -326,12 +326,15 @@ class NiftyAISystem:
             is_simulation=(settings.system_mode.mode == "SIMULATION"),
             telegram_enabled=settings.alerts.telegram_enabled,
             db_manager=self.decision_engine.memory.db,
-            data_manager=self.data_manager,
+            data_manager=None, # Will be set by market pipeline
             burnin_tracker=self.burnin_tracker,
             readiness_scorer=self.readiness_scorer,
             simulation=self.simulation,
             system=self
         )
+        self.market_pipeline = MarketDataPipeline(self.ctx)
+        self.data_manager = self.market_pipeline.data_manager # Backward compatibility
+        
         self.telemetry = TelemetryPipeline(self.ctx)
         self.ctx.telemetry = self.telemetry
         
