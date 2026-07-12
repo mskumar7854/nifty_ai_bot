@@ -314,7 +314,7 @@ class NiftyAISystem:
         self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker)
 
         # ── Phase 2: Options Hard Filter ──
-        self.options_analyzer = OptionsAnalyzer(mode=settings.system_mode.mode)
+        # Handled by DecisionPipeline
 
         # ── Telemetry Pipeline ──
         from core.context import RuntimeContext
@@ -337,6 +337,16 @@ class NiftyAISystem:
         
         self.telemetry = TelemetryPipeline(self.ctx)
         self.ctx.telemetry = self.telemetry
+        
+        from core.pipelines.decision_pipeline import DecisionPipeline
+        self.decision_pipeline = DecisionPipeline(self.ctx)
+        
+        # Backward compat
+        self.decision_engine = self.decision_pipeline.decision_engine
+        self.master = self.decision_pipeline.master
+        self.trade_filter = self.decision_pipeline.trade_filter
+        self.options_analyzer = self.decision_pipeline.options_analyzer
+        self.ctx.decision = self.decision_pipeline
         
         # Keep backward compatibility references
         self.telegram_bot = self.telemetry.telegram_bot
@@ -813,369 +823,15 @@ class NiftyAISystem:
             if not trade_allowed:
                 return  # Skip signal generation and trade entry if blocked
                 
-            # ── 7. Generate signal ──
-            t_decision = time.perf_counter()
-            signal = self.decision_engine.process(df, snapshot)
-            self._current_latencies["decision_ms"] = int((time.perf_counter() - t_decision) * 1000)
-            
-            # ── UNIFIED TRADE ID ──
-            self.trade_sequence += 1
-            signal.id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{self.trade_sequence:03d}-{uuid.uuid4().hex[:4].upper()}"
-            signal.status = "PENDING"
-            
-            # ── FINAL UNIFIED EXECUTION SUMMARY LOG ──
-            def _log_canonical_truth(auth: bool, reason: str):
-                import json
-                # Compute approximate cycle latency including pre-checks and data fetch
-                cycle_lat = sum(self._current_latencies.values())
-                summary = {
-                    "engine_cycle_id": self.cycle_count,
-                    "signal_id": getattr(signal, "id", f"sig_{self.cycle_count}"),
-                    "regime": signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime),
-                    "regime_confidence": signal.metadata.get("regime_conf", 0.0) if hasattr(signal, "metadata") else 0.0,
-                    "environment_valid": True,
-                    "opportunity_valid": signal.signal_type != SignalType.NO_TRADE,
-                    "execution_authorized": auth,
-                    "rejection_reason": reason,
-                    "kill_reason": reason if not auth else None,
-                    "adaptive_threshold": round(getattr(self.decision_engine, "_last_adaptive_threshold", 0.0), 3),
-                    "agent_score": round(getattr(self.decision_engine, "_last_agent_score", 0.0), 3),
-                    "gap_multiplier": round(getattr(self.decision_engine, "_last_gap_multiplier", 1.0), 3),
-                    "final_score": round(getattr(self.decision_engine, "_last_raw_confidence", 0.0), 3),
-                    "raw_confidence": round(getattr(self.decision_engine, "_last_raw_confidence", 0.0), 3),
-                    "buy_score": round(getattr(signal, "buy_score", 0.0), 3),
-                    "sell_score": round(getattr(signal, "sell_score", 0.0), 3),
-                    "uncertainty_multiplier": round(getattr(signal, "uncertainty_multiplier", 1.0), 3),
-                    "decision_path": getattr(self.decision_engine, "_last_decision_path", []),
-                    "latency": {
-                        "cycle_ms": cycle_lat,
-                        "fetch_ms": self._current_latencies.get("fetch_ms", 0),
-                        "oi_ms": self._current_latencies.get("oi_ms", 0),
-                        "agents_ms": self._current_latencies.get("agents_ms", 0),
-                        "decision_ms": self._current_latencies.get("decision_ms", 0),
-                        "execution_ms": self._current_latencies.get("execution_ms", 0),
-                        "dashboard_ms": self._current_latencies.get("dashboard_ms", 0),
-                        "db_ms": self._current_latencies.get("db_ms", 0)
-                    }
-                }
-                logger.info(f"📊 EXECUTION TRUTH:\n{json.dumps(summary, indent=2)}")
-                if hasattr(self, "metrics_logger"):
-                    self.metrics_logger.log_cycle(summary)
-                    self.metrics_logger.log_execution_truth(summary)
-
-            
-            if hasattr(self, "observer") and signal.signal_type != SignalType.NO_TRADE:
-                self.observer.on_signal()
-
-            if signal.signal_type == SignalType.NO_TRADE:
-                self.simulation.record_signal(passed=False)
-                self._update_dashboard(snapshot, signal)
-                _log_canonical_truth(False, signal.reasons[0] if signal.reasons else "dominant_score_below_floor")
-
-                # ── FIX #4: TRADE FREQUENCY GUARD ──
-                # Tracks consecutive no-trade cycles and alerts operators when
-                # the system appears structurally locked (not just market-filtered).
-                self.no_trade_streak += 1
-                if self.no_trade_streak in (100, 300, 500) or self.no_trade_streak % 500 == 0:
-                    last_reason = (signal.reasons[0] if signal.reasons else "unknown")
-                    logger.warning(
-                        f"⏳ NO-TRADE STREAK: {self.no_trade_streak} consecutive cycles with no signal. "
-                        f"Last reason: [{last_reason}]. "
-                        f"Check regime confidence, confidence gate, and edge thresholds."
-                    )
-                return
-
-            # ── Signal passed — reset streak ──
-            self.no_trade_streak = 0
-
-            # ── 7.5: Simulation Over-Trading Guard ──
-            if self.is_simulation:
-                active_sim_trades = len(self.simulation.open_trades)
-                max_pos = settings.position.max_open_positions
-                if active_sim_trades >= max_pos:
-                    if self.cycle_count % 30 == 0:
-                        logger.warning(f"🛡️ Simulation Guard: Max open positions reached ({active_sim_trades}/{max_pos})")
-                    self.simulation.record_signal(passed=False)
-                    signal.execution_status = "rejected"
-                    signal.metadata["rejection_status"] = "Blocked by Simulation Guard"
-                    signal.metadata["rejection_reason"] = "Max Open Positions"
-                    self._update_dashboard(snapshot, signal)
-                    return
-
-            # ── 8. MASTER GATE: Final signal-level approval ──
-            # This is the definitive go/no-go for THIS specific signal.
-            # It re-verifies risk, session, and position limits at the
-            # moment of signal evaluation (not at cycle start).
-            signal_type_str = signal.signal_type.value  # e.g. "BUY_CE"
-            master_result = self.master.approve(
-                signal_type_str,
-                context={
-                    "signal_obj": signal,
-                    "weighted_score": signal.weighted_score,
-                    "gap_manager": getattr(self.decision_engine, "gap_penalty_manager", None),
-                    "discipline_context": {
-                        "daily_target_hit": self.exit_engine.daily_target_hit,
-                        "consecutive_losses": getattr(self.exit_engine, "consecutive_losses", 0),
-                        "seconds_since_last_trade": 999,
-                        "open_positions": len(self.position_manager.open_positions),
-                        "max_positions": settings.position.max_open_positions,
-                    }
-                },
+            # ── 2. Run Decision Pipeline ──
+            signal, log_entry, dec_ms = self.decision_pipeline.evaluate(
+                df, snapshot, self.cycle_count, self._current_latencies
             )
-            if not master_result.approved:
-                if self.cycle_count % 30 == 0:
-                    logger.warning(f"🛡️ Master Gate blocked: {master_result.reason}")
-                self.simulation.record_signal(passed=False)
-                signal.execution_status = "rejected"
-                signal.metadata["rejection_status"] = "Blocked by Master Gate"
-                signal.metadata["rejection_reason"] = master_result.reason
-                self._update_dashboard(snapshot, signal)
-                _log_canonical_truth(False, master_result.reason)
-                return
-
-            # ── 8. Gather context for 10-Gate Filter ──
-            outputs = {}
-            for name, agent in self.decision_engine.agents.items():
-                if hasattr(agent, 'last_output') and agent.last_output is not None:
-                    outputs[name] = agent.last_output
-
-            pm_status = self.position_manager.get_full_status()
-            if "today_trades" not in pm_status:
-                pm_status["today_trades"] = self.exit_engine.today_trades
-
-            # Query actual cached OI options data availability status
-            dm_oi_cache = getattr(self.data_manager, "_oi_cache", {})
-            real_oi_available = dm_oi_cache.get("data_source") == "REAL"
-
-            # ── P0.2: Prepare base log entry to capture rejected signals ──
-            log_entry = {
-                "timestamp": datetime.now().isoformat(),
-                "time": datetime.now().strftime("%H:%M"),
-                "signal": signal.signal_type.value,
-                "price_action_passed": True,
-                "options_available": real_oi_available,
-                "options_sentiment": "unknown",
-                "options_score": 0,
-                "max_pain_distance": -1,
-                "filter_passed": False,
-                "trade_executed": False,
-                "spot_entry_price": None,
-                "option_entry_price": None,
-                "option_exit_price": None,
-                "pnl": None,
-                "would_have_taken_without_filter": True,
-                "exit_reason": None,
-                "risk_reason": None,
-                "ai_reason": None,
-                "trade_id": None,
-                "raw_confidence": signal.metadata.get("raw_confidence", signal.confidence),
-                "confidence_suppression": round(signal.metadata.get("raw_confidence", signal.confidence) - signal.confidence, 1),
-                "suppression_reason": signal.metadata.get("suppression_reason", "UNKNOWN")
-            }
-
-            # ── 9. Run 10-Gate Filter ──
-            # v4.9: Wire REAL agent context instead of empty dicts.
-            # Previous code passed {} for regime/structure/decay/learning,
-            # making 4 of 10 gates always pass (rubber stamps).
-            _regime_info = {}
-            if "regime" in outputs:
-                _regime_info = outputs["regime"].details.copy()
-                _regime_info["regime"] = _regime_info.get("regime", "UNKNOWN")
+            self._current_latencies["decision_ms"] = dec_ms
             
-            _structure_info = {}
-            if "structure" in outputs:
-                _structure_info = outputs["structure"].details.copy()
-                _structure_info["structure"] = _structure_info.get("structure", {}).get("type", "OK") if isinstance(_structure_info.get("structure"), dict) else _structure_info.get("structure", "OK")
-            
-            _learning_info = {
-                "confidence": 50,
-                "current_streak": getattr(self.decision_engine.memory, 'current_streak', 0) if hasattr(self.decision_engine, 'memory') else 0,
-            }
-            if "learning" in outputs:
-                _learning_info["confidence"] = outputs["learning"].confidence
-            
-            _decay_info = {}
-            if "decay" in outputs:
-                _decay_info = outputs["decay"].details.copy()
-            
-            # Dynamic cost estimation based on ATR and spread
-            _est_slippage = max(1.0, snapshot.atr * 0.02) if snapshot.atr > 0 else 2.0
-            _est_brokerage = 40  # Fixed brokerage per trade
-            _total_costs = _est_brokerage + (_est_slippage * max(getattr(signal, 'position_size', 50), 50))
-            _cost_info = {"total_costs": _total_costs, "break_even_points": _est_slippage + 1.0}
-            
-            filter_result = self.trade_filter.evaluate(
-                signal=signal,
-                snapshot=snapshot,
-                agent_outputs=outputs,
-                regime_info=_regime_info,
-                structure_info=_structure_info,
-                learning_info=_learning_info,
-                decay_info=_decay_info,
-                cost_info=_cost_info,
-                position_manager_status=pm_status,
-                confluence_score=(
-                    signal.confluence.confluence_ratio * 100
-                    if signal.confluence else 0
-                ),
-            )
+            if not signal:
+                return  # Pipeline rejected the signal
 
-            self.simulation.record_signal(passed=filter_result.passed)
-
-            if not filter_result.passed:
-                rej_reason = filter_result.kill_reason or '10-Gate Filter'
-                log_entry["risk_reason"] = f"Filter Rejected: {rej_reason}"
-                self.perf_logger.log_signal(log_entry)
-                _log_canonical_truth(False, f"Gate Filter: {rej_reason}")
-                
-                signal.execution_status = "rejected"
-                signal.metadata["rejection_status"] = "Blocked by Signal Integrity" if "integrity" in rej_reason.lower() else "Blocked by 10-Gate Filter"
-                signal.metadata["rejection_reason"] = rej_reason
-                
-                # ── P0.6: Shadow Journal — Capture REJECTED signals too ──
-                # These become the most valuable training data later.
-                # We know "what the engine saw but chose not to trade."
-                try:
-                    from core.snapshot import build_snapshot, persist_snapshot
-                    agent_outs = {n: a.last_output for n, a in self.decision_engine.agents.items() if hasattr(a, 'last_output') and a.last_output is not None}
-                    _gap_mgr = getattr(self.decision_engine, "gap_penalty_manager", None)
-                    _gap_status = _gap_mgr.get_status() if _gap_mgr else {}
-                    _gap_ctx = {
-                        "gap_penalty_active": _gap_mgr.is_active() if _gap_mgr else False,
-                        "gap_penalty_multiplier": _gap_status.get("multiplier", 1.0),
-                        "gap_severity":  _gap_status.get("severity", "NONE"),
-                        "gap_points":    _gap_status.get("gap_points", 0.0),
-                    }
-                    rej_snap = build_snapshot(
-                        signal=signal, snapshot=snapshot, filter_result=filter_result,
-                        agent_outputs=agent_outs, gate_results={},
-                        final_decision="REJECTED", rejection_reason=rej_reason,
-                        gap_context=_gap_ctx,
-                    )
-                    persist_snapshot(rej_snap)
-                except Exception:
-                    pass
-
-                self._update_dashboard(snapshot, signal)
-                return
-
-            # ── 10. Signal PASSED all 10 gates ──
-            # ── Priority 2: Apply Regime Execution Policy ──
-            signal = self.regime_adapter.apply_policy(signal)
-            
-            if signal.execution_policy and signal.execution_policy.suppressed:
-                logger.warning(f"🛡️ Regime Adapter blocked: {signal.execution_policy.reason}")
-                log_entry["filter_passed"] = False
-                log_entry["risk_reason"] = f"Regime Block: {signal.execution_policy.reason}"
-                self.perf_logger.log_signal(log_entry)
-                self.simulation.record_signal(passed=False)
-                
-                signal.execution_status = "rejected"
-                signal.metadata["rejection_status"] = "Blocked by Regime Adapter"
-                signal.metadata["rejection_reason"] = signal.execution_policy.reason
-                
-                self._update_dashboard(snapshot, signal)
-                _log_canonical_truth(False, f"RegimeAdapter: {signal.execution_policy.reason}")
-                return
-
-            logger.info(
-                f"🟢 Signal Engine CONFIRMED | "
-                f"Grade: {filter_result.grade} | "
-                f"Score: {filter_result.final_score:.0f} | "
-                f"{signal.signal_type.value}"
-            )
-
-            # ── 11. Phase-2: Options Hard Filter & Performance Logging ──
-            # Runs AFTER all 10 gates pass, BEFORE execution.
-            
-            # Compute price trend for PCR trap filtering
-            try:
-                ema20 = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
-                price_trend = "up" if df['close'].iloc[-1] > ema20 else "down"
-            except Exception:
-                price_trend = "unknown"
-
-            options = self.fetch_options_sentiment(price_trend)
-            
-            # Confidence Scoring
-            options_score = 0
-            if options.get("available", False):
-                sig_val = signal.signal_type.value
-                if sig_val == "BUY_CE":
-                    if options.get("sentiment") == "bullish": options_score += 1
-                    if options.get("pcr", 0) > 1.1: options_score += 1
-                    if options.get("oi_bias") == "bullish": options_score += 1
-                elif sig_val == "BUY_PE":
-                    if options.get("sentiment") == "bearish": options_score += 1
-                    if options.get("pcr", 0) < 0.9: options_score += 1
-                    if options.get("oi_bias") == "bearish": options_score += 1
-                
-                # Bonus for safe distance
-                if options.get("max_pain_distance", 0) > 100:
-                    options_score += 1
-
-            # Update log entry with options data
-            log_entry.update({
-                "options_available": options.get("available", False),
-                "options_sentiment": options.get("sentiment", "unknown"),
-                "options_score": options_score,
-                "max_pain_distance": options.get("max_pain_distance", -1),
-            })
-
-            if options.get("available", False):
-                # (a) Max-pain proximity guard
-                if options["max_pain_distance"] < OptionsAnalyzer.MAX_PAIN_MIN_DISTANCE:
-                    logger.warning(
-                        "⚠️ [OPTIONS] Near max-pain (%.0f pts) — trade skipped",
-                        options["max_pain_distance"],
-                    )
-                    log_entry["filter_passed"] = False
-                    log_entry["risk_reason"] = "max_pain_distance < 50"
-                    self.perf_logger.log_signal(log_entry)
-                    
-                    signal.execution_status = "rejected"
-                    signal.metadata["rejection_status"] = "Blocked by Options Filter"
-                    signal.metadata["rejection_reason"] = log_entry["risk_reason"]
-                    
-                    self.simulation.record_signal(passed=False)
-                    self._update_dashboard(snapshot, signal)
-                    _log_canonical_truth(False, "Options: Near Max-Pain")
-                    return
-
-                # (b) Sentiment alignment (Score must be >= 2)
-                if options_score >= 2:
-                    log_entry["filter_passed"] = True
-                    logger.info(
-                        "✅ [OPTIONS] Passed — Score: %d | PCR: %.3f | MaxPain: %.0f pts away",
-                        options_score, options.get("pcr", 0), options["max_pain_distance"]
-                    )
-                else:
-                    logger.warning(
-                        "❌ [OPTIONS] Score too low (%d) — Signal: %s | Sentiment: %s",
-                        options_score, signal.signal_type.value, options["sentiment"]
-                    )
-                    log_entry["filter_passed"] = False
-                    log_entry["risk_reason"] = f"Low options score ({options_score})"
-                    self.perf_logger.log_signal(log_entry)
-                    
-                    signal.execution_status = "rejected"
-                    signal.metadata["rejection_status"] = "Blocked by Options Score"
-                    signal.metadata["rejection_reason"] = log_entry["risk_reason"]
-                    
-                    self.simulation.record_signal(passed=False)
-                    self._update_dashboard(snapshot, signal)
-                    _log_canonical_truth(False, f"Options: Low score ({options_score})")
-                    return
-            else:
-                logger.debug("[OPTIONS] Data unavailable — skipping hard filter this cycle")
-                log_entry["filter_passed"] = True
-                
-            # Filter passed -> assign trade ID
-            trade_id = signal.id
-            log_entry["spot_entry_price"] = snapshot.price
-            log_entry["trade_id"] = trade_id
-            # attach to signal so exit logging can map it (already attached, but re-asserting for clarity if needed, not actually needed)
-            
             # ── PHASE A: INSTRUMENT RESOLUTION & PREMIUM ──
             from core.options_resolver import OptionContractBuilder, OptionExecutionTranslator
             
