@@ -348,6 +348,10 @@ class NiftyAISystem:
         self.options_analyzer = self.decision_pipeline.options_analyzer
         self.ctx.decision = self.decision_pipeline
         
+        from core.pipelines.execution_pipeline import ExecutionPipeline
+        self.execution_pipeline = ExecutionPipeline(self.ctx)
+        self.ctx.execution = self.execution_pipeline
+        
         # Keep backward compatibility references
         self.telegram_bot = self.telemetry.telegram_bot
         self.alert_manager = self.telemetry.alert_manager
@@ -832,283 +836,33 @@ class NiftyAISystem:
             if not signal:
                 return  # Pipeline rejected the signal
 
-            # ── PHASE A: INSTRUMENT RESOLUTION & PREMIUM ──
-            from core.options_resolver import OptionContractBuilder, OptionExecutionTranslator
-            
-            # Use confidence and regime from signal
-            regime_val = signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
-            instrument = OptionContractBuilder.resolve_instrument(
-                direction=signal.direction.value, 
-                spot=snapshot.price, 
-                confidence=signal.confidence,
-                regime=regime_val
+            # ── 3. Run Execution Pipeline (Phase A) ──
+            exec_res = await self.execution_pipeline.execute(
+                signal=signal, 
+                snapshot=snapshot, 
+                is_simulation=self.is_simulation, 
+                mode="new"
             )
             
-            # Fetch live premium (Ask for buy)
-            # v4.9: Retry with backoff (2 attempts, 3s gap).
-            # Previous code: single attempt → None → synthetic bid=0 → always blocked.
-            # v4.9.1: Circuit-breaker-aware retry. If fetch_option_quote()
-            # tripped the quote_circuit (e.g. 805 rate-limit with 30s+ backoff),
-            # retrying after 3s is pointless — the circuit is still open.
-            # Check circuit state before spending 3s sleeping for nothing.
-            quote = None
-            _quote_attempts = 0
-            _quote_last_error = None
-            for _q_attempt in range(2):
-                # Pre-check: skip retry if circuit breaker tripped during previous attempt
-                if _q_attempt > 0:
-                    import time as _t
-                    _cb = self.data_manager.quote_circuit
-                    if _t.time() < _cb.get("open_until", 0.0):
-                        _cb_cooldown = int(_cb["open_until"] - _t.time())
-                        _quote_last_error = (
-                            f"quote_circuit OPEN ({_cb.get('reason', 'unknown')}, "
-                            f"cooldown={_cb_cooldown}s) — retry skipped"
-                        )
-                        logger.warning(
-                            f"[OPTIONS] Quote retry skipped: {_quote_last_error}"
-                        )
-                        break
-                    # Backoff only if circuit is still closed
-                    await asyncio.sleep(3.0)
-                
-                _quote_attempts += 1
-                try:
-                    quote = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.data_manager.fetch_option_quote,
-                            instrument["strike"],
-                            instrument["type"],
-                            instrument["expiry"]
-                        ),
-                        timeout=12.0
-                    )
-                    if quote is not None:
-                        break  # Success
-                    _quote_last_error = "returned None"
-                except asyncio.TimeoutError:
-                    _quote_last_error = "timeout >12s"
-                    logger.warning(
-                        f"[OPTIONS] Quote fetch attempt {_q_attempt+1}/2 timed out (>12s)"
-                    )
-                except Exception as _q_exc:
-                    _quote_last_error = str(_q_exc)
-                    logger.warning(
-                        f"[OPTIONS] Quote fetch attempt {_q_attempt+1}/2 failed: {_q_exc}"
-                    )
-            
-            # v4.9: If quote fetch fails, abort immediately instead of
-            # synthesizing a bid=0 quote that always hits the liquidity gate.
-            # This was the #1 cause of "trade_executed: true, pnl: null" entries.
-            if quote is None:
-                logger.error(
-                    f"❌ [QUOTE FETCH FAILED] {instrument['symbol']} | "
-                    f"Attempts: {_quote_attempts} | Last error: {_quote_last_error} | "
-                    f"Trade ABORTED — no synthetic fallback."
-                )
-                log_entry["filter_passed"] = False
-                log_entry["trade_executed"] = False
-                log_entry["risk_reason"] = f"Quote Fetch Failed: {_quote_last_error} (after {_quote_attempts} attempts)"
-                self.perf_logger.log_signal(log_entry)
-                
-                signal.execution_status = "rejected"
-                signal.metadata["rejection_status"] = "Quote Fetch Failed"
-                signal.metadata["rejection_reason"] = log_entry["risk_reason"]
-                
-                self.simulation.record_signal(passed=False)
-                self._update_dashboard(snapshot, signal)
-                _log_canonical_truth(False, f"Quote Fetch Failed: {_quote_last_error}")
+            if exec_res.status == "failed":
+                logger.warning(f"❌ [EXEC] Execution failed: {exec_res.errors}")
                 return
-            
-            # ── P0.1: Option Liquidity & Spread Protection Layer ──
-            spread_pct = quote.spread_pct / 100.0  # property returns 0-100 scale
-            quote_age_ms = (datetime.now() - getattr(quote, 'timestamp', datetime.now())).total_seconds() * 1000
-            
-            liquidity_blocked = False
-            reject_reason = ""
-            
-            if getattr(quote, "is_stale", False) and getattr(quote, "cache_age", 0.0) > 15.0:
-                liquidity_blocked, reject_reason = True, f"Stale cache quote ({quote.cache_age:.1f}s)"
-            elif quote_age_ms > 1000 and self.data_manager.data_source == "api":
-                liquidity_blocked, reject_reason = True, f"Stale quote ({quote_age_ms:.0f}ms)"
-            elif quote.bid <= 0:
-                liquidity_blocked, reject_reason = True, "Bid <= 0"
-            elif quote.ask <= quote.bid:
-                liquidity_blocked, reject_reason = True, "Ask <= Bid"
-            elif spread_pct > 0.05:  # 5% max spread allowed
-                liquidity_blocked, reject_reason = True, f"Spread too wide ({spread_pct:.1%})"
-            elif quote.volume < 500:
-                liquidity_blocked, reject_reason = True, f"Low volume ({quote.volume})"
                 
-            if liquidity_blocked:
-                logger.warning(
-                    f"🛡️ [LIQUIDITY GATE] Trade rejected: {reject_reason} | "
-                    f"Bid: {quote.bid}, Ask: {quote.ask}, Vol: {quote.volume}"
-                )
-                
-                # Increment telemetry metrics for signal blocks due to quote issues
-                from dhan_client import get_dhan_telemetry
-                t_meta = get_dhan_telemetry()
-                if "Stale" in reject_reason or "Bid" in reject_reason or "Spread" in reject_reason or "Ask" in reject_reason:
-                    t_meta["signals_blocked_by_quotes"] += 1
-                
-                # Emit Rejection Telemetry for Spread Gate
-                regime_val = signal.regime.value if hasattr(signal.regime, "value") else str(getattr(signal, "regime", "UNKNOWN"))
-                mpm_mode = getattr(signal, "mpm_mode", "NORMAL")
-                rej_record = RejectionRecord(
-                    signal_id=getattr(signal, "id", f"rej_{int(time.time())}"),
-                    timestamp=datetime.now().isoformat(),
-                    regime=regime_val,
-                    mpm_mode=mpm_mode,
-                    primary_blocker=reject_reason,
-                    total_failed_gates=1,
-                    evaluation_duration_ms=0.0, # Option quote fetch latency is tracked via _current_latencies
-                    gate_details={
-                        "Spread": GateEvaluation(
-                            gate_name="Spread & Liquidity",
-                            passed=False,
-                            threshold=0.05,
-                            actual=spread_pct,
-                            delta=spread_pct - 0.05,
-                            inputs={
-                                "bid": quote.bid,
-                                "ask": quote.ask,
-                                "volume": quote.volume,
-                                "quote_age_ms": quote_age_ms
-                            }
-                        )
-                    }
-                )
-                self.rejection_logger.log_rejection(rej_record)
-                log_entry["filter_passed"] = False
-                log_entry["risk_reason"] = f"Liquidity Block: {reject_reason}"
-                self.perf_logger.log_signal(log_entry)
-                
-                signal.execution_status = "rejected"
-                signal.metadata["rejection_status"] = "Liquidity Block"
-                signal.metadata["rejection_reason"] = log_entry["risk_reason"]
-                
-                self.simulation.record_signal(passed=False)
-                self._update_dashboard(snapshot, signal)
-                _log_canonical_truth(False, f"Liquidity Block: {reject_reason}")
+            # If not simulation and not failed, it's queued (or rejected by fidelity)
+            if exec_res.status == "rejected":
                 return
-            
-            # Increment telemetry if setup saved by cached quote
-            if getattr(quote, "cache_source", "api") == "cache":
-                from dhan_client import get_dhan_telemetry
-                get_dhan_telemetry()["signals_saved_by_cache"] += 1
-            
-            # Translate Spot targets to Premium targets
-            premium_levels = OptionExecutionTranslator.translate_levels(signal, quote, instrument)
-            
-            signal.metadata["instrument"] = instrument
-            signal.metadata["quote"] = quote
-            signal.metadata["premium_levels"] = premium_levels
-            
-            log_entry["option_entry_price"] = premium_levels.get("premium_entry", quote.ask if hasattr(quote, 'ask') else None)
-
-            # v4.8: Lightweight snapshot summary for Telegram signal formatter
-            signal.metadata["snapshot_summary"] = {
-                "spot": snapshot.price,
-                "pcr": round(snapshot.pcr, 2) if snapshot.pcr else 0,
-                "vix": round(snapshot.india_vix, 1) if snapshot.india_vix else 0,
-                "vwap": round(snapshot.vwap, 1) if snapshot.vwap else 0,
-                "atm_iv": round(snapshot.atm_iv, 2) if hasattr(snapshot, "atm_iv") and snapshot.atm_iv else 0,
-            }
-            
-            logger.info(
-                f"🎯 Execution AUTHORIZED | {instrument['symbol']} ({instrument['moneyness']}) | "
-                f"Entry: ₹{premium_levels['premium_entry']} | "
-                f"SL: ₹{premium_levels['premium_sl']}"
-            )
-            _log_canonical_truth(True, "APPROVED")
-            
-            # v4.9: trade_executed only set AFTER liquidity gate passes.
-            # Previously it was set before the gate, causing misleading
-            # "trade_executed: true, pnl: null" log entries.
-            log_entry["trade_executed"] = False
-            log_entry["execution_status"] = "LIQUIDITY_PASSED"
-            self.perf_logger.log_signal(log_entry)
-
-            # ── P0.6: DECISION SNAPSHOT (Pre-Execution Truth Capture) ──
-            # Captures the FULL decision state BEFORE any broker interaction.
-            # This is the canonical record for replay, regression, and audit.
-            try:
-                from core.snapshot import build_snapshot, persist_snapshot
-                agent_outs = {}
-                for name, agent in self.decision_engine.agents.items():
-                    if hasattr(agent, 'last_output') and agent.last_output is not None:
-                        agent_outs[name] = agent.last_output
-
-                gate_outs = {}
-                if hasattr(self.master, "gate_rejections"):
-                    gate_outs = dict(self.master.gate_rejections)
-
-                # Build gap context: capture the live gap state at this exact moment
-                _gap_mgr = getattr(self.decision_engine, "gap_penalty_manager", None)
-                _gap_status = _gap_mgr.get_status() if _gap_mgr else {}
-                _gap_ctx = {
-                    "gap_penalty_active":    _gap_mgr.is_active() if _gap_mgr else False,
-                    "gap_penalty_multiplier": _gap_status.get("multiplier", 1.0),
-                    "gap_severity":          _gap_status.get("severity", "NONE"),
-                    "gap_points":            _gap_status.get("gap_points", 0.0),
-                }
-
-                snap_doc = build_snapshot(
-                    signal=signal,
-                    snapshot=snapshot,
-                    filter_result=filter_result,
-                    agent_outputs=agent_outs,
-                    gate_results=gate_outs,
-                    final_decision="EXECUTE",
-                    rejection_reason="",
-                    intent_id="",  # Will be backfilled by OMS after intent creation
-                    quote=signal.metadata.get("quote"),
-                    instrument=signal.metadata.get("instrument"),
-                    options_context=log_entry,
-                    gap_context=_gap_ctx,
-                )
-                persist_snapshot(snap_doc)
-                # Carry snapshot_id forward for OMS linkage
-                signal.metadata["snapshot_id"] = snap_doc["snapshot_id"]
-                logger.debug(f"📸 [SNAPSHOT] {snap_doc['snapshot_id']} | hash={snap_doc['snapshot_hash']}")
-            except Exception as e:
-                logger.warning(f"[SNAPSHOT] Non-fatal capture failure: {e}")
-
-            # ── 12. Route Signal to Master Execution & Dispatch ──
-            # Replaces former scattered routing.
-            # 1. Always dispatch alert (visibility)
+                
+            # Dispatches
             await self.alert_manager.dispatch(signal)
-            
-            # Real-time Dashboard Flash
             if self.dashboard:
                 self.dashboard.emit_signal(signal.to_dict())
-
-            # 2. TelegramController will handle AUTO mode execution via its internal routing.
-            # Simulation tracking (unchanged)
-            if self.is_simulation:
-                sim_trade = self.simulation.open_simulated_trade(
-                    signal=signal,
-                    snapshot=snapshot,
-                    filter_score=filter_result.final_score,
-                    filter_grade=filter_result.grade,
-                    gates_passed=filter_result.filters_passed,
-                    gates_total=filter_result.filters_total,
-                    costs_estimate=40,
-                    data_manager=self.data_manager,
-                )
-                if sim_trade:
-                    self.perf_logger.mark_trade_executed(signal.id, "EXECUTED")
-                else:
-                    self.perf_logger.mark_trade_executed(signal.id, "FAILED")
-
+                
             self._update_dashboard(snapshot, signal)
             
-            # ── Analytics: Sync Gate Rejections ──
+            # Sync gate rejections
             if hasattr(self.master, "gate_rejections"):
                 self.observer.sync_gate_rejections(dict(self.master.gate_rejections))
-
-            # Periodic status log
+                
             if self.cycle_count % 30 == 0:
                 self._log_status()
 
@@ -1146,19 +900,11 @@ class NiftyAISystem:
     async def execute_signal(self, signal, snapshot=None, context=None, mode="new"):
         """
         🚀 MASTER EXECUTION ENGINE (Single Point of Truth)
-        Graphify Audit Refinement (2026-04-09)
-        
-        mode="new"       -> Initial entry from AI/Telegram into confirmation queue.
-        mode="confirmed" -> Final real-money hand-off to PositionManager.
-
-        ⚠️ AI WARNING: This is THE ONLY permitted execution path for live orders.
-        All other code paths MUST route through this method.
-        Deadman watchdog will force-close positions if main loop stalls.
+        Replaced by ExecutionPipeline in v5.0.
         """
         logger.info(f"⚡ [EXECUTE_SIGNAL] Mode: {mode} | Type: {signal.signal_type.value}")
 
         # 1. Mandatory Gate Approval
-        # Re-check everything (risk, session, discipline) via the Master Engine
         ctx = context or {}
         ctx["signal_obj"] = signal
         approval = self.master.approve(signal.signal_type.value, ctx)
@@ -1169,122 +915,27 @@ class NiftyAISystem:
                 self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
             return None
 
-        # 2. Path 1: Initial Entry (To Queue)
-        if mode == "new":
-            self.entry_engine.create_pending_entry(signal, snapshot, None)
+        # 2. Delegate to Execution Pipeline
+        exec_res = await self.execution_pipeline.execute(
+            signal=signal,
+            snapshot=snapshot,
+            is_simulation=getattr(self, "is_simulation", False),
+            mode=mode
+        )
+        
+        if exec_res.status == "queued":
             logger.info("📥 [EXECUTE_SIGNAL] Signal parked in Pending Queue")
             return "queued"
-
-        # 3. Path 2: Real Order (To Broker)
-        elif mode == "confirmed":
-            if snapshot is None:
-                logger.error("❌ [EXECUTE_SIGNAL] Cannot execute: Missing live snapshot.")
-                return None
-                
-            # SIMULATION HARD LOCK
-            if getattr(self, "is_simulation", False):
-                logger.warning("🛡️ SIMULATION MODE HARD LOCK: Real broker execution blocked.")
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-                return "simulated"
-
-            # ── 🩺 Broker Health Gate ──
-            if hasattr(self, "broker_health") and not self.broker_health.is_healthy:
-                logger.critical(
-                    "🚫 [EXECUTE_SIGNAL] Broker health DEGRADED (%s). Trade blocked.",
-                    self.broker_health.degraded_reason
-                )
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-                return None
-
-            # Sizing & Execution
-            price = getattr(signal, "adjusted_entry", snapshot.price)
-            size = self.position_manager.calculate_position_size(signal, price, snapshot.atr)
-
-            # ── 🔒 RUNTIME INTEGRITY BREAKER CHECK (Phase 1.2) ──
-            from core.system_state import get_state_manager
-            from core.structural_breaker import StructuralBreaker
-            state_mgr = get_state_manager()
-            breaker = StructuralBreaker(state_mgr)
-            
-            # Check 1: Duplicate order check
-            direction_str = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
-            if not breaker.check_duplicate_order(signal.symbol, direction_str):
-                self.trading_enabled = False
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-                return None
-                
-            # Check 2: Telegram sync delay and price-drift check
-            current_price = snapshot.price if snapshot else price
-            is_valid, should_halt = breaker.check_telegram_execution_sync(
-                signal.id, signal.created_at, time.time(), current_price, signal.entry_price
-            )
-            if not is_valid:
-                if should_halt:
-                    self.trading_enabled = False
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-                return None
-                
-            # Check 3: Stop loss attached check
-            sl_price = size.get("sl_price", 0.0)
-            if not breaker.check_stop_loss_attached(signal.id, sl_price):
-                self.trading_enabled = False
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-                return None
-
-            if not size["allowed"]:
-                logger.warning(f"🛡️ [EXECUTE_SIGNAL] Sizing check blocked execution: {size.get('reason')}")
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-                return None
-
-            # ── P0.3: Create OMS Intent FIRST ──
-            intent_id = f"INT_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
-            self.oms.create_intent(
-                signal_id=getattr(signal, "id", "unknown"),
-                intent_id=intent_id,
-                symbol=signal.symbol,
-                side="BUY" if signal.direction.value.upper() == "BUY" else "SELL",
-                qty=size["qty"],
-                requested_price=price,
-                stop_loss_price=size["sl_price"]
-            )
-            
-            setattr(signal, "intent_id", intent_id)
-
-            # ── THE ONLY POINT OF LIVE EXECUTION (P0-E: SL Guarantee) ──
-            pos = await self.position_manager.open_position_with_sl_guarantee(signal, size, price)
-            
-            # ── P0.3: Reconcile Result ──
-            if pos:
-                self.oms.update_order_state(
-                    intent_id=intent_id,
-                    new_state="ENTRY_FILLED",
-                    event_type="BROKER_EXECUTION_SUCCESS",
-                    avg_fill_price=pos.entry_price,
-                    filled_qty=pos.qty,
-                    payload={"position_id": pos.position_id}
-                )
-            else:
-                self.oms.update_order_state(
-                    intent_id=intent_id,
-                    new_state="FAILED",
-                    event_type="BROKER_EXECUTION_FAILED",
-                    payload={"reason": "open_position_with_sl_guarantee returned None"}
-                )
-
-            # Cleanup
-            self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-
-            if pos:
-                logger.info(f"✅ [EXECUTE_SIGNAL] LIVE TRADE EXECUTED | {signal.signal_type.value} @ ₹{price:,.1f}")
-                self.execution_failures = 0 # Reset on success
-                self.perf_logger.mark_trade_executed(getattr(signal, "id", "unknown"), "EXECUTED")
-                if hasattr(self, "broker_health"):
-                    self.broker_health.record_order_success()
-            else:
-                self.execution_failures += 1
-                logger.warning(f"⚠️ [EXECUTE_SIGNAL] Execution Failure [{self.execution_failures}]")
-                self.perf_logger.mark_trade_executed(getattr(signal, "id", "unknown"), "FAILED")
-            return pos
+        elif exec_res.status == "simulated":
+            return "simulated"
+        elif exec_res.status == "filled":
+            # For backward compatibility, return position_id or a mock pos object
+            # main.py expects a `pos` object if successful
+            from models import TradeOutcome
+            mock_pos = TradeOutcome(position_id=exec_res.position_id, symbol=signal.symbol, entry_price=exec_res.filled_price, qty=getattr(signal, "position_size", 50), status="OPEN", entry_time=exec_res.fill_time)
+            return mock_pos
+        else:
+            return None
 
     # ───────────────────────────────────────────────────────────
     # 🩺 BROKER HEALTH POLLING LOOP (v4.7)
