@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime, date
 
 from agents.base_agent import BaseAgent
-from models.signals import AgentOutput, Direction, Strength, MarketSnapshot
+from models import AgentOutput, Direction, Strength, MarketSnapshot
 from config.settings import Settings
 from utils.helpers import safe_divide
 

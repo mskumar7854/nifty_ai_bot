@@ -1,32 +1,8 @@
 import pandas as pd
 import numpy as np
-from enum import Enum
-from dataclasses import dataclass
 from typing import Dict, Any
 
-class MarketRegime(Enum):
-    TREND_UP = "TREND_UP"
-    TREND_DOWN = "TREND_DOWN"
-    RANGE = "RANGE"
-    VOLATILE = "VOLATILE"
-    LOW_VOL = "LOW_VOL"
-
-@dataclass
-class RegimeState:
-    regime: MarketRegime
-    confidence: float
-    volatility_state: str
-    trend_strength: float
-    tradability: float
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "regime": self.regime.value,
-            "confidence": round(self.confidence, 2),
-            "volatility_state": self.volatility_state,
-            "trend_strength": round(self.trend_strength, 2),
-            "tradability": round(self.tradability, 2)
-        }
+from models import MarketRegime, RegimeState
 
 class RegimeClassifier:
     """

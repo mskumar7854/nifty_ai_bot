@@ -8,7 +8,7 @@ Why: The same strategy fails when the regime
 """
 
 from typing import List
-from models.signals import AgentOutput, MarketRegime, MarketSnapshot, Direction
+from models import AgentOutput, MarketRegime, MarketSnapshot, Direction
 from agents.base_agent import AgentCategory
 
 

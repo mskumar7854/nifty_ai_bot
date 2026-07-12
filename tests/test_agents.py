@@ -11,7 +11,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 from config.settings import Settings
-from models.signals import Direction, Strength, MarketSnapshot
+from models import Direction, Strength, MarketSnapshot
 from agents.market_agent import MarketAgent
 from agents.momentum_agent import MomentumAgent
 from agents.trap_agent import TrapAgent

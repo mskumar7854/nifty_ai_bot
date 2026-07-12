@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime
 
 from agents.base_agent import BaseAgent
-from models.signals import AgentOutput, Direction, Strength, MarketSnapshot
+from models import AgentOutput, Direction, Strength, MarketSnapshot
 from utils.indicators import candle_analysis, calculate_volume_sma
 from config.settings import Settings
 

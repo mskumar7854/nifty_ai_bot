@@ -1,4 +1,4 @@
-from models.signals import Signal, MarketRegime, ExecutionPolicy, SignalType
+from models import Signal, MarketRegime, ExecutionPolicy, SignalType
 from utils.logger import get_logger
 
 logger = get_logger("regime_adapter")

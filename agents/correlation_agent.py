@@ -12,7 +12,7 @@ import pandas as pd
 from datetime import datetime
 
 from agents.base_agent import BaseAgent, AgentCategory
-from models.signals import AgentOutput, Direction, Strength, MarketSnapshot
+from models import AgentOutput, Direction, Strength, MarketSnapshot
 from config.settings import Settings
 
 

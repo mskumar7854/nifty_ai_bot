@@ -26,7 +26,7 @@ from collections import defaultdict, Counter
 
 from agents.base_agent import BaseAgent
 from agents.learning_agent_v2 import LearningAgentV2Mixin
-from models.signals import (
+from models import (
     AgentOutput, Direction, Strength, MarketSnapshot,
     SignalType, TradeOutcome,
 )

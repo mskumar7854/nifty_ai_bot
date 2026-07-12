@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime
 
 from agents.base_agent import BaseAgent
-from models.signals import AgentOutput, Direction, Strength, MarketSnapshot
+from models import AgentOutput, Direction, Strength, MarketSnapshot
 from config.settings import Settings
 
 
@@ -43,7 +43,7 @@ class OIAgent(BaseAgent):
         details = {}
 
         # ⚠️ P1.2 Guard: Don't trade on fictional data
-        from models.signals import DataSource
+        from models import DataSource
         if snapshot.oi_data_source != DataSource.REAL and self.settings.system_mode.mode == "LIVE":
             return AgentOutput(
                 agent_name=self.name,

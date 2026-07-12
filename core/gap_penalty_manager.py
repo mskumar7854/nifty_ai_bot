@@ -24,7 +24,7 @@ Decay schedule (accelerated params, 2026-05-11):
   10:45 (90m)       ~3%
   11:15 (120m)      negligible
 
-Integration with DecisionEngineV3:
+Integration with DecisionEngine:
   - Replace the session_gap_detected bool with this manager.
   - Call manager.update(snapshot, minutes_since_open) each cycle.
   - Use manager.get_penalty() in compute_weighted_score() ONCE

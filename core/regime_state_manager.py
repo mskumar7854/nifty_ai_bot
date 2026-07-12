@@ -3,7 +3,8 @@ from typing import Optional
 from dataclasses import replace
 import pandas as pd
 
-from core.regime_classifier import RegimeState, MarketRegime, RegimeClassifier
+from core.regime_classifier import RegimeClassifier
+from models import RegimeState, MarketRegime
 
 logger = logging.getLogger("regime_manager")
 

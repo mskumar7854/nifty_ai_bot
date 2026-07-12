@@ -11,7 +11,7 @@ import os
 from datetime import datetime, date
 from typing import List, Dict
 
-from models.signals import Signal, SignalType
+from models import Signal, SignalType
 from utils.logger import get_logger
 from utils.helpers import save_json, load_json
 

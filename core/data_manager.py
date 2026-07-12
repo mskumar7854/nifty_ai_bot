@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
-from models.signals import MarketSnapshot, DataSource, OptionQuote
+from models import MarketSnapshot, DataSource, OptionQuote
 from utils.indicators import (
     calculate_vwap, calculate_rsi, calculate_ema, calculate_atr
 )
@@ -625,7 +625,7 @@ class DataManager:
         If in SIMULATION mode, generates a highly realistic synthetic premium
         incorporating spread, IV, and distance from Spot.
         """
-        from models.signals import OptionQuote
+        from models import OptionQuote
         import time as _time
         
         # 1. LIVE API MODE

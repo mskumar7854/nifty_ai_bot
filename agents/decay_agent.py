@@ -16,7 +16,7 @@ import pandas as pd
 from typing import Dict, List
 
 from agents.base_agent import BaseAgent
-from models.signals import (
+from models import (
     AgentOutput, Direction, Strength, MarketSnapshot,
 )
 from utils.logger import get_logger
@@ -49,7 +49,7 @@ class DecayAgent(BaseAgent):
         now = datetime.now()
 
         # ⚠️ P1.2 Guard: Don't trade on fictional data
-        from models.signals import DataSource
+        from models import DataSource
         if snapshot.oi_data_source != DataSource.REAL and self.settings.system_mode.mode == "LIVE":
             return self._format_output(
                 Direction.NEUTRAL, 0, Strength.WEAK,

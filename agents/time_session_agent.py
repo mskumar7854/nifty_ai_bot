@@ -12,7 +12,7 @@ import pytz
 from datetime import datetime, time, timedelta
 
 from agents.base_agent import BaseAgent, AgentCategory
-from models.signals import (
+from models import (
     AgentOutput, Direction, Strength, MarketSnapshot, SessionPhase
 )
 from config.settings import Settings

@@ -8,7 +8,7 @@ Why: Instead of simple voting, we score
 """
 
 from typing import List, Dict
-from models.signals import AgentOutput, Direction, ConfluenceResult
+from models import AgentOutput, Direction, ConfluenceResult
 from config.settings import Settings
 
 

@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-from models.signals import (
+from models import (
     Signal, SignalType, Direction, Strength,
     MarketSnapshot,
 )

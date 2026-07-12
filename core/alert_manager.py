@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from models.signals import Signal, SignalType
+from models import Signal, SignalType
 from utils.logger import get_logger
 from config.settings import Settings
 

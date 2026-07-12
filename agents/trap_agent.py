@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List
 
 from agents.base_agent import BaseAgent
-from models.signals import (
+from models import (
     AgentOutput, Direction, Strength, MarketSnapshot, TrapType
 )
 from utils.indicators import candle_analysis

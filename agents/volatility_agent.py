@@ -12,7 +12,7 @@ import numpy as np
 from datetime import datetime
 
 from agents.base_agent import BaseAgent, AgentCategory
-from models.signals import (
+from models import (
     AgentOutput, Direction, Strength, MarketSnapshot, MarketRegime
 )
 from utils.indicators import calculate_atr

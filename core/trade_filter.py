@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from datetime import datetime
 
-from models.signals import Signal, SignalType, Direction
+from models import Signal, SignalType, Direction
 from utils.logger import get_logger
 from utils.helpers import safe_divide
 from config.settings import Settings

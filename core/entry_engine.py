@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
-from models.signals import Signal, Direction
+from models import Signal, Direction
 from utils.logger import get_logger
 from config.settings import Settings
 

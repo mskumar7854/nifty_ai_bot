@@ -37,7 +37,7 @@ os.makedirs("data", exist_ok=True)
 
 from config.settings import Settings
 from core.data_manager import DataManager
-from core.decision_engine_v3 import DecisionEngineV3
+from core.decision_engine import DecisionEngine
 from core.alert_manager import AlertManager
 from core.trade_logger import TradeLogger
 from core.position_manager import PositionManager
@@ -58,7 +58,7 @@ from core.telegram_controller import TelegramController
 from core.burnin_tracker import BurninTracker
 from core.readiness_scorer import ReadinessScorer
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
-from models.signals import SignalType, Direction, TradeOutcome
+from models import SignalType, Direction, TradeOutcome
 from utils.logger import get_logger
 from utils.tasks import fire_and_log
 from options_analyzer import OptionsAnalyzer
@@ -255,7 +255,7 @@ class NiftyAISystem:
 
         # ── Core ──
         self.data_manager = DataManager(settings)
-        self.decision_engine = DecisionEngineV3(settings)
+        self.decision_engine = DecisionEngine(settings)
         self.trade_logger = TradeLogger()
 
         # ── Persistent OMS (P0.3) ──

@@ -20,7 +20,7 @@ from typing import Dict, Tuple
 
 import pytz
 
-from models.signals import Signal
+from models import Signal
 from utils.logger import get_logger
 from config.settings import Settings
 

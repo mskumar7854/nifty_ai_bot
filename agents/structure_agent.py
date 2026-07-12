@@ -24,7 +24,7 @@ from typing import Dict, List, Tuple, Optional
 from collections import deque
 
 from agents.base_agent import BaseAgent
-from models.signals import (
+from models import (
     AgentOutput, Direction, Strength, MarketSnapshot
 )
 from utils.indicators import (

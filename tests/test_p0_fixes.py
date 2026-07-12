@@ -142,7 +142,7 @@ class TestReconciliation:
 class TestAgentAbstain:
     def test_oi_agent_abstains_on_simulated_data_in_live(self):
         from agents.oi_agent import OIAgent
-        from models.signals import MarketSnapshot, DataSource, Direction
+        from models import MarketSnapshot, DataSource, Direction
         from config.settings import Settings
         from datetime import datetime
 

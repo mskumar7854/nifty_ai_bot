@@ -1,0 +1,367 @@
+{
+  "core/alert_manager.py": [
+    "models.signals"
+  ],
+  "core/burnin_tracker.py": [
+    "core.execution_fidelity"
+  ],
+  "core/confidence_calibrator.py": [],
+  "core/confluence_scorer.py": [
+    "models.signals"
+  ],
+  "core/data_manager.py": [
+    "core.session_guard",
+    "core.options_resolver",
+    "core.system_state",
+    "models.signals",
+    "core.regime_state_manager",
+    "core.regime_classifier"
+  ],
+  "core/db_manager.py": [],
+  "core/decision_engine.py": [
+    "agents",
+    "models.signals"
+  ],
+  "core/decision_engine_v2.py": [
+    "core.signal_quality",
+    "core.confluence_scorer",
+    "agents",
+    "models.signals"
+  ],
+  "core/decision_engine_v3.py": [
+    "core.confluence_scorer",
+    "core.memory_manager",
+    "core.signal_quality",
+    "analytics.analytics_bus",
+    "agents",
+    "models.signals",
+    "core.signal_lifecycle",
+    "core.gap_penalty_manager",
+    "core.system_fingerprint",
+    "core.confidence_calibrator",
+    "core.threshold_tuner"
+  ],
+  "core/discipline_engine.py": [],
+  "core/economics.py": [],
+  "core/entry_engine.py": [
+    "models.signals"
+  ],
+  "core/execution_fidelity.py": [],
+  "core/exit_engine.py": [],
+  "core/gap_penalty_manager.py": [],
+  "core/log_observer.py": [],
+  "core/master_decision_engine.py": [
+    "core.state_tracker"
+  ],
+  "core/memory_manager.py": [
+    "core.db_manager"
+  ],
+  "core/metrics_engine.py": [],
+  "core/metrics_logger.py": [],
+  "core/oms.py": [],
+  "core/options_resolver.py": [],
+  "core/order_tracker.py": [],
+  "core/position_manager.py": [
+    "models.trade_record",
+    "core.system_state",
+    "core.economics",
+    "analytics.analytics_bus",
+    "core.oms",
+    "models.signals",
+    "core.shadow_execution"
+  ],
+  "core/readiness_scorer.py": [],
+  "core/reconciliation.py": [
+    "core.oms"
+  ],
+  "core/regime_adapter.py": [
+    "models.signals"
+  ],
+  "core/regime_classifier.py": [],
+  "core/regime_detector.py": [
+    "models.signals",
+    "agents.base_agent"
+  ],
+  "core/regime_state_manager.py": [
+    "core.regime_classifier"
+  ],
+  "core/replay_analytics.py": [
+    "core.replay_simulator"
+  ],
+  "core/replay_simulator.py": [],
+  "core/risk_manager.py": [],
+  "core/session_guard.py": [],
+  "core/session_strategy.py": [
+    "core.session_guard",
+    "models.signals"
+  ],
+  "core/shadow_execution.py": [
+    "core.execution_fidelity"
+  ],
+  "core/signal_formatter.py": [
+    "models.signals"
+  ],
+  "core/signal_lifecycle.py": [],
+  "core/signal_quality.py": [
+    "models.signals"
+  ],
+  "core/simulation_engine.py": [
+    "core.burnin_tracker",
+    "core.execution_fidelity",
+    "models.signals"
+  ],
+  "core/slippage_model.py": [],
+  "core/snapshot.py": [],
+  "core/state_tracker.py": [],
+  "core/structural_breaker.py": [],
+  "core/system_fingerprint.py": [],
+  "core/system_state.py": [],
+  "core/telegram_controller.py": [
+    "core.session_guard",
+    "models.signals",
+    "core.signal_formatter",
+    "core.system_state"
+  ],
+  "core/threshold_tuner.py": [],
+  "core/trade_filter.py": [
+    "models.signals",
+    "core.telemetry.rejection_schema"
+  ],
+  "core/trade_filter_rewrite.py": [
+    "models.signals",
+    "core.telemetry.rejection_schema"
+  ],
+  "core/trade_logger.py": [
+    "models.signals"
+  ],
+  "core/__init__.py": [
+    "core.decision_engine",
+    "core.trade_logger",
+    "core.data_manager",
+    "core.alert_manager"
+  ],
+  "core/telemetry/rejection_schema.py": [],
+  "core/telemetry/__init__.py": [],
+  "models/signals.py": [],
+  "models/trade_record.py": [],
+  "models/__init__.py": [
+    "models.signals"
+  ],
+  "agents/base_agent.py": [
+    "models.signals"
+  ],
+  "agents/consolidation_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/correlation_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/decay_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/delta_gamma_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/expiry_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/expiry_day_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/gap_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/institutional_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/learning_agent.py": [
+    "agents.base_agent",
+    "agents.learning_agent_v2",
+    "models.signals"
+  ],
+  "agents/learning_agent_v2.py": [],
+  "agents/level_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/market_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/momentum_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/multi_timeframe_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/oi_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/order_flow_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/price_action_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/regime_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/risk_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/sentiment_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/structure_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/time_session_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/trap_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/volatility_agent.py": [
+    "agents.base_agent",
+    "models.signals"
+  ],
+  "agents/__init__.py": [
+    "agents.time_session_agent",
+    "agents.expiry_day_agent",
+    "agents.expiry_agent",
+    "agents.momentum_agent",
+    "agents.regime_agent",
+    "agents.delta_gamma_agent",
+    "agents.trap_agent",
+    "agents.level_agent",
+    "agents.market_agent",
+    "agents.order_flow_agent",
+    "agents.learning_agent",
+    "agents.multi_timeframe_agent",
+    "agents.institutional_agent",
+    "agents.structure_agent",
+    "agents.oi_agent",
+    "agents.sentiment_agent",
+    "agents.correlation_agent",
+    "agents.gap_agent",
+    "agents.price_action_agent",
+    "agents.risk_agent",
+    "agents.consolidation_agent",
+    "agents.decay_agent",
+    "agents.volatility_agent"
+  ],
+  "analytics/agent_attribution.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/analytics_bus.py": [],
+  "analytics/attribution_readiness.py": [
+    "analytics.confidence_calibration"
+  ],
+  "analytics/confidence_calibration.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/confidence_diagnostics.py": [],
+  "analytics/coverage_monitor.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/daily_summarizer.py": [],
+  "analytics/data_quality.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/edge_waterfall.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/execution_analytics.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/regime_attribution.py": [
+    "analytics.confidence_calibration",
+    "analytics.analytics_bus"
+  ],
+  "analytics/trade_quality.py": [
+    "analytics.analytics_bus"
+  ],
+  "analytics/__init__.py": [],
+  "nifty_strategy/config.py": [],
+  "nifty_strategy/data_provider.py": [
+    "config"
+  ],
+  "nifty_strategy/indicators.py": [
+    "config"
+  ],
+  "nifty_strategy/main.py": [
+    "config"
+  ],
+  "nifty_strategy/options_selector.py": [
+    "config"
+  ],
+  "nifty_strategy/paper_trader.py": [],
+  "nifty_strategy/risk_manager.py": [
+    "config"
+  ],
+  "nifty_strategy/signal_bridge.py": [
+    "models.trade_record",
+    "config"
+  ],
+  "nifty_strategy/strategy.py": [
+    "config"
+  ],
+  "nifty_strategy/test_strategy.py": [
+    "config"
+  ],
+  "nifty_strategy/trade_executor.py": [
+    "models.trade_record",
+    "config"
+  ],
+  "main.py": [
+    "core.alert_manager",
+    "core.session_guard",
+    "core.data_manager",
+    "core.log_observer",
+    "core.telemetry.rejection_schema",
+    "core.master_decision_engine",
+    "core.options_resolver",
+    "core.position_manager",
+    "core.trade_filter",
+    "core.structural_breaker",
+    "core.risk_manager",
+    "core.reconciliation",
+    "core.regime_adapter",
+    "core.entry_engine",
+    "core.system_state",
+    "core.telegram_controller",
+    "core.exit_engine",
+    "core.oms",
+    "core.slippage_model",
+    "core.trade_logger",
+    "core.session_strategy",
+    "core.burnin_tracker",
+    "core.readiness_scorer",
+    "models.signals",
+    "core.snapshot",
+    "core.simulation_engine",
+    "core.metrics_engine",
+    "core.decision_engine_v3",
+    "core.discipline_engine",
+    "core.metrics_logger"
+  ]
+}

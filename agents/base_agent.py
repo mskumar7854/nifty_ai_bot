@@ -12,7 +12,7 @@ from typing import Optional, List, Dict
 from enum import Enum
 import pandas as pd
 
-from models.signals import AgentOutput, Direction, Strength, MarketSnapshot
+from models import AgentOutput, Direction, Strength, MarketSnapshot
 from utils.logger import AgentLogger
 from config.settings import Settings
 

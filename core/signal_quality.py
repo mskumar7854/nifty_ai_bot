@@ -27,7 +27,7 @@ Grading factors:
 ============================================
 """
 
-from models.signals import Signal, SignalGrade, Direction, MarketRegime
+from models import Signal, SignalGrade, Direction, MarketRegime
 from config.settings import Settings
 
 

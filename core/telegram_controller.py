@@ -16,7 +16,7 @@ from typing import Optional, Dict
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from models.signals import Signal, SignalType, Direction
+from models import Signal, SignalType, Direction
 from config.settings import Settings
 from core.session_guard import orchestrator
 from core.signal_formatter import format_signal_message, format_trade_close_message
@@ -72,7 +72,7 @@ class TelegramController:
 
         import time
         from datetime import datetime
-        from models.signals import Strength, SignalGrade
+        from models import Strength, SignalGrade
         
         now = time.time()
         recovered_count = 0

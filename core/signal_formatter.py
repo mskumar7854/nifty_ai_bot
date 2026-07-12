@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-from models.signals import SignalStatus
+from models import SignalStatus
 
 
 def format_signal_message(signal, snapshot_summary: Optional[dict] = None) -> str:

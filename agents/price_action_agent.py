@@ -12,7 +12,7 @@ import numpy as np
 from datetime import datetime
 
 from agents.base_agent import BaseAgent, AgentCategory
-from models.signals import AgentOutput, Direction, Strength, MarketSnapshot
+from models import AgentOutput, Direction, Strength, MarketSnapshot
 from utils.indicators import candle_analysis
 from config.settings import Settings
 

@@ -38,7 +38,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
 
-from models.signals import (
+from models import (
     Signal, SignalType, Direction, Strength
 )
 from models.trade_record import TradeRecord
@@ -1453,7 +1453,7 @@ class PositionManager:
         # 1. Premium Efficiency
         underlying_move = 0.0
         if snapshot and pos.underlying_price_at_entry > 0:
-            from models.signals import Direction
+            from models import Direction
             if pos.direction == Direction.BULLISH:
                 underlying_move = snapshot.price - pos.underlying_price_at_entry
             else:
