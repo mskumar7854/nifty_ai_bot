@@ -308,51 +308,40 @@ class NiftyAISystem:
             session_strategy=self.session_strategy,
         )
 
-        # ── Remote Control ──
-        self.telegram_bot = TelegramController(
-            settings=settings,
-            system=self,  # v4.6.1: Passing system for unified execution path
-            db_manager=self.decision_engine.memory.db
-        )
-        
-        # ── Alerting ──
-        self.alert_manager = AlertManager(settings, self.telegram_bot)
-
         # ── Final Layer ──
-        # Phase B: Instantiate BurninTracker and ReadinessScorer first
         self.burnin_tracker = BurninTracker()
         self.readiness_scorer = ReadinessScorer()
-        # Pass burnin_tracker into SimulationEngine so it auto-records every trade
         self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker)
 
         # ── Phase 2: Options Hard Filter ──
-        # ── P1-D: Options Analyzer ──
-        # ── Phase 2 rule engine support
         self.options_analyzer = OptionsAnalyzer(mode=settings.system_mode.mode)
-        self.perf_logger = PerformanceLogger()
-        self.observer = LogObserver()
-        self.observer.data_manager = self.data_manager
-        self.metrics_logger = MetricsLogger()
 
-        # ── Dashboard ──
-        self.dashboard = None
-        if settings.dashboard.enabled:
-            try:
-                from web.dashboard import Dashboard
-                self.dashboard = Dashboard(
-                    host=settings.dashboard.host,
-                    port=settings.dashboard.port,
-                    telemetry_emit_interval_seconds=settings.dashboard.telemetry_emit_interval_seconds,
-                )
-                # Phase B: Wire burnin components into dashboard
-                self.dashboard.set_burnin_components(
-                    self.burnin_tracker,
-                    self.readiness_scorer,
-                )
-                # Priority 1: Wire simulation engine for Trade Ledger
-                self.dashboard.set_simulation_engine(self.simulation)
-            except Exception as e:
-                logger.warning(f"Dashboard not available: {e}")
+        # ── Telemetry Pipeline ──
+        from core.context import RuntimeContext
+        from core.pipelines.telemetry_pipeline import TelemetryPipeline
+        
+        self.ctx = RuntimeContext(
+            settings=settings,
+            mode=settings.system_mode.mode,
+            is_simulation=(settings.system_mode.mode == "SIMULATION"),
+            telegram_enabled=settings.alerts.telegram_enabled,
+            db_manager=self.decision_engine.memory.db,
+            data_manager=self.data_manager,
+            burnin_tracker=self.burnin_tracker,
+            readiness_scorer=self.readiness_scorer,
+            simulation=self.simulation,
+            system=self
+        )
+        self.telemetry = TelemetryPipeline(self.ctx)
+        self.ctx.telemetry = self.telemetry
+        
+        # Keep backward compatibility references
+        self.telegram_bot = self.telemetry.telegram_bot
+        self.alert_manager = self.telemetry.alert_manager
+        self.perf_logger = self.telemetry.perf_logger
+        self.observer = self.telemetry.observer
+        self.metrics_logger = self.telemetry.metrics_logger
+        self.dashboard = self.telemetry.dashboard
 
         # ── Mode ──
         self.is_simulation = (
@@ -380,58 +369,10 @@ class NiftyAISystem:
         self.running = True
         print_banner()
 
-        if self.dashboard:
-            self.dashboard.start()
-
-        # 1. Telegram App Build
-        app = ApplicationBuilder().token(settings.alerts.telegram_bot_token).build()
-        app.add_handler(CommandHandler("start", self.telegram_bot.start_cmd))
-        app.add_handler(CommandHandler("stop", self.telegram_bot.stop_cmd))
-        app.add_handler(CommandHandler("status", self.telegram_bot.status_cmd))
-        app.add_handler(CommandHandler("kill", self.telegram_bot.kill_cmd))
-        app.add_handler(CommandHandler("restart", self.telegram_bot.restart_cmd))
-        app.add_handler(CommandHandler("pause", self.telegram_bot.pause_cmd))
-        app.add_handler(CommandHandler("resume", self.telegram_bot.resume_cmd))
-        app.add_handler(CommandHandler("force_reconcile", self.telegram_bot.force_reconcile_cmd))
-        app.add_handler(CallbackQueryHandler(self.telegram_bot.handle_callback_query))
-
-        # Store app reference in the bot for async sending
-        self.telegram_bot.app = app
-
-        # Register central State Manager Telegram alert callback
-        from core.system_state import get_state_manager
-        def send_telegram_alert(msg: str):
-            if self.telegram_enabled and self.telegram_bot:
-                import asyncio
-                asyncio.create_task(self.telegram_bot._send_admin_msg(msg))
-        get_state_manager().register_alert_callback(send_telegram_alert)
-
-        # v3.7: Telegram is always initialized — even in SIMULATION mode.
-        # In SIM, we want signal notifications for observability (no real trades executed).
-        # Previously, Telegram was completely disabled in SIM which meant confirmed signals
-        # were silently swallowed after passing all 10 gates.
-        #
-        # Distinction:
-        #   telegram_enabled = True  → app initialized, alerts dispatched
-        #   is_simulation = True     → execution blocked downstream (PositionManager hard-lock)
-        self.telegram_enabled = settings.alerts.telegram_enabled
-
-        if self.telegram_enabled:
-            try:
-                await app.initialize()
-                try:
-                    await app.bot.delete_webhook(drop_pending_updates=True)
-                except Exception as weberr:
-                    logger.warning(f"Webhook deletion warning: {weberr}")
-                await app.start()
-                await app.updater.start_polling(drop_pending_updates=True)
-                if self.is_simulation:
-                    logger.info("📱 Telegram Active (SIMULATION mode — alerts only, no real execution)")
-                else:
-                    logger.info("📱 Telegram Async Polling Active (LIVE mode)")
-            except Exception as e:
-                logger.error("Telegram init failed: %s", e)
-                self.telegram_enabled = False
+        self.telemetry.start_dashboard()
+        self.telegram_enabled = self.ctx.telegram_enabled
+        await self.telemetry.init_telegram()
+        self.telegram_enabled = self.ctx.telegram_enabled
 
 
         # 2. Wake up the Brain (Load memory from disk)
@@ -503,7 +444,8 @@ class NiftyAISystem:
                     await self._run_cycle(session)
                     
                     # ── P0-C: External heartbeat ping (Fire & Forget) ──
-                    asyncio.create_task(self._ping_heartbeat(session))
+                    last_cycle_duration = time.perf_counter() - getattr(self, "_last_cycle_start", start_time)
+                    asyncio.create_task(self.telemetry.ping_heartbeat(session, last_cycle_duration))
 
                     # ── LATENCY PROFILING (Priority 4: Pre-market was 530ms) ──
                     elapsed_sec = time.perf_counter() - start_time
@@ -582,16 +524,7 @@ class NiftyAISystem:
                 deadman_task.cancel()
                 broker_health_task.cancel()
                 await self.data_manager.stop_oi_updater()
-                if getattr(self, "telegram_enabled", False):
-                    try:
-                        await app.updater.stop()
-                    except Exception:
-                        pass
-                try:
-                    await app.stop()
-                    await app.shutdown()
-                except Exception:
-                    pass
+                await self.telemetry.shutdown_telegram()
                 self.stop()
 
     async def _run_cycle(self, session: aiohttp.ClientSession):
@@ -2107,27 +2040,6 @@ class NiftyAISystem:
     # ══════════════════════════════════════════════════════════════
     # P0-C: EXTERNAL HEARTBEAT + DEAD MAN'S SWITCH
     # ══════════════════════════════════════════════════════════════
-
-    async def _ping_heartbeat(self, session: aiohttp.ClientSession) -> None:
-        """Dead man's switch. If this stops pinging, we're down.
-
-        Runs as fire-and-forget background task — never blocks the main loop.
-        Skipped automatically when system is under stress (last cycle > 0.5s).
-        """
-        if not HEARTBEAT_URL:
-            return
-        # Skip during stress cycles — backpressure protection
-        last_cycle_duration = time.perf_counter() - getattr(self, "_last_cycle_start", 0)
-        if last_cycle_duration > 0.5:
-            return
-        try:
-            async with session.get(
-                HEARTBEAT_URL,
-                timeout=aiohttp.ClientTimeout(total=2)
-            ) as _:
-                pass
-        except Exception:
-            pass  # Never log heartbeat failures — fills console with noise
 
     async def _deadman_watchdog(self) -> None:
         """P0-C: Force-close all positions if main loop stops updating.

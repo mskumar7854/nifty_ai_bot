@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict, Counter
 
 from agents.base_agent import BaseAgent
-from agents.learning_agent_v2 import LearningAgentV2Mixin
+# from agents.learning_agent_v2 import LearningAgentV2Mixin
 from models import (
     AgentOutput, Direction, Strength, MarketSnapshot,
     SignalType, TradeOutcome,
@@ -35,7 +35,7 @@ from utils.helpers import save_json, load_json
 from config.settings import Settings
 
 
-class LearningAgent(BaseAgent, LearningAgentV2Mixin):
+class LearningAgent(BaseAgent):
     """
     The agent that LEARNS from your trading history.
 

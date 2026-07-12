@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from enum import Enum
 
-from .signal import Direction, Strength
+from .enums import Direction, Strength
 
 @dataclass
 class AgentOutput:
