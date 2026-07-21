@@ -598,6 +598,8 @@ class DataManager:
                             'max_ce_strike': max_ce_strike,
                             'max_pe_strike': max_pe_strike,
                             'pcr': pcr,
+                            'chain_list': chain_list,
+                            'spot_price': spot_price,
                             'data_source': DataSource.REAL
                         }
                         
@@ -941,6 +943,8 @@ class DataManager:
             iv_percentile_30d=45.0,
             oi_data_source=oi.get('data_source', DataSource.SIMULATED),
             regime_state=regime_state.to_dict(),
+            oi_chain_data=oi.get('chain_list', []),
+            oi_spot_price=oi.get('spot_price', 0),
         )
 
     def get_snapshot_from_df(self, df: pd.DataFrame) -> MarketSnapshot:
@@ -1017,6 +1021,8 @@ class DataManager:
             iv_percentile_30d=45.0,
             oi_data_source=DataSource.SIMULATED,  # P1.2: FLAG — not real data
             regime_state=regime_state.to_dict(),
+            oi_chain_data=[],
+            oi_spot_price=0,
         )
 
         self.logger.debug(f"Snapshot price: {snapshot.price:.2f}")
@@ -1548,4 +1554,5 @@ class DataManager:
             price=0, open=0, high=0, low=0, close=0,
             volume=0, vwap=0, rsi=50,
             ema_fast=0, ema_slow=0, atr=25,
+            oi_chain_data=[], oi_spot_price=0
         )

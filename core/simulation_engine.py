@@ -1393,13 +1393,18 @@ class SimulationEngine:
     def _load_state(self):
         state = load_json("data/simulation_state.json")
         if state:
+            saved_month = state.get("reset_month", date.today().month)
+            if saved_month != date.today().month or abs(state.get("net_pnl", 0)) > 50_000_000:
+                self.logger.info("Simulation state reset triggered (month rollover or invalid state). Starting fresh.")
+                return
+
             self.current_capital = state.get(
                 "current_capital", self.initial_capital
             )
             self.peak_capital = state.get(
                 "peak_capital", self.initial_capital
             )
-            self.reset_month = state.get("reset_month", date.today().month)
+            self.reset_month = saved_month
             self.net_pnl = state.get("net_pnl", 0)
             self.wins = state.get("wins", 0)
             self.losses = state.get("losses", 0)

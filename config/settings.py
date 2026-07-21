@@ -455,6 +455,58 @@ class AgentIntervals:
 
 @dataclass
 class ThresholdConfig:
+    # ══════════════════════════════════════════
+    # MULTI-STRIKE OI INTELLIGENCE CONFIG
+    # ══════════════════════════════════════════
+    # VIX-Adaptive Strike Radius
+    oi_strike_radius_low_vix: int = 8         # VIX < 14
+    oi_strike_radius_normal: int = 10         # VIX 14-18
+    oi_strike_radius_high_vix: int = 15       # VIX 18-24
+    oi_strike_radius_extreme: int = 20        # VIX > 24
+
+    # Migration & History
+    oi_migration_lookback: int = 24           # snapshots (~2hrs at 5min)
+    oi_migration_weight_recent: float = 0.70
+    oi_migration_weight_mid: float = 0.20
+    oi_migration_weight_old: float = 0.10
+    oi_migration_significant_pct: float = 10.0
+
+    # Zone Detection
+    oi_wall_zone_threshold_pct: float = 15.0
+    oi_wall_zone_adjacent_ratio: float = 0.50
+
+    # Volume Validation
+    oi_volume_confirmation_ratio: float = 0.50
+    oi_unconfirmed_discount: float = 0.20
+
+    # Normalized OI
+    oi_zscore_significant: float = 2.0
+
+    # Tactical Signals
+    oi_flip_threshold_pct: float = 15.0
+    oi_wall_absorption_proximity_pct: float = 0.3
+    oi_wall_break_collapse_pct: float = 30.0
+    oi_trap_wall_strength_min: float = 60.0
+    oi_trap_collapse_ratio: float = 0.50
+
+    # Scoring
+    oi_structural_weight_default: float = 0.70
+    oi_tactical_weight_default: float = 0.30
+    oi_pressure_strong: float = 60.0
+    oi_pressure_moderate: float = 30.0
+
+    # Freshness (v3)
+    oi_freshness_live_sec: float = 60.0
+    oi_freshness_ok_sec: float = 180.0
+    oi_freshness_stale_sec: float = 300.0
+    oi_freshness_min_multiplier: float = 0.40
+
+    # Expiry Phase (v3)
+    oi_expiry_afternoon_minutes: int = 75
+    oi_expiry_day_multiplier: float = 0.70
+    oi_expiry_afternoon_multiplier: float = 0.50
+    oi_early_multiplier: float = 1.00
+
     vwap_buffer: float = 5.0
     trend_ema_fast: int = 9
     trend_ema_slow: int = 21

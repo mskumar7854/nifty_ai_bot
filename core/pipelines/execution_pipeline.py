@@ -320,3 +320,58 @@ class ExecutionPipeline:
             execution_quality="FAILED",
             errors=[reason]
         )
+
+    async def apply_position_actions(self, actions: list) -> None:
+        """
+        Executes position actions returned by the PositionPipeline.
+        This is the only place that should talk to the broker for position management.
+        """
+        system = self.ctx.system  # To fallback if components aren't directly in ctx yet
+        pos_manager = getattr(system, "position_manager", None)
+        if not pos_manager:
+            return
+
+        for action in actions:
+            action_type = getattr(action, "action_type", "")
+            pid = getattr(action, "position_id", "")
+            
+            try:
+                if action_type == "FULL_EXIT":
+                    if self.settings.system_mode.mode != "SIMULATION":
+                        await __import__('asyncio').to_thread(
+                            pos_manager.close_position, 
+                            pid, 
+                            0.0,  # Price usually fetched inside or passed if available
+                            getattr(action, "reason", "FULL_EXIT")
+                        )
+                    else:
+                        if hasattr(system, "simulation"):
+                            system.simulation._close_trade(pid, 0.0, getattr(action, "reason", "FULL_EXIT"))
+                
+                elif action_type == "PARTIAL_EXIT":
+                    # Currently not implemented heavily in existing PositionManager, but we can call it if it exists
+                    if hasattr(pos_manager, "partial_close_position") and self.settings.system_mode.mode != "SIMULATION":
+                        await __import__('asyncio').to_thread(
+                            pos_manager.partial_close_position,
+                            pid,
+                            getattr(action, "qty", 0),
+                            0.0,
+                            getattr(action, "reason", "PARTIAL_EXIT")
+                        )
+                
+                elif action_type == "UPDATE_SL":
+                    new_sl = getattr(action, "target_price", 0.0)
+                    if self.settings.system_mode.mode != "SIMULATION":
+                        await __import__('asyncio').to_thread(
+                            pos_manager.update_stop_loss,
+                            pid,
+                            new_sl
+                        )
+                    else:
+                        if hasattr(system, "simulation") and pid in system.simulation.open_trades:
+                            trade = system.simulation.open_trades[pid]
+                            trade.stop_loss = new_sl
+                            logger.info(f"✅ [SIM] Updated SL for {pid} to {new_sl}")
+
+            except Exception as e:
+                logger.error(f"❌ [EXEC] Failed to apply position action {action_type} for {pid}: {e}")

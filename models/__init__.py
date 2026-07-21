@@ -1,4 +1,5 @@
 from .regime import MarketRegime, RegimeState
+from .oi_analysis import StrikeZone, OIAnalysis, MarketStructureAnalysis
 from .enums import Direction, SignalType, Strength, SignalGrade, SignalStatus
 from .signal import Signal
 from .execution import ExecutionPolicy, ExecutionResult
@@ -15,5 +16,6 @@ __all__ = [
     "AgentOutput", "ConfluenceResult",
     "MarketSnapshot", "OptionQuote", "SessionPhase", "TrapType", "DataSource",
     "TradeOutcome",
-    "PositionState", "TradeHealth", "ExitDecision", "ExitDecisionType", "PositionAction"
+    "PositionState", "TradeHealth", "ExitDecision", "ExitDecisionType", "PositionAction",
+    "StrikeZone", "OIAnalysis", "MarketStructureAnalysis"
 ]

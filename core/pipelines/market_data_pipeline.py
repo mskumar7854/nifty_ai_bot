@@ -19,10 +19,10 @@ class MarketDataPipeline:
         self.data_manager = DataManager(self.settings)
         self.ctx.data_manager = self.data_manager
 
-    def bootstrap(self):
-        """Runs the synchronous startup bootstrap to build history."""
+    async def bootstrap(self, session: aiohttp.ClientSession = None):
+        """Runs the async startup bootstrap to build history."""
         try:
-            self.data_manager.startup_bootstrap()
+            await self.data_manager.startup_bootstrap(session)
         except Exception as e:
             logger.critical(f"Data Core bootstrap failed: {e}")
             raise e

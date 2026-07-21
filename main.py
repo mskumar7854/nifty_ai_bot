@@ -1,26 +1,22 @@
 """
 ============================================
-🧠⚡ NIFTY AI AGENT SYSTEM v4.6.1
+🧠⚡ NIFTY AI AGENT SYSTEM v5.0.0
 THE FINAL PRODUCTION SYSTEM (Hardened)
 
 PRO MODE + SIMULATION + DISCIPLINE
 ============================================
 """
 
-import traceback
-import csv
-import uuid
+import os
+import sys
 import time
 import asyncio
-import aiohttp
-import threading
-import signal as sig_module
-import sys
-import os
-import uuid
+import signal
+import atexit
+import logging
 from typing import Optional
 
-# Force UTF-8 Encoding on Windows to prevent Emoji/Rich logging crashes
+# Force UTF-8 Encoding on Windows
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
@@ -28,1469 +24,39 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-# ── P0-C: Heartbeat URL for dead man's switch ──
-HEARTBEAT_URL = os.getenv("HEARTBEAT_URL")  # e.g. https://hc-ping.com/your-uuid
-DEADMAN_TIMEOUT_SECONDS = int(os.getenv("DEADMAN_TIMEOUT_SECONDS", "30"))
-from datetime import datetime, timedelta
-
+# Setup basic directories
 os.makedirs("data", exist_ok=True)
 
 from config.settings import Settings
-from core.data_manager import DataManager
-from core.decision_engine import DecisionEngine
-from core.alert_manager import AlertManager
-from core.trade_logger import TradeLogger
-from core.position_manager import PositionManager
-from core.reconciliation import ReconciliationEngine
-from core.slippage_model import SlippageModel
-from core.metrics_engine import MetricsEngine
-from core.trade_filter import TradeFilter
-from core.entry_engine import EntryEngine
-from core.exit_engine import ExitEngine
-from core.session_strategy import SessionStrategy
-from core.simulation_engine import SimulationEngine
-from core.discipline_engine import DisciplineEngine
-from core.risk_manager import RiskManager
-from core.master_decision_engine import MasterDecisionEngine
-from core.telemetry.rejection_schema import GateEvaluation, RejectionRecord, RejectionLogger
-
-from core.telegram_controller import TelegramController
-from core.burnin_tracker import BurninTracker
-from core.readiness_scorer import ReadinessScorer
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
-from models import SignalType, Direction, TradeOutcome
 from utils.logger import get_logger
-from utils.tasks import fire_and_log
-from options_analyzer import OptionsAnalyzer
-from performance_logger import PerformanceLogger
-from core.log_observer import LogObserver
-from core.metrics_logger import MetricsLogger
-from core.regime_adapter import RegimeAdapter
-from core.session_guard import orchestrator, RuntimePosture
-
-settings = Settings()
-logger = get_logger("main", settings.log_level)
-
-
-def print_banner():
-    mode = settings.system_mode.mode
-    phase = settings.system_mode.current_phase
-    capital = settings.get_capital()
-
-    # ── Runtime topology counts (not repository inventory) ──
-    active_count = len(settings.pipeline.active_agents)
-    routed_count = len(set(
-        settings.pipeline.phase_1_gatekeepers +
-        settings.pipeline.phase_2_core +
-        settings.pipeline.phase_3_confirmation +
-        settings.pipeline.phase_4_risk
-    ))
-
-    mode_icon = {
-        "SIMULATION": "🧪",
-        "SMALL_CAPITAL": "💵",
-        "SCALED": "💰",
-    }.get(mode, "🔧")
-
-    # ── Context-aware header ──
-    if mode == "SIMULATION":
-        header_label = "BURN-IN VALIDATION MODE"
-        posture_line = "📡 Posture : Observation only — collecting evidence"
-    elif mode == "SMALL_CAPITAL":
-        header_label = "SMALL CAPITAL — LIVE"
-        posture_line = "📡 Posture : Live execution — 1-2 lots"
-    else:
-        header_label = "SCALED DEPLOYMENT — LIVE"
-        posture_line = "📡 Posture : Full capital execution"
-
-    # ── Context-aware signal flow footer ──
-    if mode == "SIMULATION":
-        flow_footer = "│  ⚠️  All signals paper-traded — no real orders placed     │"
-    else:
-        flow_footer = "│  Result: 2-3 trades/day (design target, track actuals)    │"
-
-    print(f"""
-╔══════════════════════════════════════════════════════════════════════════╗
-║                                                                          ║
-║    🧠⚡ NIFTY AI AGENT SYSTEM v4.6.1 — {header_label:<34s}║
-║                                                                          ║
-║  ┌─── Runtime State ──────────────────────────────────────────┐          ║
-║  │  {mode_icon} Mode    : {mode:<30s}                    │          ║
-║  │  📋 Phase   : {phase}                                                 │          ║
-║  │  {posture_line:<56s}│          ║
-║  └────────────────────────────────────────────────────────────┘          ║
-║                                                                          ║
-║  ┌─── Risk Configuration ─────────────────────────────────────┐          ║
-║  │  💰 Capital   : ₹{capital:<12,.0f}                                   │          ║
-║  │  🛡️  Max Loss  : ₹{settings.position.max_daily_loss:<8,.0f}/day                             │          ║
-║  │  🎯 Max Trades: {settings.trade_filter.max_trades_per_day}/day                                           │          ║
-║  │  📊 Min Grade : {settings.trade_filter.min_grade_to_trade} ({settings.trade_filter.min_signal_confidence:.0f}% confidence)                       │          ║
-║  │  🎯 Daily Goal: ₹{settings.exit.daily_target_amount:<8,.0f}(auto-stop)                      │          ║
-║  └────────────────────────────────────────────────────────────┘          ║
-║                                                                          ║
-║  ┌─── Signal Flow ────────────────────────────────────────────┐          ║
-║  │  {active_count} Agents ({routed_count} routed) → Decision Engine → 10-Gate Filter│          ║
-║  │       ↓              ↓               ↓                     │          ║
-║  │  Kill 65%     Smart Entry      Exit Intelligence           │          ║
-║  │  of signals   + Confirmation   + Daily Target Lock         │          ║
-║  {flow_footer:<73s}║
-║  └────────────────────────────────────────────────────────────┘          ║
-║                                                                          ║
-║  📊 Dashboard: http://localhost:{settings.dashboard.port:<5d}                                  ║
-║                                                                          ║
-╚══════════════════════════════════════════════════════════════════════════╝
-    """)
-
-
-
-# ══════════════════════════════════════════════════════════
-# 🩺 BROKER HEALTH MONITOR (v4.7)
-# Tracks live API responsiveness. Blocks trades during
-# degraded broker connectivity before money is committed.
-# ══════════════════════════════════════════════════════════
-
-class BrokerHealthMonitor:
-    """
-    Continuously probes broker API health and blocks trading
-    if connectivity degrades.
-
-    Tracks:
-        - api_latency_ms:         round-trip time of last API call
-        - last_successful_order:  timestamp of last confirmed order
-        - feed_delay_s:           age of the most recent market data tick
-        - is_healthy:             computed gate — False blocks new orders
-
-    Updated every `poll_interval_s` seconds by _run_broker_health_loop().
-    Checked synchronously by position_manager before every order.
-    """
-
-    def __init__(self, settings):
-        self.settings = settings
-        self._warn_ms  = getattr(settings.alerts, "broker_latency_warn_ms",  1500.0)
-        self._halt_ms  = getattr(settings.alerts, "broker_latency_halt_ms",  3000.0)
-        self.poll_interval_s: float = 15.0
-
-        self.api_latency_ms: float = 0.0
-        self.last_successful_order: Optional[float] = None  # epoch seconds
-        self.feed_delay_s: float = 0.0
-        self.consecutive_degraded: int = 0
-
-        self.is_healthy: bool = True
-        self.degraded_reason: str = ""
-
-    def record_order_success(self):
-        """Call this after every successful broker order placement."""
-        import time as _time
-        self.last_successful_order = _time.time()
-
-    def record_api_latency(self, latency_ms: float):
-        """Call this after every broker API round-trip."""
-        self.api_latency_ms = latency_ms
-
-        if latency_ms >= self._halt_ms:
-            self.consecutive_degraded += 1
-            self.degraded_reason = f"API latency {latency_ms:.0f}ms ≥ halt threshold {self._halt_ms:.0f}ms"
-            if self.consecutive_degraded >= 3:
-                self.is_healthy = False
-                logger.critical(
-                    "🔴 [BROKER HEALTH] DEGRADED — latency=%.0fms (×%d consecutive). "
-                    "New trades BLOCKED.", latency_ms, self.consecutive_degraded
-                )
-        elif latency_ms >= self._warn_ms:
-            logger.warning(
-                "⚠️ [BROKER HEALTH] High latency: %.0fms", latency_ms
-            )
-            self.consecutive_degraded = 0  # warn-only; don't count as halt
-        else:
-            # Healthy: reset counter and re-enable
-            if not self.is_healthy:
-                logger.info("✅ [BROKER HEALTH] Latency normalised (%.0fms). Trades re-enabled.", latency_ms)
-            self.consecutive_degraded = 0
-            self.is_healthy = True
-            self.degraded_reason = ""
-
-    def get_status(self) -> dict:
-        import time as _time
-        last_order_age = (
-            f"{_time.time() - self.last_successful_order:.0f}s ago"
-            if self.last_successful_order else "never"
-        )
-        return {
-            "healthy":             self.is_healthy,
-            "api_latency_ms":      round(self.api_latency_ms, 1),
-            "last_order":          last_order_age,
-            "feed_delay_s":        round(self.feed_delay_s, 1),
-            "consecutive_degraded": self.consecutive_degraded,
-            "degraded_reason":     self.degraded_reason,
-        }
-
-
-class NiftyAISystem:
-    """THE FINAL SYSTEM — v4.6.1 Hardened"""
-
-    def __init__(self):
-        self.running = False
-        self.cycle_count = 0
-        # ── System State Manager & Master Kill Switch ──
-        from core.system_state import get_state_manager
-        self.trading_enabled = get_state_manager().is_trading_allowed()
-        self.cycle_running = False
-        
-        # ── Multi-Layer Circuit Breaker ──
-        self.error_count = 0        # General
-        self.engine_errors = 0      # Calculation layer
-        self.api_errors = 0         # Dashboard/API layer
-        self.execution_failures = 0 # Broker interaction failures
-        
-        self.last_cycle_time = 0
-        self.no_trade_streak = 0  # Fix #4: Trade Frequency Guard counter
-        self.trade_sequence = 0
-        self.last_candle_timestamp = None
-        self._last_telemetry_log_ts = 0.0 # Force log telemetry on first cycle status
-
-        logger.info(
-            f"Initializing v4.6.1 | "
-            f"Mode: {settings.system_mode.mode}"
-        )
-
-        # ── Core ──
-        self.data_manager = DataManager(settings)
-        self.decision_engine = DecisionEngine(settings)
-        self.trade_logger = TradeLogger()
-
-        # ── Persistent OMS (P0.3) ──
-        from core.oms import OrderManagementSystem
-        self.oms = OrderManagementSystem()
-
-        # ── DB Identity Assertion ──
-        # OMS and DBManager MUST target the same SQLite file.
-        # A mismatch means the orders table was never initialized in the OMS file,
-        # reconciliation reads from a ghost DB, and replay datasets are fragmented.
-        # This assertion is the canonical protection against future silent divergence.
-        _db_manager_path = self.decision_engine.memory.db.db_path
-        _oms_path = self.oms.db_path
-        if _oms_path != _db_manager_path:
-            raise RuntimeError(
-                f"DB_IDENTITY_MISMATCH: OMS targets '{_oms_path}' but "
-                f"DBManager targets '{_db_manager_path}'. "
-                f"All components must use the same SQLite file. "
-                f"Check SYSTEM_MODE env var and _resolve_db_path() in core/oms.py."
-            )
-        logger.info(f"✅ DB_IDENTITY_VERIFIED — OMS + DBManager → {_oms_path}")
-
-        # ── Production ──
-
-        self.position_manager = PositionManager(settings)
-        # ── P0: Reconciliation Engine ──
-        self.reconciliator = ReconciliationEngine(self.position_manager, self.position_manager.oms)
-
-        # ── Share tuner: engine generates thresholds, PM feeds outcomes ──
-        self.position_manager.tuner = self.decision_engine.tuner
-        self.risk_manager = RiskManager(settings, self.decision_engine.memory.db)
-        self.slippage_model = SlippageModel(settings)
-        self.metrics_engine = MetricsEngine(settings)
-        self.trade_filter = TradeFilter(settings)
-        self.regime_adapter = RegimeAdapter()
-        self.entry_engine = EntryEngine(settings)
-        self.exit_engine = ExitEngine(settings)
-        self.session_strategy = SessionStrategy(settings)
-        self.discipline = DisciplineEngine()
-
-        # ── 🧠 MASTER GATE (single point of truth for all trade approvals) ──
-        # Every execution path MUST call self.master.approve() before trading.
-        # If it returns False → no order placed. No exceptions.
-        self.rejection_logger = RejectionLogger()
-        self.master = MasterDecisionEngine(
-            risk_manager=self.risk_manager,
-            position_manager=self.position_manager,
-            discipline_engine=self.discipline,
-            exit_engine=self.exit_engine,
-            session_strategy=self.session_strategy,
-        )
-
-        # ── Final Layer ──
-        self.burnin_tracker = BurninTracker()
-        self.readiness_scorer = ReadinessScorer()
-        self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker)
-
-        # ── Phase 2: Options Hard Filter ──
-        # Handled by DecisionPipeline
-
-        # ── Telemetry Pipeline ──
-        from core.context import RuntimeContext
-        from core.pipelines.telemetry_pipeline import TelemetryPipeline
-        
-        self.ctx = RuntimeContext(
-            settings=settings,
-            mode=settings.system_mode.mode,
-            is_simulation=(settings.system_mode.mode == "SIMULATION"),
-            telegram_enabled=settings.alerts.telegram_enabled,
-            db_manager=self.decision_engine.memory.db,
-            data_manager=None, # Will be set by market pipeline
-            burnin_tracker=self.burnin_tracker,
-            readiness_scorer=self.readiness_scorer,
-            simulation=self.simulation,
-            system=self
-        )
-        self.market_pipeline = MarketDataPipeline(self.ctx)
-        self.data_manager = self.market_pipeline.data_manager # Backward compatibility
-        
-        self.telemetry = TelemetryPipeline(self.ctx)
-        self.ctx.telemetry = self.telemetry
-        
-        from core.pipelines.decision_pipeline import DecisionPipeline
-        self.decision_pipeline = DecisionPipeline(self.ctx)
-        
-        # Backward compat
-        self.decision_engine = self.decision_pipeline.decision_engine
-        self.master = self.decision_pipeline.master
-        self.trade_filter = self.decision_pipeline.trade_filter
-        self.options_analyzer = self.decision_pipeline.options_analyzer
-        self.ctx.decision = self.decision_pipeline
-        
-        from core.pipelines.execution_pipeline import ExecutionPipeline
-        self.execution_pipeline = ExecutionPipeline(self.ctx)
-        self.ctx.execution = self.execution_pipeline
-        
-        # Keep backward compatibility references
-        self.telegram_bot = self.telemetry.telegram_bot
-        self.alert_manager = self.telemetry.alert_manager
-        self.perf_logger = self.telemetry.perf_logger
-        self.observer = self.telemetry.observer
-        self.metrics_logger = self.telemetry.metrics_logger
-        self.dashboard = self.telemetry.dashboard
-
-        # ── Mode ──
-        self.is_simulation = (
-            settings.system_mode.mode == "SIMULATION"
-        )
-
-        # ── P0: EOD Force-Exit Idempotency Guard ──
-        # Tracks which position IDs have already had a force-exit attempted.
-        # Prevents repeated close() calls every 1-second cycle between 15:20–15:30.
-        # Cleared on __init__ (i.e., per bot session) — sufficient since EOD is a
-        # one-shot daily event.
-        self._eod_force_exit_attempted: set[str] = set()
-
-
-        # ── 🩺 Broker Health Monitor (v4.7) ──
-        self.broker_health = BrokerHealthMonitor(settings)
-
-        logger.info(
-            f"v4.6.1 initialized ✓ | "
-            f"{'SIMULATION' if self.is_simulation else 'LIVE'} mode"
-        )
-
-    async def start(self):
-        """🚀 THE ASYNC ORCHESTRATOR"""
-        self.running = True
-        print_banner()
-
-        self.telemetry.start_dashboard()
-        self.telegram_enabled = self.ctx.telegram_enabled
-        await self.telemetry.init_telegram()
-        self.telegram_enabled = self.ctx.telegram_enabled
-
-
-        # 2. Wake up the Brain (Load memory from disk)
-        await self.decision_engine.memory.boot()
-        
-        # 3. Recover Telegram State (Reconcile unfinished signals)
-        await self.telegram_bot.boot_recovery()
-
-        # 4. 🚨 BROKER POSITION RECONCILIATION (P0.3)
-        # Detect orphaned positions from a previous crash.
-        await self._reconcile_broker_positions()
-
-        # 5. Show current readiness score on start
-        if self.is_simulation:
-            readiness = self.simulation.get_readiness_score()
-            logger.info(
-                f"📋 Readiness: {readiness['readiness']} | "
-                f"Score: {readiness['final_score']}/100 | "
-                f"{readiness['recommendation']}"
-            )
-
-        # ── Start Background Tasks ──
-        if getattr(self.data_manager, "data_source", None) == "api":
-            logger.info("Starting background OI Updater loop...")
-            await self.data_manager.start_oi_updater()
-
-        import os
-        logger.info(f"🚀 System v4.6.1 Hardened Started | PID={os.getpid()}")
-
-        # ── VERIFY SESSION STATE ON BOOT ──
-        boot_session = orchestrator.get_session_state()
-        boot_posture = orchestrator.get_posture()
-        logger.info(f"🧭 BOOT SEQUENCE: Session={boot_session.name} | Posture={boot_posture.name}")
-        
-        if boot_posture == RuntimePosture.STANDBY:
-            logger.info("⏳ Market is currently in STANDBY. System will wait for active session.")
-        else:
-            logger.info("⚡ Market is ACTIVE. Activating live pipeline.")
-
-        # 3. Main Market Loop
-        async with aiohttp.ClientSession() as session:
-            logger.info("🎬 Powering up AI Execution Loop")
-            
-            # ── BOOT-TIME HYDRATION ──
-            # Replaces the old continuous warmup logic. Only runs once per boot.
-            await self.data_manager.startup_bootstrap(session)
-
-            # ── P0-C: Launch deadman watchdog as background task ──
-            deadman_task = asyncio.create_task(self._deadman_watchdog())
-            # ── v4.7: Broker health polling loop ──
-            broker_health_task = asyncio.create_task(self._run_broker_health_loop())
-
-            try:
-                while self.running:
-                    start_time = time.perf_counter()
-                    self.last_cycle_time = time.time()
-                    
-                    # ── P0-C: Record heartbeat for deadman watchdog ──
-                    self.position_manager.record_heartbeat()
-
-                    # ── AUTO SHUTDOWN ──
-                    if getattr(settings.trading, 'auto_shutdown_after_market', False):
-                        from utils.helpers import is_post_market
-                        if is_post_market():
-                            logger.info("🛑 Market is closed. Auto-shutdown triggered.")
-                            self.running = False
-                            continue
-
-                    await self._run_cycle(session)
-                    
-                    # ── P0-C: External heartbeat ping (Fire & Forget) ──
-                    last_cycle_duration = time.perf_counter() - getattr(self, "_last_cycle_start", start_time)
-                    asyncio.create_task(self.telemetry.ping_heartbeat(session, last_cycle_duration))
-
-                    # ── LATENCY PROFILING (Priority 4: Pre-market was 530ms) ──
-                    elapsed_sec = time.perf_counter() - start_time
-                    elapsed_ms = elapsed_sec * 1000
-
-                    # Rolling latency tracker (last 100 cycles)
-                    if not hasattr(self, '_latency_history'):
-                        self._latency_history = []
-                    self._latency_history.append(elapsed_ms)
-                    if len(self._latency_history) > 100:
-                        self._latency_history = self._latency_history[-100:]
-
-                    # ── Latency thresholds (Phase 1 calibration) ──
-                    # REST-based Dhan API: full OC payload alone can take 1–3s.
-                    # 800ms was websocket-grade and caused false-positive halts.
-                    # TODO: tighten back to 800ms once OI fetch is moved async.
-                    LATENCY_WARN_MS = 1500   # Warning: REST latency is elevated
-                    LATENCY_CRIT_MS = 3000   # Critical: REST cycle significantly degraded
-
-                    if elapsed_ms > LATENCY_CRIT_MS:
-                        lat_parts = " | ".join(f"{k}={v}" for k, v in self._current_latencies.items() if v > 0)
-                        logger.critical(
-                            f"🔴 CRITICAL LATENCY: {elapsed_ms:.0f}ms "
-                            f"(>{LATENCY_CRIT_MS}ms) — "
-                            f"cycle #{self.cycle_count} [{lat_parts}]"
-                        )
-                        self.error_count += 1
-                        
-                        # Abnormal Latency Circuit Breaker
-                        if not hasattr(self, '_consecutive_high_latency'):
-                            self._consecutive_high_latency = 0
-                        self._consecutive_high_latency += 1
-                        
-                        if self._consecutive_high_latency >= 3:
-                            self.halt_trading(f"CRITICAL: Abnormal Latency ({self._consecutive_high_latency}x > {LATENCY_CRIT_MS}ms)")
-                    else:
-                        self._consecutive_high_latency = 0
-
-                    if elapsed_ms <= LATENCY_CRIT_MS and elapsed_ms > LATENCY_WARN_MS:
-                        lat_parts = " | ".join(f"{k}={v}" for k, v in self._current_latencies.items() if v > 0)
-                        logger.warning(
-                            f"⚠️ HIGH LATENCY: {elapsed_ms:.0f}ms "
-                            f"(>{LATENCY_WARN_MS}ms) — "
-                            f"cycle #{self.cycle_count} [{lat_parts}]"
-                        )
-
-                    # Periodic latency summary (every 60 cycles ≈ 1 min)
-                    if self.cycle_count % 60 == 0 and self._latency_history:
-                        avg_ms = sum(self._latency_history) / len(self._latency_history)
-                        max_ms = max(self._latency_history)
-                        p95_idx = int(len(self._latency_history) * 0.95)
-                        sorted_lat = sorted(self._latency_history)
-                        p95_ms = sorted_lat[min(p95_idx, len(sorted_lat) - 1)]
-                        logger.debug(
-                            f"📊 [LATENCY] avg={avg_ms:.0f}ms | "
-                            f"p95={p95_ms:.0f}ms | max={max_ms:.0f}ms | "
-                            f"samples={len(self._latency_history)}"
-                        )
-
-                    if hasattr(self, "observer"):
-                        self.observer.on_cycle_end(elapsed_sec)
-                        
-                    # ── Dynamic polling via orchestrator ──
-                    # Uses mutation-based freshness (not candle timestamp)
-                    # so an active candle that's still updating is seen as FRESH.
-                    interval = orchestrator.get_poll_interval_seconds(self.data_manager.last_market_activity_ts)
-                    sleep_step = 1.0
-                    total_slept = 0.0
-                    while total_slept < interval:
-                        await asyncio.sleep(min(sleep_step, interval - total_slept))
-                        self.position_manager.record_heartbeat()
-                        total_slept += sleep_step
-            except asyncio.CancelledError:
-                logger.info("Shutdown signal received")
-            finally:
-                deadman_task.cancel()
-                broker_health_task.cancel()
-                await self.data_manager.stop_oi_updater()
-                await self.telemetry.shutdown_telegram()
-                self.stop()
-
-    async def _run_cycle(self, session: aiohttp.ClientSession):
-        if self.cycle_running:
-            return
-
-        self.cycle_running = True
-        try:
-            await self._run_cycle_inner(session)
-        except Exception as e:
-            logger.error(f"🔴 ERROR IN CYCLE: {e}", exc_info=True)
-            self.engine_errors += 1
-        finally:
-            self.cycle_running = False
-
-    async def _run_cycle_inner(self, session: aiohttp.ClientSession):
-        self.cycle_count += 1
-
-
-        # ── Execution Fidelity Audit ──
-        if self.cycle_count % 60 == 0:
-            if orchestrator.is_live(self.data_manager.last_market_activity_ts) and not self.is_simulation:
-                # Run broker reconciliation every ~60 cycles (~1 minute)
-                asyncio.create_task(asyncio.to_thread(self.reconciliator.audit_broker_state))
-                
-        # ── 0. Risk & Master Kill Switch ──
-
-        if not self.trading_enabled:
-            if self.cycle_count % 60 == 0:
-                logger.warning("⛔ SYSTEM HALTED: Master switch is OFF. Manual /start required.")
-            await self._monitor_only_async(session)
-            return
-
-        if self.telegram_bot.is_paused:
-            if self.cycle_count % 60 == 0:
-                logger.info("⏸️ System Paused via Telegram. Monitoring only.")
-            await self._monitor_only_async(session)
-            return
-
-        # ── RUNTIME POSTURE CHECK & HYDRATION ──
-        # Use mutation-based freshness: tracks when OHLCV values last changed,
-        # not when the candle timestamp last rolled over.
-        posture = orchestrator.get_posture(self.data_manager.last_market_activity_ts)
-        
-        if posture == RuntimePosture.STANDBY:
-            # STRICT REQUIREMENT: No data fetching, no hydration, no execution while market is closed.
-            # Only update dashboard and sleep.
-            if self.cycle_count % 60 == 0:
-                logger.info(f"💤 Posture is STANDBY (Market Closed). Sleeping...")
-            self._update_dashboard(None, None)
-            return  # Sleep interval will be 300s/1800s/60s based on orchestrator
-
-        if posture == RuntimePosture.HALTED:
-            # Passive observability mode
-            await self._monitor_only_async(session)
-            return
-
-        # For OBSERVATION or DEGRADED, we continue the loop to update dashboard/telemetry
-        # but the master gate will block actual trade execution.
-
-        # ── 🛡️ RUNTIME DUAL-ARCH GUARD ──
-        # Verify ACTIVE_TRADING_SYSTEM matches "main" every cycle.
-        # Prevents accidental duplicate orders if .env is live-edited.
-        active_system = os.getenv("ACTIVE_TRADING_SYSTEM", "main")
-        if active_system != "main":
-            self.halt_trading(
-                f"🚨 DUAL-ARCH GUARD: ACTIVE_TRADING_SYSTEM changed to '{active_system}' "
-                f"at runtime. Halting to prevent duplicate order risk."
-            )
-            return
-
-        # ── Circuit Breaker Logic ──
-        if self.execution_failures > 3:
-            self.halt_trading("CRITICAL: Broker Execution Failures > 3")
-            return
-        if self.engine_errors > 10:
-            self.halt_trading("CRITICAL: Engine Instability > 10 errors")
-            return
-
-        # ── ❤️ INTERNAL HEARTBEAT / STALL DETECTION ──
-        # last_cycle_time is set at the top of start() before each _run_cycle call.
-        # If gap since last successful cycle > 30s, warn loudly.
-        now_ts = time.time()
-        stall_seconds = now_ts - self.last_cycle_time
-        if stall_seconds > 30 and self.cycle_count > 5:
-            logger.critical(
-                f"⚠️ STALL DETECTED: {stall_seconds:.0f}s since last cycle. "
-                f"Main loop may be blocked. Cycle #{self.cycle_count}"
-            )
-            # Non-fatal: log and continue. Operators should wire an external
-            # ping (e.g. healthchecks.io) to escalate if this repeats.
-
-
-
-        self._current_latencies = {
-            "fetch_ms": 0,
-            "indicator_ms": 0,
-            "agents_ms": 0,
-            "decision_ms": 0,
-            "dashboard_ms": 0,
-            "db_ms": 0,
-            "oi_ms": 0,
-        }
-
-        # ── Layer 1: Decision Engine Watchdog ──
-        if not hasattr(self, '_last_decision_ts'):
-            self._last_decision_ts = time.time()
-            
-        stall_time = time.time() - self._last_decision_ts
-        if stall_time > 90:
-            logger.critical(f"🚨 [WATCHDOG] Decision engine stalled for {stall_time:.1f}s")
-
-        # 🔥 Update Global Risk (PnL from DB)
-        t_db = time.perf_counter()
-        await self.risk_manager.update_daily_pnl()
-        self._current_latencies["db_ms"] = int((time.perf_counter() - t_db) * 1000)
-
-        try:
-            # ── 1. MASTER GATE: Pre-trade approval (replaces scattered checks) ──
-            # Previously: exit_engine / position_manager / session_strategy /
-            #             discipline_engine were checked separately in 4 blocks.
-            # Now: ONE call. One answer. If blocked → monitor only.
-            #
-            # To debug a block: logger.info(self.master.explain_last())
-            pre_check = self.master.approve(
-                "BUY_CE",   # signal type doesn't matter for pre-cycle gate
-                context={
-                    "posture": posture,
-                    "gap_manager": getattr(self.decision_engine, "gap_penalty_manager", None),
-                    "discipline_context": {
-                        "daily_target_hit": self.exit_engine.daily_target_hit,
-                        "consecutive_losses": getattr(self.exit_engine, "consecutive_losses", 0),
-                        "seconds_since_last_trade": 999,
-                        "open_positions": len(self.position_manager.open_positions),
-                        "max_positions": settings.position.max_open_positions,
-                    }
-                },
-            )
-            if posture in (RuntimePosture.OBSERVATION, RuntimePosture.DEGRADED):
-                # We fetch data for dashboard/telemetry, but block trading
-                if self.cycle_count % 300 == 0:
-                    logger.info(f"📡 Posture is {posture.name}. Monitoring only.")
-                await self._monitor_only_async(session)
-                return
-            else:
-                if not pre_check.approved:
-                    if self.cycle_count % 300 == 0:
-                        logger.info(f"⛔ Master Gate: {pre_check.reason}")
-                    await self._monitor_only_async(session)
-                    return
-                else:
-                    trade_allowed = True
-
-            # ── 2. Fetch data (Async version) ──
-            t_broker = time.perf_counter()
-            df, snapshot = await self.data_manager.update_latest_candle_async(session)
-            self._current_latencies["fetch_ms"] = int((time.perf_counter() - t_broker) * 1000)
-            self._current_latencies["oi_ms"] = int(getattr(self.data_manager, "_oi_last_fetch_ms", 0.0))
-            
-            if snapshot is None or snapshot.price == 0:
-                return
-                
-            self._last_snapshot = snapshot
-                
-            # ── Analytics: Track OI Reliability ──
-            if hasattr(snapshot, "oi_data_source"):
-                source_str = snapshot.oi_data_source.name if hasattr(snapshot.oi_data_source, "name") else str(snapshot.oi_data_source)
-                self.observer.on_oi_update(source_str)
-
-            # ── 4. Monitor positions ──
-            await self._monitor_positions(snapshot, df)
-
-            # ── P0: EOD Force-Exit Sweep (15:20 hard deadline) ──
-            # If the clock has passed 15:20, close every open position
-            # immediately — simulation and live both.  This prevents overnight
-            # orphaning, state corruption, and gap-risk on restart.
-            if orchestrator.is_force_exit_time():
-                # ── Sim: simulation.open_trades is a live dict; entries are
-                # removed by _close_trade, so the membership check is the
-                # natural guard against re-closing.  We still skip any ID
-                # already in the attempted set to survive partial-close errors.
-                new_sim_ids = [
-                    tid for tid in list(self.simulation.open_trades.keys())
-                    if tid not in self._eod_force_exit_attempted
-                ]
-                if new_sim_ids:
-                    logger.warning(
-                        f"⏰ [EOD-FORCE-EXIT] 15:20 deadline reached. "
-                        f"Force-closing {len(new_sim_ids)} open sim trade(s)."
-                    )
-                    for tid in new_sim_ids:
-                        self._eod_force_exit_attempted.add(tid)
-                        # P0 Fix: Resolve option premium instead of passing raw spot price
-                        trade = self.simulation.open_trades.get(tid)
-                        if trade:
-                            exit_premium = self.simulation._resolve_exit_premium(
-                                trade, snapshot.price, snapshot, self.data_manager
-                            )
-                        else:
-                            exit_premium = snapshot.price  # Fallback (trade already gone)
-                        self.simulation._close_trade(
-                            tid,
-                            exit_premium,
-                            "EOD_FORCE_EXIT",
-                        )
-
-                if not self.is_simulation:
-                    # Live: only attempt each PID once per session.
-                    # A failed close is logged at ERROR so the operator can act,
-                    # but we do NOT retry every 1-second cycle.
-                    new_live_ids = [
-                        pid for pid in list(self.position_manager.open_positions.keys())
-                        if pid not in self._eod_force_exit_attempted
-                    ]
-                    if new_live_ids:
-                        logger.critical(
-                            f"⏰ [EOD-FORCE-EXIT] Closing {len(new_live_ids)} live position(s) "
-                            f"— 15:20 hard deadline."
-                        )
-                        for pid in new_live_ids:
-                            self._eod_force_exit_attempted.add(pid)
-                            try:
-                                await asyncio.to_thread(
-                                    self.position_manager.close_position,
-                                    pid, snapshot.price, "EOD_FORCE_EXIT"
-                                )
-                            except Exception as _eod_err:
-                                logger.error(
-                                    f"[EOD-FORCE-EXIT] Failed to close {pid}: {_eod_err}. "
-                                    f"Manual intervention required."
-                                )
-
-
-            # ── 5. Check pending entries ──
-            t_exec = time.perf_counter()
-            confirmed = self.entry_engine.check_confirmations(
-                snapshot, df
-            )
-            for eid, pending in confirmed:
-                if self.is_simulation:
-                    self._sim_execute(pending, snapshot)
-                else:
-                    await self._live_execute(eid, pending, snapshot)
-            self._current_latencies["execution_ms"] = int((time.perf_counter() - t_exec) * 1000)
-
-            # ── 6. Process only new candles (or Force cycle on broker lag) ──
-            current_candle_ts = df.index[-1] if df is not None and not df.empty else None
-            
-            # P0 Fix: Decouple decision engine from strict candle rollover
-            if self.last_candle_timestamp == current_candle_ts:
-                time_since_decision = time.time() - self._last_decision_ts
-                forced_interval = getattr(settings.system_mode, "forced_decision_interval_sec", 30)
-                
-                if time_since_decision > forced_interval:
-                    if self.cycle_count % 30 == 0:
-                        logger.warning(
-                            f"⚠️ [ORCHESTRATOR] Candle stalled for {int(time_since_decision)}s. "
-                            f"Forcing decision cycle with mutated live price to maintain liveliness."
-                        )
-                else:
-                    # Only run heavy decision engine when a new candle closes/opens OR if stalled
-                    # Keep updating dashboard periodically
-                    if self.cycle_count % 5 == 0:
-                        self._update_dashboard(snapshot, None)
-                    return
-                
-            self.last_candle_timestamp = current_candle_ts
-            self._last_decision_ts = time.time()
-
-            # ── P0: EOD Entry Cutoff (15:00 hard gate) ──
-            # Reject ALL new entries at or after 15:00.  This is a hard rule
-            # that sits BEFORE signal generation to guarantee no late entries
-            # can slip through the decision engine or 10-gate filter.
-            if orchestrator.is_entry_cutoff():
-                if self.cycle_count % 60 == 0:  # log once per minute
-                    logger.info(
-                        "⏰ [EOD-ENTRY-CUTOFF] 15:00 reached — "
-                        "no new entries allowed. Monitoring only."
-                    )
-                self._update_dashboard(snapshot, None)
-                return
-
-            if not trade_allowed:
-                return  # Skip signal generation and trade entry if blocked
-                
-            # ── 2. Run Decision Pipeline ──
-            signal, log_entry, dec_ms = self.decision_pipeline.evaluate(
-                df, snapshot, self.cycle_count, self._current_latencies
-            )
-            self._current_latencies["decision_ms"] = dec_ms
-            
-            if not signal:
-                return  # Pipeline rejected the signal
-
-            # ── 3. Run Execution Pipeline (Phase A) ──
-            exec_res = await self.execution_pipeline.execute(
-                signal=signal, 
-                snapshot=snapshot, 
-                is_simulation=self.is_simulation, 
-                mode="new"
-            )
-            
-            if exec_res.status == "failed":
-                logger.warning(f"❌ [EXEC] Execution failed: {exec_res.errors}")
-                return
-                
-            # If not simulation and not failed, it's queued (or rejected by fidelity)
-            if exec_res.status == "rejected":
-                return
-                
-            # Dispatches
-            await self.alert_manager.dispatch(signal)
-            if self.dashboard:
-                self.dashboard.emit_signal(signal.to_dict())
-                
-            self._update_dashboard(snapshot, signal)
-            
-            # Sync gate rejections
-            if hasattr(self.master, "gate_rejections"):
-                self.observer.sync_gate_rejections(dict(self.master.gate_rejections))
-                
-            if self.cycle_count % 30 == 0:
-                self._log_status()
-
-        except Exception as e:
-            self.engine_errors += 1
-            self.error_count += 1
-            
-            if self.engine_errors > 3:
-                logger.critical(f"🚨 API/ENGINE DOWN — halting system loop temporarily. Error: {e}")
-                self.trading_enabled = False
-                await asyncio.sleep(60)
-            else:
-                logger.error(f"🔥 Engine error [{self.engine_errors}]: {e}", exc_info=True)
-
-        finally:
-            # ── HALT File Emergency Stop (Telegram-independent kill switch) ──
-            # Write a file called 'HALT' to the project root to stop trading
-            # without needing Telegram.
-            if os.path.exists("HALT"):
-                if self.trading_enabled:
-                    logger.critical("🛑 HALT FILE DETECTED — Emergency stop triggered (file-based kill switch)")
-                    self.halt_trading("HALT file detected on disk")
-
-    def _sim_execute(self, pending, snapshot):
-        logger.info(f"🧪 SIM: Entry confirmed at ₹{snapshot.price:,.1f}")
-
-    async def _live_execute(self, eid, pending, snapshot):
-        """Bridge between confirmation and master execution."""
-        signal = pending.signal
-        signal.id = eid  # Carry the ID for confirmation cleanup
-        
-        # Final pass back to the single execution gate
-        await self.execute_signal(signal, snapshot, context=None, mode="confirmed")
-
-    async def execute_signal(self, signal, snapshot=None, context=None, mode="new"):
-        """
-        🚀 MASTER EXECUTION ENGINE (Single Point of Truth)
-        Replaced by ExecutionPipeline in v5.0.
-        """
-        logger.info(f"⚡ [EXECUTE_SIGNAL] Mode: {mode} | Type: {signal.signal_type.value}")
-
-        # 1. Mandatory Gate Approval
-        ctx = context or {}
-        ctx["signal_obj"] = signal
-        approval = self.master.approve(signal.signal_type.value, ctx)
-        
-        if not approval.approved:
-            logger.warning(f"🚫 [EXECUTE_GATE] Blocked: {approval.reason}")
-            if mode == "confirmed":
-                self.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
-            return None
-
-        # 2. Delegate to Execution Pipeline
-        exec_res = await self.execution_pipeline.execute(
-            signal=signal,
-            snapshot=snapshot,
-            is_simulation=getattr(self, "is_simulation", False),
-            mode=mode
-        )
-        
-        if exec_res.status == "queued":
-            logger.info("📥 [EXECUTE_SIGNAL] Signal parked in Pending Queue")
-            return "queued"
-        elif exec_res.status == "simulated":
-            return "simulated"
-        elif exec_res.status == "filled":
-            # For backward compatibility, return position_id or a mock pos object
-            # main.py expects a `pos` object if successful
-            from models import TradeOutcome
-            mock_pos = TradeOutcome(position_id=exec_res.position_id, symbol=signal.symbol, entry_price=exec_res.filled_price, qty=getattr(signal, "position_size", 50), status="OPEN", entry_time=exec_res.fill_time)
-            return mock_pos
-        else:
-            return None
-
-    # ───────────────────────────────────────────────────────────
-    # 🩺 BROKER HEALTH POLLING LOOP (v4.7)
-    # ───────────────────────────────────────────────────────────
-
-    async def _run_broker_health_loop(self) -> None:
-        """Background task: probes Dhan API every 15 s and feeds latency
-        into BrokerHealthMonitor. Skipped in simulation mode."""
-        if self.is_simulation:
-            logger.info("🩺 Broker health loop disabled in SIMULATION mode.")
-            return
-
-        while self.running:
-            try:
-                await asyncio.sleep(self.broker_health.poll_interval_s)
-                t0 = time.perf_counter()
-                try:
-                    from dhan_client import get_dhan_client
-                    dhan = get_dhan_client()
-                    await asyncio.wait_for(
-                        asyncio.to_thread(dhan.get_fund_limits),
-                        timeout=5.0
-                    )
-                    latency_ms = (time.perf_counter() - t0) * 1000
-                    self.broker_health.record_api_latency(latency_ms)
-
-                    # ── Runtime Position Reconciliation Breaker (Phase 1.2) ──
-                    pos_resp = await asyncio.wait_for(
-                        asyncio.to_thread(dhan.get_positions),
-                        timeout=5.0
-                    )
-                    if pos_resp and pos_resp.get("status") == "success":
-                        broker_positions = pos_resp.get("data", [])
-                        open_broker_positions = [
-                            p for p in broker_positions
-                            if p.get("positionType") == "INTRADAY" and p.get("netQty", 0) != 0
-                        ]
-                        internal_count = len(self.position_manager.open_positions)
-                        broker_count = len(open_broker_positions)
-                        
-                        from core.system_state import get_state_manager
-                        from core.structural_breaker import StructuralBreaker
-                        breaker = StructuralBreaker(get_state_manager())
-                        if not breaker.check_position_mismatch(internal_count, broker_count):
-                            self.trading_enabled = False
-
-                    # Feed staleness: read-only check against last data mutation
-                    # (Previously called update_latest_candle_async(None) which
-                    # was side-effecting AND blocked during pre-market)
-                    if self.data_manager.last_market_activity_ts:
-                        age_s = (datetime.now() - self.data_manager.last_market_activity_ts).total_seconds()
-                        self.broker_health.feed_delay_s = age_s
-
-                        # Only warn during active sessions — stale data during
-                        # STANDBY/PRE_MARKET is expected, not an anomaly.
-                        posture = orchestrator.get_posture(self.data_manager.last_market_activity_ts)
-                        logger.info(f"🩺 DataHealth Check | last_activity={self.data_manager.last_market_activity_ts} age={age_s:.1f}s")
-                        if age_s > 60 and posture not in (RuntimePosture.STANDBY, RuntimePosture.OBSERVATION):
-                            logger.warning(
-                                "⚠️ [BROKER HEALTH] Feed stale by %.0fs", age_s
-                            )
-                    else:
-                        self.broker_health.feed_delay_s = -1  # No data yet
-                except asyncio.TimeoutError:
-                    latency_ms = 5000.0  # Treat timeout as 5s
-                    self.broker_health.record_api_latency(latency_ms)
-                except Exception as e:
-                    logger.warning("🩺 Broker health probe failed: %s", e)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Broker health loop error: %s", e)
-
-
-    # ──────────────────────────────────────────────────────────
-    # OPTIONS SENTIMENT (Phase-2 data fetch)
-    # ──────────────────────────────────────────────────────────
-
-    def fetch_options_sentiment(self, price_trend: str = "unknown") -> dict:
-        """
-        Safely fetch the latest options analysis.
-
-        Returns a normalised dict with keys:
-            available (bool), sentiment, pcr, oi_bias,
-            max_pain_distance, max_pain_strike, spot
-
-        On any failure returns ``{"available": False, "sentiment": "neutral"}``.
-        The Dhan rate limit is 1 call / 3 s — callers must ensure
-        this is not invoked more frequently than that.
-        """
-        try:
-            analysis = self.options_analyzer.analyze(price_trend=price_trend)
-            if "error" in analysis or not analysis.get("raw_data_available", True):
-                logger.warning("[OPTIONS] Fetch error or no raw data: %s", analysis.get("error", "SIMULATION"))
-                return {"available": False, "sentiment": "neutral"}
-            return {
-                "available":         True,
-                "sentiment":         analysis["sentiment"],
-                "pcr":               analysis["pcr"],
-                "oi_bias":           analysis["oi_bias"],
-                "max_pain_distance": analysis["max_pain_distance"],
-                "max_pain_strike":   analysis["max_pain_strike"],
-                "spot":              analysis["spot"],
-            }
-        except Exception as exc:
-            logger.error("[OPTIONS] fetch_options_sentiment failed: %s", exc)
-            return {"available": False, "sentiment": "neutral"}
-
-    async def _monitor_positions(self, snapshot, df):
-        if self.is_simulation:
-            closed = self.simulation.update_open_trades(snapshot.price, snapshot, self.data_manager)
-            for trade in closed:
-                pnl = trade.get("net_pnl", 0)
-                
-                # Try to map back to original signal ID for performance logger
-                trade_id = trade.get("signal_id") or trade.get("id", "SIM")
-                exit_price = trade.get("exit_price") or trade.get("exit", snapshot.price)
-                reason = trade.get("exit_reason", "sim_close")
-                self.perf_logger.log_exit(trade_id, exit_price, pnl, reason)
-                if "ledger_record" in trade:
-                    self.perf_logger.log_final_trade(trade["ledger_record"])
-                
-                # ── Analytics: Track Trade Result ──
-                entry = trade.get("entry", 0)
-                sl = trade.get("sl", 0)
-                risk_pts = abs(entry - sl)
-                direction = trade.get("direction", "BUY")
-                pts_gained = (exit_price - entry) if direction == "BUY" else (entry - exit_price)
-                r_val = round(pts_gained / risk_pts, 2) if risk_pts > 0 else 0.0
-
-                self.observer.on_trade_close({
-                    "trade_id": trade_id,
-                    "r": r_val,
-                    "pnl": pnl,
-                    "regime": trade.get("regime", "UNKNOWN"),
-                    "oi_source": getattr(snapshot, "oi_data_source", "UNKNOWN"),
-                    "hold_min": trade.get("hold_min", 1)
-                })
-
-                self.exit_engine.record_trade_result(pnl)
-                if self.telegram_bot:
-                    fire_and_log(
-                        self.telegram_bot.notify_trade_close(
-                            trade.get("id", "SIM"), pnl, "WIN" if pnl > 0 else "LOSS"
-                        ),
-                        label=f"notify_trade_close:{trade_id}"
-                    )
-        else:
-            current_signal = getattr(self.decision_engine, "last_signal", None) if hasattr(self, "decision_engine") else None
-            actions = await asyncio.to_thread(self.position_manager.update_positions, snapshot.price, snapshot, current_signal)
-            for action in actions:
-                if action["action"] in ("CLOSE", "FULL_CLOSE"):
-                    result = await asyncio.to_thread(
-                        self.position_manager.close_position,
-                        action["position_id"], action["price"], action.get("reason", "")
-                    )
-                    if result and result.get("type") == "full":
-                        pnl = result.get("pnl", 0)
-                        
-                        # Log to performance logger
-                        exit_price = result.get("exit", action.get("price", snapshot.price))
-                        reason = result.get("reason", action.get("reason", "unknown"))
-                        self.perf_logger.log_exit(action["position_id"], exit_price, pnl, reason)
-                        
-                        # Fetch original position for entry/sl info if possible
-                        pos = self.position_manager.open_positions.get(action["position_id"])
-                        if pos:
-                            entry = pos.entry_price
-                            sl = pos.original_stop_loss
-                            risk_pts = abs(entry - sl)
-                            direction = "BUY" if pos.direction == Direction.BULLISH else "SELL"
-                            pts_gained = (exit_price - entry) if direction == "BUY" else (entry - exit_price)
-                            r_val = round(pts_gained / risk_pts, 2) if risk_pts > 0 else 0.0
-                            regime = pos.regime_at_entry
-                            hold_min = max(1.0, (datetime.now() - pos.entry_time).total_seconds() / 60.0)
-                        else:
-                            r_val = 0.0
-                            regime = "UNKNOWN"
-                            hold_min = 1.0
-
-                        self.observer.on_trade_close({
-                            "trade_id": action["position_id"],
-                            "r": r_val,
-                            "pnl": pnl,
-                            "regime": regime,
-                            "oi_source": getattr(snapshot, "oi_data_source", "UNKNOWN"),
-                            "hold_min": hold_min
-                        })
-
-                        self.exit_engine.record_trade_result(pnl)
-                        if self.telegram_bot:
-                            fire_and_log(
-                                self.telegram_bot.notify_trade_close(
-                                    action["position_id"], pnl, "WIN" if pnl > 0 else "LOSS"
-                                ),
-                                label=f"notify_trade_close:{action['position_id']}"
-                            )
-
-    async def _monitor_only_async(self, session: aiohttp.ClientSession):
-        try:
-            df, snapshot = await self.data_manager.update_latest_candle_async(session)
-            if snapshot and snapshot.price > 0:
-                await self._monitor_positions(snapshot, df)
-                self._update_dashboard(snapshot, None)
-                if df is not None and not df.empty:
-                    self.last_candle_timestamp = df.index[-1]
-            self._last_decision_ts = time.time()
-        except Exception as e:
-            logger.error(f"Monitor only fetch failed: {e}")
-
-    def _update_dashboard(self, snapshot, signal):
-        if not self.dashboard: return
-        t_start = time.perf_counter()
-        try:
-            status = self.decision_engine.get_status()
-            status["snapshot"] = snapshot.to_dict() if snapshot else {}
-            status["cycle"] = self.cycle_count
-            status["system_mode"] = settings.system_mode.mode
-            status["filter_stats"] = self.trade_filter.get_filter_stats()
-            status["entry_stats"] = self.entry_engine.get_stats()
-            status["exit_status"] = self.exit_engine.get_status()
-            status["risk"] = self.risk_manager.get_status_report()
-            if hasattr(self, "position_manager"):
-                status["positions"] = [p.to_dict() for p in self.position_manager.open_positions.values()]
-                status["closed_positions_today"] = getattr(self.position_manager, "closed_positions_today", [])
-            else:
-                status["positions"] = []
-                status["closed_positions_today"] = []
-            status["errors"] = self.error_count
-            status["last_cycle"] = self.last_cycle_time
-            
-            # Session Orchestrator Telemetry (uses mutation-based freshness)
-            status["orchestrator"] = orchestrator.get_dashboard_fields(self.data_manager.last_market_activity_ts)
-            
-            # System Health & Watchdog Telemetry
-            status["system_health"] = {
-                "decision_stall_seconds": round(time.time() - getattr(self, "_last_decision_ts", time.time()), 1)
-            }
-            
-            # Latency Telemetry
-            lat = self._latency_history[-1] if hasattr(self, '_latency_history') and self._latency_history else 0
-            status["latency_ms"] = round(lat, 0)
-            status["latency_status"] = "CRITICAL" if lat > 3000 else "WARNING" if lat > 1500 else "NORMAL"
-            
-            # OI Health Telemetry
-            if hasattr(self, 'observer') and hasattr(self.observer, 'get_oi_health'):
-                status["oi_health"] = self.observer.get_oi_health()
-            else:
-                status["oi_health"] = {"rate": "100%", "latency": "Unknown", "status": "LIVE"}
-            
-            self.dashboard.update_status(status)
-            
-            # Record dashboard latency
-            dashboard_ms = int((time.perf_counter() - t_start) * 1000)
-            if hasattr(self, "_current_latencies") and isinstance(self._current_latencies, dict):
-                self._current_latencies["dashboard_ms"] = dashboard_ms
-        except Exception as e:
-            logger.debug(f"Dashboard update error: {e}")
-
-    def halt_trading(self, reason: str):
-        """Emergency Stop Control — propagates to orchestrator for scheduler authority."""
-        if self.trading_enabled:
-            self.trading_enabled = False
-            # Propagate to orchestrator so sleep_until_next_cycle() drops to 60s
-            orchestrator.halt()
-            logger.critical(f"🛑 HALTING TRADING: {reason}")
-            if self.telegram_bot:
-                fire_and_log(self.telegram_bot.notify_halt(reason), label="notify_halt")
-            if self.dashboard:
-                self._update_dashboard(None, None)
-
-    # ──────────────────────────────────────────────────────────
-    # 🚨 BROKER POSITION RECONCILIATION (P0.3)
-    # ──────────────────────────────────────────────────────────
-
-    async def _reconcile_broker_positions(self):
-        """
-        P0.3: OMS Recovery Engine & Broker Reconciliation.
-        Startup Sequence: boot → load config → reconcile broker → recover OMS state → rebuild runtime cache → verify SL integrity → resume trading.
-        """
-        if self.is_simulation:
-            logger.info("🧪 Simulation mode — skipping broker reconciliation")
-            return True
-
-        try:
-            from dhan_client import get_dhan_client
-            dhan = get_dhan_client()
-            
-            # 1. Fetch from Broker (with 3 attempts, 5s backoff)
-            response = None
-            for attempt in range(3):
-                try:
-                    response = dhan.get_positions()
-                    if response and response.get("status") == "success":
-                        break
-                    logger.warning(f"⚠️ Attempt {attempt+1}/3 failed to fetch broker positions: {response.get('remarks') if response else 'No response'}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Attempt {attempt+1}/3 exception fetching broker positions: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(5)
-            
-            from core.system_state import get_state_manager
-            state_mgr = get_state_manager()
-
-            if not response or response.get("status") != "success":
-                err_msg = "Could not fetch broker positions for reconciliation after 3 attempts"
-                logger.critical(f"🚨 {err_msg}")
-                # Enforce fail-closed startup halt in live execution mode
-                if not self.is_simulation:
-                    self.trading_enabled = False
-                    state_mgr.set_state("HALTED", f"Startup Broker Reconciliation Failed: {err_msg}", source="system")
-                    state_mgr.send_alert(
-                        "🚨 <b>CRITICAL STARTUP FAILURE</b> 🚨\n\n"
-                        "Broker reconciliation failed: Could not fetch broker positions.\n"
-                        "Please verify your API credentials and internet connectivity.\n"
-                        "Trading is HALTED. Send <code>/force_reconcile</code> to retry."
-                    )
-                return False
-
-            broker_positions = response.get("data", [])
-            open_broker_positions = [
-                p for p in broker_positions
-                if p.get("positionType") == "INTRADAY" and p.get("netQty", 0) != 0
-            ]
-            broker_symbols = {str(p.get("tradingSymbol", "")) for p in open_broker_positions}
-            broker_symbols.discard("")
-
-            # 2. Fetch from OMS (Source of Truth)
-            open_oms_orders = self.oms.get_open_orders()
-            oms_symbols = {str(o.get("symbol", "")) for o in open_oms_orders}
-            oms_symbols.discard("")
-
-            # 3. Reconcile
-            orphans = []
-            for bp in open_broker_positions:
-                sym = str(bp.get("tradingSymbol", ""))
-                if sym and sym not in oms_symbols:
-                    orphans.append(bp)
-                    
-            if orphans:
-                symbols = [f"{p.get('tradingSymbol', '?')} (Qty: {p.get('netQty', 0)})" for p in orphans]
-                orphan_str = "\n".join(symbols)
-                
-                logger.critical(
-                    f"🚨 ORPHANED POSITIONS DETECTED ON BROKER!\n"
-                    f"Found {len(orphans)} positions on broker not in OMS:\n"
-                    f"{orphan_str}\n"
-                    f"System will NOT trade until manually resolved."
-                )
-                
-                self.trading_enabled = False
-                
-                # Trigger central persistent halt state (graceful, no crash)
-                state_mgr.trigger_structural_halt(f"Orphaned positions detected on broker: {orphan_str}")
-                state_mgr.send_alert(
-                    "🚨 <b>ORPHANED POSITIONS DETECTED ON BROKER</b> 🚨\n\n"
-                    f"Found {len(orphans)} positions on broker not in OMS:\n"
-                    f"<code>{orphan_str}</code>\n\n"
-                    "<b>Trading is HALTED until resolved.</b>\n\n"
-                    "To resolve:\n"
-                    "1. Log into Dhan and manually close the orphaned positions.\n"
-                    "2. Confirm positions are fully closed (netQty = 0).\n"
-                    "3. Send <code>/start</code> (or <code>/force_reconcile</code>) to resume trading."
-                )
-                return False
-            else:
-                logger.info(
-                    f"✅ Broker reconciliation passed: {len(open_broker_positions)} broker pos, "
-                    f"{len(open_oms_orders)} OMS active intents."
-                )
-
-                # ── P0-E: SL Presence Check on Tracked Positions ──
-                # If a position exists but the SL was dropped or missing, close it.
-                sl_missing = []
-                order_list_resp = dhan.get_order_list()
-                valid_sl_statuses = {"PENDING", "TRIGGER_PENDING", "OPEN"}
-
-                if order_list_resp and order_list_resp.get("status") == "success":
-                    orders = order_list_resp.get("data", [])
-                    symbols_with_sl = {
-                        o.get("tradingSymbol") for o in orders 
-                        if o.get("orderType") in ("SL", "SL-M") 
-                        and o.get("orderStatus") in valid_sl_statuses
-                    }
-
-                    for pos in open_broker_positions:
-                        sym = pos.get("tradingSymbol")
-                        if sym and sym not in symbols_with_sl:
-                            sl_missing.append(pos)
-                else:
-                    logger.warning("⚠️ Could not fetch order list. Skipping SL presence verification.")
-
-                if sl_missing:
-                    missing_str = ", ".join([str(p.get("tradingSymbol")) for p in sl_missing])
-                    logger.critical(
-                        "🚨 MISSING_SL_DETECTED_ON_STARTUP",
-                        extra={"missing_sl_positions": missing_str}
-                    )
-                    
-                    # Force close ALL positions if we have naked exposure
-                    self.position_manager.close_all_positions("STARTUP_MISSING_SL_DETECTED")
-                    self.halt_trading(f"Startup check failed: Missing SL for {missing_str}")
-                    return False
-            
-            return True
-        except Exception as e:
-            # Non-fatal: don't crash startup if reconciliation fails
-            # But DO log it prominently
-            logger.error(f"⚠️ Broker reconciliation failed (non-fatal): {e}")
-            return False
-
-    # ══════════════════════════════════════════════════════════════
-    # P0-C: EXTERNAL HEARTBEAT + DEAD MAN'S SWITCH
-    # ══════════════════════════════════════════════════════════════
-
-    async def _deadman_watchdog(self) -> None:
-        """P0-C: Force-close all positions if main loop stops updating.
-        
-        If the main loop hasn't called record_heartbeat() in DEADMAN_TIMEOUT_SECONDS,
-        this watchdog triggers emergency position closure.
-        """
-        if self.is_simulation:
-            logger.info("Deadman watchdog disabled in SIMULATION mode.")
-            return
-
-        while True:
-            try:
-                await asyncio.sleep(10)
-                elapsed = time.time() - self.position_manager._last_heartbeat_time
-                if elapsed > DEADMAN_TIMEOUT_SECONDS and self.cycle_count > 5:
-                    logger.critical(
-                        "🚨 DEADMAN SWITCH TRIGGERED — no heartbeat for %.0fs. "
-                        "Force-closing all positions.", elapsed
-                    )
-                    # Attempt emergency close
-                    try:
-                        self.position_manager.close_all_positions("DEADMAN_SWITCH")
-                    except Exception as e:
-                        logger.critical("Deadman close_all_positions failed: %s", e)
-                    
-                    # Alert via Telegram
-                    if self.telegram_bot:
-                        try:
-                            from utils.tasks import fire_and_log
-                            fire_and_log(
-                                self.telegram_bot._send_admin_msg(
-                                    "🚨 <b>DEADMAN SWITCH TRIGGERED</b>\n\n"
-                                    f"No heartbeat for {elapsed:.0f}s.\n"
-                                    "Emergency position closure attempted.\n"
-                                    "Check system immediately."
-                                ),
-                                label="deadman_alert"
-                            )
-                        except Exception:
-                            pass
-                    
-                    # Auto-restart logic
-                    logger.warning("Auto-recovering from DEADMAN_SWITCH. Trading remains enabled.")
-                    self.position_manager.record_heartbeat()  # Reset to prevent immediate re-trigger
-                    # Do not break; watchdog will continue monitoring
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Deadman watchdog error: %s", e)
-
-    def _log_status(self):
-        import time as _time
-        from dhan_client import get_dhan_telemetry
-
-        # 1. Print base capital status
-        if not self.is_simulation:
-            pm = self.position_manager
-            logger.info(f"Capital: ₹{pm.total_capital:,.0f} | Risk PnL: ₹{self.risk_manager.daily_pnl:,.0f}")
-
-        # 2. Print concise Dhan telemetry status
-        t = get_dhan_telemetry()
-        logger.info(
-            f"📡 Dhan Telemetry | Requests: {t['quote_requests']} | Hit Rate: {t['cache_hit_rate']}% | "
-            f"API Calls: {t['quote_api_calls']} | 805s: {t['quote_805_errors']} | Trips: {t['circuit_breaker_trips']} | "
-            f"Stale: {t['stale_cache_served']} | Blocked: {t['signals_blocked_by_quotes']} | Saved: {t['signals_saved_by_cache']}"
-        )
-
-        # 3. Hourly detailed logging
-        now = _time.time()
-        if now - self._last_telemetry_log_ts >= 3600:
-            self._last_telemetry_log_ts = now
-            logger.info(
-                f"\n{'='*50}\n"
-                f"📊 HOURLY DHAN QUOTE HEALTH REPORT\n"
-                f"{'─'*50}\n"
-                f"  • Total Quote Requests   : {t['quote_requests']}\n"
-                f"  • Cache Hit Rate         : {t['cache_hit_rate']}%\n"
-                f"  • Cache Hits (Fresh)     : {t['quote_cache_hits']}\n"
-                f"  • API Requests Dispatched: {t['quote_api_calls']}\n"
-                f"  • 805 Rate Limit Errors  : {t['quote_805_errors']}\n"
-                f"  • Circuit Breaker Trips  : {t['circuit_breaker_trips']}\n"
-                f"  • Stale Fallback Served  : {t['stale_cache_served']}\n"
-                f"  • Signals Blocked (Quote): {t['signals_blocked_by_quotes']}\n"
-                f"  • Signals Saved (Cache)  : {t['signals_saved_by_cache']}\n"
-                f"{'='*50}\n"
-            )
-
-    def stop(self):
-        self.running = False
-        logger.info("Shutting down v4.6.1...")
-        self.entry_engine.cancel_all_pending()
-        self.trade_logger.save_all()
-        self.position_manager.save_state()
-        if self.is_simulation:
-            self.simulation._save_state()
-            
-        if hasattr(self, "observer"):
-            import json
-            logger.info(f"📊 DAILY SUMMARY:\n{json.dumps(self.observer.summary(), indent=2)}")
-            
-        try:
-            from tools import journal_writer
-            journal_writer.write_today()
-        except Exception as je:
-            logger.error(f"Failed to write operational journal: {je}")
-            
-        logger.info("System stopped ✓")
-
-
-import atexit
-import signal
-
+from core.context import RuntimeContext
+from core.events import EventManager
+from core.broker_health import BrokerHealthMonitor
+from core.orchestrator import TradingOrchestrator
+from core.pipelines.market_data_pipeline import MarketDataPipeline
+from core.pipelines.decision_pipeline import DecisionPipeline
+from core.pipelines.execution_pipeline import ExecutionPipeline
+from core.pipelines.position_pipeline import PositionPipeline
+from core.pipelines.telemetry_pipeline import TelemetryPipeline
+
+# --- SINGLETON PROCESS LOCK ---
+LOCK_FILE_PATH = os.path.join(os.environ.get("TEMP", "/tmp"), "nifty_ai_v5.lock")
 lock_file_handle = None
-LOCK_FILE_PATH = "bot.lock"
 
 def acquire_lock():
     global lock_file_handle
-    import os
-    import sys
-    
-    # Try reading the existing PID if the file exists and is not locked
-    existing_pid = None
-    if os.path.exists(LOCK_FILE_PATH):
-        try:
-            with open(LOCK_FILE_PATH, "r") as f:
-                content = f.read().strip()
-                if content.isdigit():
-                    existing_pid = int(content)
-        except Exception:
-            pass
-
     try:
-        lock_file_handle = open(LOCK_FILE_PATH, "r+")
-    except FileNotFoundError:
-        lock_file_handle = open(LOCK_FILE_PATH, "w+")
+        if os.path.exists(LOCK_FILE_PATH):
+            with open(LOCK_FILE_PATH, "r") as f:
+                existing_pid = f.read().strip()
+        else:
+            existing_pid = None
     except Exception:
-        lock_file_handle = open(LOCK_FILE_PATH, "w+")
+        existing_pid = None
 
-    # Attempt to lock the file
+    lock_file_handle = open(LOCK_FILE_PATH, "a+")
     locked = False
+
     if sys.platform == 'win32':
         import msvcrt
         try:
@@ -1513,11 +79,7 @@ def acquire_lock():
         except Exception:
             pass
         lock_file_handle = None
-        
-        logger.error(
-            f"❌ Another instance already running "
-            f"(PID={existing_pid or 'unknown'})"
-        )
+        print(f"❌ Another instance already running (PID={existing_pid or 'unknown'})")
         sys.exit(1)
 
     try:
@@ -1525,13 +87,11 @@ def acquire_lock():
         lock_file_handle.write(f"{os.getpid()}\n")
         lock_file_handle.truncate()
         lock_file_handle.flush()
-    except Exception as e:
-        logger.warning(f"Failed to write PID to lock file: {e}")
+    except Exception:
+        pass
 
 def release_lock():
     global lock_file_handle
-    import sys
-    import os
     if lock_file_handle is not None:
         try:
             if sys.platform == 'win32':
@@ -1551,7 +111,6 @@ def release_lock():
             lock_file_handle = None
         except Exception:
             pass
-        
         try:
             if os.path.exists(LOCK_FILE_PATH):
                 os.remove(LOCK_FILE_PATH)
@@ -1559,12 +118,33 @@ def release_lock():
             pass
 
 def sig_handler(signum, frame):
-    logger.info(f"Signal {signum} caught, releasing lock and exiting gracefully.")
+    print(f"Signal {signum} caught, releasing lock and exiting gracefully.")
     release_lock()
     sys.exit(0)
 
+class LegacySystem:
+    """A bridge to hold references for legacy pipelines expecting ctx.system."""
+    def __init__(self, settings, db_manager):
+        from core.risk_manager import RiskManager
+        from core.position_manager import PositionManager
+        from core.entry_engine import EntryEngine
+        from core.exit_engine import ExitEngine
+        from core.simulation_engine import SimulationEngine
+        from core.burnin_tracker import BurninTracker
+        
+        self.risk_manager = RiskManager(settings, db_manager)
+        self.position_manager = PositionManager(settings)
+        self.entry_engine = EntryEngine(settings)
+        self.exit_engine = ExitEngine(settings)
+        self.burnin_tracker = BurninTracker()
+        self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker)
+        self.data_manager = None
+        self.trading_enabled = True
+        self.execution_failures = 0
+        self.engine_errors = 0
+
+# --- BOOTSTRAP ---
 def main():
-    # Register graceful lock release
     atexit.register(release_lock)
     try:
         signal.signal(signal.SIGINT, sig_handler)
@@ -1572,12 +152,73 @@ def main():
     except Exception:
         pass
 
-    # Acquire cross-platform singleton process lock
     acquire_lock()
 
-    system = NiftyAISystem()
+    settings = Settings()
+    logger = get_logger("bootstrap", settings.log_level)
+    logger.info("Initializing Nifty AI System v5.0.0")
+
     try:
-        asyncio.run(system.start())
+        # Dependency Construction
+        event_manager = EventManager()
+        broker_health = BrokerHealthMonitor(settings)
+        
+        ctx = RuntimeContext(
+            settings=settings,
+            mode=settings.system_mode.mode,
+            is_simulation=(settings.system_mode.mode == "SIMULATION"),
+            telegram_enabled=settings.alerts.telegram_enabled,
+            event_manager=event_manager,
+            broker_health=broker_health,
+        )
+
+        from core.db_manager import DBManager
+        db_mgr = DBManager()
+
+        # Bridge legacy references
+        ctx.system = LegacySystem(settings, db_mgr)
+        
+        # Wire Pipelines (Assuming pipelines manage their own internal managers, else wire here)
+        ctx.market_data = MarketDataPipeline(ctx)
+        
+        # Populate context with data manager for legacy compatibility where needed
+        if hasattr(ctx.market_data, "data_manager"):
+            ctx.data_manager = ctx.market_data.data_manager
+            ctx.system.data_manager = ctx.market_data.data_manager
+
+        ctx.telemetry = TelemetryPipeline(ctx)
+        ctx.decision = DecisionPipeline(ctx)
+        ctx.execution = ExecutionPipeline(ctx)
+        ctx.position = PositionPipeline(ctx)
+
+        # Map pipeline sub-components to legacy system so older calls (e.g. ctx.system.entry_engine) work
+        ctx.system.market_pipeline = ctx.market_data
+        ctx.system.decision_pipeline = ctx.decision
+        ctx.system.execution_pipeline = ctx.execution
+        
+        if hasattr(ctx.decision, "decision_engine"): ctx.system.decision_engine = ctx.decision.decision_engine
+        if hasattr(ctx.decision, "master"): ctx.system.master = ctx.decision.master
+
+        # Wire legacy components onto context so telemetry/dashboard can find them
+        ctx.db_manager = db_mgr
+        ctx.burnin_tracker = ctx.system.burnin_tracker
+        ctx.simulation = ctx.system.simulation
+        # Readiness scorer may exist on burnin_tracker or separately
+        ctx.readiness_scorer = getattr(ctx.system, "readiness_scorer", None) or getattr(ctx.system.burnin_tracker, "readiness_scorer", None)
+
+        # Start the web dashboard (localhost:5000) in a background thread
+        if ctx.telemetry:
+            ctx.telemetry.start_dashboard()
+
+        # Initialize and Start Orchestrator
+        orchestrator = TradingOrchestrator(ctx)
+        asyncio.run(orchestrator.start())
+        
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user. Shutting down.")
+    except Exception as e:
+        logger.critical(f"Fatal exception during runtime: {e}", exc_info=True)
+        sys.exit(1)
     finally:
         try:
             import core.system_state as system_state
@@ -1587,7 +228,6 @@ def main():
         except Exception:
             pass
         release_lock()
-
 
 if __name__ == "__main__":
     main()

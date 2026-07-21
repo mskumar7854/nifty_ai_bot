@@ -131,6 +131,8 @@ class MarketSnapshot:
     iv_percentile_30d: float = 50.0
     oi_data_source: DataSource = DataSource.UNKNOWN
     regime_state: dict = field(default_factory=dict)
+    oi_chain_data: list = field(default_factory=list)
+    oi_spot_price: float = 0
 
     def to_dict(self) -> dict:
         return {

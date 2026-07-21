@@ -160,6 +160,17 @@ class DecisionEngine:
         self.spike_freeze_until = 0.0
         self.session_started_date = None
         self.fingerprint = SystemFingerprint()
+        
+        # ── State Tracking for Telemetry ──
+        self.last_signal = None
+        self.signal_count = 0
+        self.signal_history = []
+        
+        # ── OI Analytics (Shadow Mode) ──
+        from core.oi_analytics_logger import OIAnalyticsLogger
+        from agents.oi_agent import OIAgent
+        self.oi_logger = OIAnalyticsLogger()
+        self._shadow_oi = OIAgent(settings)
 
         # ── Mode detection — used for simulation-safe threshold relaxation ──
         self._is_simulation = os.getenv("SYSTEM_MODE", "SIMULATION").upper() == "SIMULATION"
@@ -379,6 +390,51 @@ class DecisionEngine:
                 })
             except Exception as e:
                 self.logger.error(f"Analytics decision_cycle_completed publish failed: {e}")
+
+            # ── 📓 OI Analytics Logging (Shadow Mode Validation) ──
+            try:
+                sig_val = locals().get('signal')
+                if sig_val:
+                    # Always run OI for analytics collection even if not in active_agents
+                    oi_out = self._shadow_oi.run(df, snapshot)
+                    if oi_out and oi_out.details and "market_structure" in oi_out.details:
+                        msa = oi_out.details["market_structure"]
+                        if "oi" in msa:
+                            oi_data = msa["oi"]
+                            event = {
+                                "Timestamp": snapshot.timestamp.isoformat() if hasattr(snapshot.timestamp, "isoformat") else str(snapshot.timestamp),
+                                "Symbol": getattr(snapshot, "symbol", "NIFTY"),
+                                "Spot_Price": snapshot.price,
+                                "Regime": sig_val.regime.name if sig_val.regime else "UNKNOWN",
+                                "Engine_Decision": sig_val.signal_type.value,
+                                "Trade_ID": "", 
+                                "Position_Size": sig_val.position_size,
+                                "Entry_Price": sig_val.entry_price
+                            }
+                            # Map OI fields
+                            for k, v in oi_data.items():
+                                if k == "feature_attribution":
+                                    for ak, av in v.items():
+                                        event[f"Attr_{ak}"] = av
+                                elif k == "support_zone" and v:
+                                    event["Support_Zone"] = f"{v['low']}-{v['high']}"
+                                elif k == "resistance_zone" and v:
+                                    event["Resistance_Zone"] = f"{v['low']}-{v['high']}"
+                                elif k == "migration_direction":
+                                    event["Migration"] = v
+                                elif k == "trap_type":
+                                    event["Trap"] = v
+                                elif k == "wall_break_direction":
+                                    event["Wall_Break"] = v
+                                elif k == "wall_absorption":
+                                    event["Wall_Absorption"] = str(v)
+                                elif k not in ["explanation"]:
+                                    event[k.title()] = v
+
+                            self.oi_logger.log_event(event)
+            except Exception as e:
+                self.logger.error(f"Failed to log OI analytics: {e}")
+
         return signal
 
     def _process_impl(self, df, snapshot: "MarketSnapshot") -> "Signal":

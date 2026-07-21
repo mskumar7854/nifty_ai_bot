@@ -8,7 +8,7 @@ from models import Signal, MarketSnapshot, SignalType
 from core.decision_engine import DecisionEngine
 from core.master_decision_engine import MasterDecisionEngine
 from core.trade_filter import TradeFilter
-from core.options_analyzer import OptionsAnalyzer
+from options_analyzer import OptionsAnalyzer
 from utils.logger import get_logger
 
 logger = get_logger("decision_pipeline")
@@ -23,7 +23,12 @@ class DecisionPipeline:
         self.settings = ctx.settings
         
         self.decision_engine = DecisionEngine(self.settings)
-        self.master = MasterDecisionEngine(self.settings)
+        _sys = getattr(ctx, "system", None)
+        self.master = MasterDecisionEngine(
+            risk_manager=getattr(_sys, "risk_manager", None),
+            position_manager=getattr(_sys, "position_manager", None),
+            exit_engine=getattr(_sys, "exit_engine", None),
+        )
         self.trade_filter = TradeFilter(self.settings)
         self.options_analyzer = OptionsAnalyzer(mode=self.settings.system_mode.mode)
         

@@ -3,27 +3,26 @@ from typing import Any, Optional
 
 @dataclass
 class RuntimeContext:
-    """Shared state container for all pipelines to avoid hidden global dependencies."""
+    """
+    Shared dependency container for all pipelines and the orchestrator.
+    It intentionally does NOT hold mutable trading state (like current signal).
+    """
     settings: Any
     mode: str = "SIMULATION"
     is_simulation: bool = True
     telegram_enabled: bool = False
     
-    # Core Managers & Engines
+    # Core Infrastructure
+    event_manager: Optional[Any] = None
     db_manager: Optional[Any] = None
     data_manager: Optional[Any] = None
+    broker_health: Optional[Any] = None
+    oms: Optional[Any] = None
     
-    # Trackers
+    # Trackers & Scorer
     burnin_tracker: Optional[Any] = None
     readiness_scorer: Optional[Any] = None
     simulation: Optional[Any] = None
     
-    # Orchestrator hooks (temporary until full orchestrator extraction)
-    system: Optional[Any] = None
-    
-    # Pipelines
+    # Telemetry
     telemetry: Optional[Any] = None
-    market_data: Optional[Any] = None
-    decision: Optional[Any] = None
-    execution: Optional[Any] = None
-    position: Optional[Any] = None
