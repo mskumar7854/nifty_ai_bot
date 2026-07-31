@@ -85,6 +85,25 @@ class SystemMode:
 
 
 # ══════════════════════════════════════════
+# REPLAY & PIPELINE CONFIG
+# ══════════════════════════════════════════
+
+@dataclass
+class PipelineConfig:
+    """
+    Controls which gates are enabled in the pipeline.
+    Used for Gate-by-Gate Attribution Replays.
+    If true, the gate is active and can reject trades.
+    If false, the gate always passes.
+    """
+    confidence_enabled: bool = True
+    confluence_enabled: bool = True
+    ev_enabled: bool = True
+    structure_enabled: bool = True
+    regime_enabled: bool = True
+
+
+# ══════════════════════════════════════════
 # PRO MODE TRADE FILTER (STRICT)
 # ══════════════════════════════════════════
 

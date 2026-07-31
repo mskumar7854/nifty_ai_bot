@@ -41,18 +41,41 @@ class PositionPipeline:
         
         return actions
 
-    def _update_position_state(self, pos: PositionState, snapshot: MarketSnapshot):
-        """Update PnL and duration metrics."""
-        pos.current_price = snapshot.price
+    def _update_position_state(self, pos, snapshot: MarketSnapshot):
+        """Update PnL and duration metrics using proper option premium resolution."""
+        # ── P0 Fix: Resolve current option premium (never raw spot) ──
+        eval_price = snapshot.price
         
-        # If we have live premium from options quote in snapshot (optional, normally fetched dynamically), 
-        # we can update unrealized PnL. For now, assume snapshot.price is the instrument price if mapped correctly.
-        # But snapshot is usually NIFTY spot. The position is an Option. 
-        # In the new architecture, we'd need option LTP. 
-        # For simplicity, we assume we have option LTP in pos.current_price or fetched externally.
+        # If position has instrument info (e.g. SimulatedTrade)
+        if hasattr(pos, "instrument") and pos.instrument:
+            data_manager = getattr(self.ctx, "data_manager", None)
+            if data_manager:
+                quote = data_manager.fetch_option_quote(
+                    pos.instrument.get("strike"),
+                    pos.instrument.get("type"),
+                    pos.instrument.get("expiry")
+                )
+                if quote and quote.bid > 0:
+                    eval_price = quote.bid
+            
+            # Tier 2: ATM proxy
+            if eval_price == snapshot.price and hasattr(pos, "signal_type"):
+                is_ce = "CE" in str(pos.signal_type)
+                atm_premium = snapshot.atm_ce_premium if is_ce else snapshot.atm_pe_premium
+                if atm_premium and atm_premium > 0:
+                    eval_price = atm_premium
+                    
+            # Tier 3: Delta approx
+            if eval_price == snapshot.price:
+                spot_move = snapshot.price - pos.spot_entry if hasattr(pos, "spot_entry") else 0
+                is_ce = "CE" in str(getattr(pos, "signal_type", ""))
+                delta = 0.5 if is_ce else -0.5
+                eval_price = max(0.05, pos.entry_price + (spot_move * delta))
         
-        # If pos.direction is BUY, it's long premium.
-        direction_mult = 1.0 if pos.direction.upper() == "BUY" else -1.0
+        pos.current_price = round(eval_price, 2)
+        
+        direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
+        direction_mult = 1.0 if direction_str == "BUY" else -1.0
         pos.unrealized_pnl = (pos.current_price - pos.entry_price) * pos.qty * direction_mult
         
         if pos.unrealized_pnl > pos.max_favorable:
@@ -102,15 +125,16 @@ class PositionPipeline:
 
     def _make_exit_decision(self, pos: PositionState, snapshot: MarketSnapshot) -> ExitDecision:
         """Answers: 'Should this position continue to exist?'"""
+        direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
         
         # 1. Hard Stop Loss Trigger
-        if pos.direction.upper() == "BUY" and pos.current_price <= pos.stop_loss:
+        if direction_str == "BUY" and pos.current_price <= pos.stop_loss:
             return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
-        elif pos.direction.upper() == "SELL" and pos.current_price >= pos.stop_loss:
+        elif direction_str == "SELL" and pos.current_price >= pos.stop_loss:
             return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
 
         # 2. Hard Target Trigger
-        if pos.direction.upper() == "BUY" and pos.current_price >= pos.target_2:
+        if direction_str == "BUY" and pos.current_price >= pos.target_2:
             return ExitDecision(ExitDecisionType.FULL_EXIT, "Target 2 Hit", urgency_level="NORMAL")
             
         # 3. Health Based Exit (Critical deterioration)
@@ -161,7 +185,8 @@ class PositionPipeline:
         # Calculate trail dist (Simplified for now)
         base_trail_dist = max(5.0, entry * 0.05)
         
-        if pos.direction.upper() == "BUY":
+        direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
+        if direction_str == "BUY":
             candidate_sl = pos.tsl_highest_premium - base_trail_dist
             if candidate_sl > pos.stop_loss:
                 new_sl = candidate_sl

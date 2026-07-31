@@ -187,17 +187,26 @@ DASHBOARD_HTML = """
                 </div>
 
                 <div id="no-trade-details" class="no-trade-reasons" style="display:none;">
-                    <strong>NO TRADE REASON</strong>
-                    <ul id="reasons-list"></ul>
+                    <div style="font-size: 14px; font-weight: bold; margin-bottom: 10px; color:#ff4444; text-transform: uppercase;">Opportunity Rejected</div>
+                    <div class="exec-grid" style="background: rgba(255, 68, 68, 0.05); border: 1px solid rgba(255, 68, 68, 0.2);">
+                        <div class="exec-item"><span class="exec-label">Blocking Gate</span><span class="exec-value" id="diag-gate">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Drag Agent</span><span class="exec-value bearish" id="diag-agent">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Required Score</span><span class="exec-value" id="diag-req">—</span></div>
+                        <div class="exec-item"><span class="exec-label">Actual Score</span><span class="exec-value" id="diag-act">—</span></div>
+                        <div class="exec-item"><span class="exec-label" style="color:#ffaa00;">Shortfall</span><span class="exec-value" id="diag-shortfall">—</span></div>
+                    </div>
+                    <div style="margin-top: 10px; font-size: 12px; color: #888;">REASONS:</div>
+                    <ul id="reasons-list" style="color: #ffaa00; font-size: 12px; margin-bottom: 0;"></ul>
                 </div>
                 
                 <div class="confluence-meter">
                     <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; color:#888;">
-                        <span>BULLISH CONFLUENCE</span>
-                        <span id="conf-text">0 / 0</span>
+                        <span id="conf-bull-text" class="bullish">BUY 0%</span>
+                        <span id="conf-bear-text" class="bearish">SELL 0%</span>
                     </div>
-                    <div class="confluence-bar">
-                        <div class="confluence-bull" id="conf-fill" style="width: 50%;"></div>
+                    <div class="confluence-bar" style="background:#111; display:flex; justify-content:space-between;">
+                        <div class="confluence-bull" id="conf-bull-fill" style="width: 0%; background:#00ff88;"></div>
+                        <div class="confluence-bear" id="conf-bear-fill" style="width: 0%; background:#ff4444; float:right;"></div>
                     </div>
                 </div>
             </div>
@@ -509,9 +518,36 @@ DASHBOARD_HTML = """
                         li.textContent = r;
                         list.appendChild(li);
                     });
-                    document.getElementById('t-struct').textContent = '---';
-                    document.getElementById('t-exec').textContent = '---';
-                    document.getElementById('t-integ').textContent = '---';
+                    
+                    let sim = null;
+                    if (sig.metadata && sig.metadata.sim_track_data) {
+                        sim = sig.metadata.sim_track_data;
+                    }
+                    
+                    if (sim) {
+                        document.getElementById('diag-gate').textContent = sig.reasons && sig.reasons.length ? sig.reasons[0].split(':')[0] : 'Low Confidence';
+                        document.getElementById('diag-agent').textContent = (sim.top_drag_agent || 'N/A').toUpperCase();
+                        document.getElementById('diag-req').textContent = sim.threshold ? sim.threshold.toFixed(3) : '---';
+                        let actScore = (sim.raw_buy >= sim.raw_sell) ? sim.adj_buy : sim.adj_sell;
+                        if (actScore === undefined) actScore = (sim.raw_buy >= sim.raw_sell) ? sim.raw_buy : sim.raw_sell;
+                        document.getElementById('diag-act').textContent = actScore ? actScore.toFixed(3) : '---';
+                        document.getElementById('diag-shortfall').textContent = sim.shortfall ? sim.shortfall.toFixed(3) : '---';
+                        
+                        document.getElementById('t-struct').textContent = agents && agents.structure && agents.structure.last_output ? agents.structure.last_output.confidence + '%' : '---';
+                        document.getElementById('t-exec').textContent = 'PENDING';
+                        let domScore = sim.threshold ? (actScore / sim.threshold) : 0;
+                        document.getElementById('t-integ').textContent = Math.min(domScore, 1.0).toFixed(2);
+                    } else {
+                        document.getElementById('diag-gate').textContent = '---';
+                        document.getElementById('diag-agent').textContent = '---';
+                        document.getElementById('diag-req').textContent = '---';
+                        document.getElementById('diag-act').textContent = '---';
+                        document.getElementById('diag-shortfall').textContent = '---';
+                        
+                        document.getElementById('t-struct').textContent = '---';
+                        document.getElementById('t-exec').textContent = '---';
+                        document.getElementById('t-integ').textContent = '---';
+                    }
                 }
 
                 // Confluence Meter
@@ -519,9 +555,13 @@ DASHBOARD_HTML = """
                     const bull = sig.confluence.bullish;
                     const bear = sig.confluence.bearish;
                     const total = bull + bear;
-                    document.getElementById('conf-text').textContent = `${bull} bullish / ${bear} bearish`;
-                    const pct = total > 0 ? (bull / total) * 100 : 50;
-                    document.getElementById('conf-fill').style.width = pct + '%';
+                    const bullPct = total > 0 ? (bull / total) * 100 : 0;
+                    const bearPct = total > 0 ? (bear / total) * 100 : 0;
+                    
+                    document.getElementById('conf-bull-text').textContent = `BUY ${Math.round(bullPct)}%`;
+                    document.getElementById('conf-bear-text').textContent = `SELL ${Math.round(bearPct)}%`;
+                    document.getElementById('conf-bull-fill').style.width = bullPct + '%';
+                    document.getElementById('conf-bear-fill').style.width = bearPct + '%';
                 }
             }
 

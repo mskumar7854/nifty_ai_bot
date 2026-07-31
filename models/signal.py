@@ -1,7 +1,7 @@
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 import time
 
 from .regime import MarketRegime, RegimeState
@@ -57,6 +57,7 @@ class Signal:
     key_levels_nearby: List[float] = field(default_factory=list)
     suggested_adjustment: str = ""
     execution_policy: Optional[ExecutionPolicy] = None
+    trace: Optional[Any] = None  # Store the DecisionTrace
 
     def to_dict(self) -> dict:
         return {

@@ -26,36 +26,38 @@ import json
 import uuid
 import numpy as np
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
 
 from models import (
     Signal, SignalType, Direction, Strength,
-    MarketSnapshot,
+    MarketSnapshot, TradeHealth
 )
 from utils.logger import get_logger
 from utils.helpers import save_json, load_json, safe_divide
 from config.settings import Settings
 from core.execution_fidelity import ExecutionFidelityEngine, ExecutionResult
 from core.burnin_tracker import BurninTracker
+from core.trade_lifecycle_logger import TradeLifecycleLogger
+from models.lifecycle import TradeLifecycle, TradeState
 
 
 @dataclass
-class SimulatedTrade:
+class SimulatedTrade(TradeLifecycle):
     """A paper trade for simulation"""
-    trade_id: str
-    timestamp: datetime
-    signal_type: SignalType
-    direction: Direction
-    confidence: float
-    grade: str
+    trade_id: str = ""
+    timestamp: Optional[datetime] = None
+    signal_type: SignalType = SignalType.NO_TRADE
+    direction: Direction = Direction.NEUTRAL
+    confidence: float = 0.0
+    grade: str = ""
 
     # Prices
-    entry_price: float
-    stop_loss: float
-    target_1: float
-    target_2: float
+    entry_price: float = 0.0
+    stop_loss: float = 0.0
+    target_1: float = 0.0
+    target_2: float = 0.0
     spot_entry: float = 0.0
     simulated_exit_price: float = 0
 
@@ -70,6 +72,8 @@ class SimulatedTrade:
     result: str = "OPEN"              # WIN | LOSS | BREAK_EVEN
     exit_reason: str = ""
     hold_minutes: float = 0
+    mfe: float = 0.0
+    mae: float = 0.0
 
     # Context
     regime: str = ""
@@ -119,6 +123,25 @@ class SimulatedTrade:
     adapted_outcome: dict = field(default_factory=dict)   # { "exit_reason": "...", "pnl": 0.0 }
     adaptation_outcome: str = ""                          # LOSS_MITIGATED, WIN_ENHANCED, etc.
     adaptation_pnl_delta: float = 0.0
+
+    # ── Duck Typing for PositionPipeline ──
+    current_price: float = 0.0
+    unrealized_pnl: float = 0.0
+    max_favorable: float = 0.0
+    max_adverse: float = 0.0
+    confidence_at_entry: float = 0.0
+    entry_premium: float = 0.0
+    tsl_highest_premium: float = 0.0
+    tsl_highest_premium_time: Optional[datetime] = None
+    tsl_phase: str = ""
+    tsl_active: bool = False
+    health_score: float = 100.0
+    health_state: TradeHealth = TradeHealth.HEALTHY
+
+    @property
+    def position_id(self) -> str:
+        """Alias for trade_id to fulfill the PositionLike interface contract."""
+        return self.trade_id
 
     def to_dict(self) -> dict:
         return {
@@ -327,15 +350,19 @@ class SimulationEngine:
     4. Identify weaknesses before losing real money
     """
 
-    def __init__(self, settings: Settings, burnin_tracker: Optional[BurninTracker] = None):
+    def __init__(self, settings: Settings, burnin_tracker: Optional[BurninTracker] = None, event_manager: Optional[Any] = None):
         self.settings = settings
         self.logger = get_logger("simulation")
+        self.event_manager = event_manager
 
         # ── Phase A: Execution Fidelity Engine ──
         self.exec_engine = ExecutionFidelityEngine()
 
         # ── Phase B: Burn-In Tracker (optional, injected from main) ──
         self.burnin_tracker: Optional[BurninTracker] = burnin_tracker
+
+        # ── Phase C: Trade Lifecycle Logger ──
+        self.lifecycle_logger = TradeLifecycleLogger(event_manager=self.event_manager)
 
         # ── Capital Tracking ──
         self.initial_capital = settings.get_capital()
@@ -450,12 +477,12 @@ class SimulationEngine:
         # Extract regime safely
         regime_str = ""
         if hasattr(signal, 'regime') and signal.regime:
-            regime_str = signal.regime.value
+            regime_str = getattr(signal.regime, 'value', str(signal.regime))
 
         # Extract session safely
         session_str = ""
         if hasattr(signal, 'session_phase') and signal.session_phase:
-            session_str = signal.session_phase.value
+            session_str = getattr(signal.session_phase, 'value', str(signal.session_phase))
 
         # ── ⚡ EXECUTION FIDELITY ENGINE (Phase A) ──
         quote = signal.metadata.get("quote")
@@ -521,12 +548,14 @@ class SimulationEngine:
             expiry_date=expiry_date,
         )
 
+        sig_type_str = getattr(signal.signal_type, 'value', str(signal.signal_type))
+
         # ── Handle Rejection ──
         if exec_result.rejected:
             self.logger.warning(
                 f"🚫 Trade REJECTED by fidelity engine | "
                 f"Reason: {exec_result.rejection_reason} | "
-                f"Signal: {signal.signal_type.value}"
+                f"Signal: {sig_type_str}"
             )
             return None   # Caller must handle None (skip OMS/Telegram)
 
@@ -628,13 +657,18 @@ class SimulationEngine:
         self.total_trades += 1
         self.today_trades += 1
 
+        trade.transition_to(TradeState.SIGNAL_APPROVED, self.event_manager)
+        trade.transition_to(TradeState.ORDER_PENDING, self.event_manager)
+        trade.transition_to(TradeState.ORDER_FILLED, self.event_manager)
+        trade.transition_to(TradeState.POSITION_OPEN, self.event_manager, payload=trade.to_dict())
+
         # ── Phase B: Record execution into BurninTracker ──
         if self.burnin_tracker:
             self.burnin_tracker.record_execution(exec_result, regime=regime_str)
 
         self.logger.info(
             f"📝 SIM TRADE OPENED: {trade_id} | "
-            f"{signal.signal_type.value} | "
+            f"{sig_type_str} | "
             f"Signal: ₹{base_price:,.1f} → Fill: ₹{realistic_entry:,.1f} | "
             f"Friction: {exec_result.total_friction_pts:+.2f}pts | "
             f"Latency: {exec_result.latency_ms}ms | "
@@ -722,6 +756,10 @@ class SimulationEngine:
                 trade, current_price, snapshot, data_manager
             )
 
+            # ── Update MFE / MAE ──
+            unrealized = eval_price - trade.entry_price
+            trade.update_mfe_mae(unrealized, self.event_manager)
+
             # ── Phase C: Counterfactual Intrabar Hit Tracking ──
             # Deterministic intrabar assumptions: SL hits before TP if both breached, but we'll mark them as we see them.
             if trade.original_sl > 0 and eval_price <= trade.original_sl and not trade.original_sl_hit:
@@ -761,8 +799,12 @@ class SimulationEngine:
                     datetime.now() - trade.timestamp
                 ).total_seconds() / 60
 
-                if hold_time > self.settings.exit.max_hold_time_minutes:
-                    self._close_trade(tid, eval_price, "TIME_EXIT")
+                max_hold = self.settings.exit.max_hold_time_minutes
+                if getattr(snapshot, 'is_expiry_day', False):
+                    max_hold = min(max_hold, self.settings.exit.max_hold_on_expiry_day_minutes)
+
+                if hold_time > max_hold:
+                    self._close_trade(tid, eval_price, "TIME_EXIT" if max_hold == self.settings.exit.max_hold_time_minutes else "EXPIRY_TIME_EXIT")
                     if self.all_trades:
                         t_dict = self.all_trades[-1].to_dict()
                         t_dict["ledger_record"] = self.all_trades[-1].to_ledger_record()
@@ -958,6 +1000,27 @@ class SimulationEngine:
 
         # Remove from open
         del self.open_trades[trade_id]
+
+        trade.transition_to(TradeState.EXIT_TRIGGERED, self.event_manager, payload={"reason": reason, "exit_price": exit_price})
+        trade.transition_to(TradeState.POSITION_CLOSED, self.event_manager, payload=trade.to_dict())
+        
+        # ── TRADE_EVALUATED ──
+        # Calculate EV vs Realized
+        expected_r = (trade.confidence - 0.5) * 2  # simple mock mapping
+        risk = abs(trade.entry_price - trade.stop_loss) * trade.qty if trade.stop_loss > 0 else 0
+        actual_r = (trade.net_pnl / risk) if risk > 0 else 0.0
+        prediction_error = actual_r - expected_r
+        
+        trade.transition_to(TradeState.TRADE_EVALUATED, self.event_manager, payload={
+            "actual_r": round(actual_r, 3),
+            "expected_r": round(expected_r, 3),
+            "prediction_error": round(prediction_error, 3),
+            "decision_quality": "Correct Decision" if actual_r > 0 else "Poor Decision",
+            "confidence": trade.confidence,
+            "grade": trade.grade,
+            "regime": trade.regime,
+        })
+        trade.transition_to(TradeState.TRADE_ARCHIVED, self.event_manager)
 
         # ── Phase B: Record trade into BurninTracker ──
         if self.burnin_tracker:

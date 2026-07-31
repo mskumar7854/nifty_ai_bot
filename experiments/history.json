@@ -1,0 +1,10 @@
+[
+  {
+    "experiment_id": "MAV_v1",
+    "timestamp": "2026-07-30T21:38:25.705194",
+    "baseline_win_rate": 0.1254341952913933,
+    "candidate_win_rate": 0.0957233024822394,
+    "precision": 0.10255509421909934,
+    "recall": 0.36802292263610314
+  }
+]

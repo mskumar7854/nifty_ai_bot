@@ -26,7 +26,7 @@ from datetime import datetime
 from models import Signal, SignalType, Direction
 from utils.logger import get_logger
 from utils.helpers import safe_divide
-from config.settings import Settings
+from config.settings import Settings, PipelineConfig
 import time
 from core.telemetry.rejection_schema import GateEvaluation, RejectionRecord, RejectionLogger
 
@@ -41,6 +41,7 @@ class FilterResult:
     filters_total: int
     kill_reason: str = ""
     gate_details: List[Dict] = field(default_factory=list)
+    telemetry: Dict = field(default_factory=dict)
 
 
 class TradeFilter:
@@ -75,6 +76,7 @@ class TradeFilter:
         cost_info: Dict,
         position_manager_status: Dict,
         confluence_score: float,
+        pipeline_config: PipelineConfig = None,
     ) -> FilterResult:
         """
         Run signal through all 10 gates.
@@ -82,6 +84,10 @@ class TradeFilter:
         """
 
         self.total_received += 1
+        
+        if pipeline_config is None:
+            pipeline_config = PipelineConfig()
+            
         gates = []
         total_score = 0.0
         max_score = 0.0
@@ -296,6 +302,8 @@ class TradeFilter:
             self.logger.info(f"[GATE 1] Expiry Penalty +{expiry_penalty} applied (DTE={_days_to_expiry}, Type={_expiry_type})")
 
         g1_pass = conf >= min_conf
+        if pipeline_config and not pipeline_config.confidence_enabled:
+            g1_pass = True
         g1_score = min(100, conf)
         gates.append({
             "gate": "Confidence",
@@ -335,6 +343,8 @@ class TradeFilter:
         if signal.confluence:
             conf_score = signal.confluence.confluence_ratio * 100
         g2_pass = conf_score >= self.cfg.min_confluence_score
+        if pipeline_config and not pipeline_config.confluence_enabled:
+            g2_pass = True
         g2_score = min(100, conf_score)
         gates.append({
             "gate": "Confluence",
@@ -362,6 +372,8 @@ class TradeFilter:
             )
             agreement_pct = safe_divide(direction_agents * 100, total_agents)
         g3_pass = agreement_pct >= self.cfg.min_agent_agreement_pct
+        if pipeline_config and not pipeline_config.confluence_enabled:
+            g3_pass = True
         g3_score = min(100, agreement_pct)
         gates.append({
             "gate": "Agent Agreement",
@@ -380,6 +392,8 @@ class TradeFilter:
         regime_str = regime_info.get("regime", "UNKNOWN")
         blocked_regime = regime_str in self.cfg.blocked_regimes
         g4_pass = not blocked_regime
+        if pipeline_config and not pipeline_config.regime_enabled:
+            g4_pass = True
         g4_score = 0 if blocked_regime else 100
         gates.append({
             "gate": "Regime",
@@ -398,6 +412,8 @@ class TradeFilter:
         structure_type = structure_info.get("structure", "OK")
         blocked_structure = structure_type in self.cfg.blocked_structures
         g5_pass = not blocked_structure
+        if pipeline_config and not pipeline_config.structure_enabled:
+            g5_pass = True
         g5_score = 0 if blocked_structure else 100
         gates.append({
             "gate": "Structure",
@@ -461,6 +477,8 @@ class TradeFilter:
 
         # Institutional Block: Trade is blocked unless PEV Ratio >= dynamic_pev_threshold
         g6_pass = pev_ratio >= dynamic_pev_threshold
+        if pipeline_config and not pipeline_config.ev_enabled:
+            g6_pass = True
         g6_score = min(100, (pev_ratio / dynamic_pev_threshold) * 50 if dynamic_pev_threshold > 0 else 0)
         
         pev_breakdown = (
@@ -567,20 +585,47 @@ class TradeFilter:
             failed_gates_count += 1
             if not primary_kill_reason: primary_kill_reason = "HIGH_DECAY"
 
-        # ── GATE 10: Quality Grade ──
+        # ── GATE 10: Regime-Aware Quality Grade Gate (v2.1) ──
+        # Regime -> Min Grade Matrix:
+        #   TRENDING    -> B+
+        #   BREAKOUT    -> A
+        #   REVERSAL    -> A
+        #   RANGING     -> A+
+        #   CHOP/VOL    -> NO TRADES (Block)
         grade_map = {"A+": 5, "A": 4, "B+": 3.5, "B": 3, "C": 2, "D": 1}
-        signal_grade_val = grade_map.get(signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade), 1)
-        min_grade_val = grade_map.get(self.cfg.min_grade_to_trade, 4)
-        g10_pass = signal_grade_val >= min_grade_val
-        g10_score = min(100, signal_grade_val / 5 * 100)
-        grade_str = signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade)
+        signal_grade_str = signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade)
+        signal_grade_val = grade_map.get(signal_grade_str, 1)
+
+        regime_str = regime_info.get("regime", "UNKNOWN") if isinstance(regime_info, dict) else str(getattr(signal, "regime", "UNKNOWN"))
+        regime_upper = regime_str.upper()
+        if "." in regime_upper:
+            regime_upper = regime_upper.split(".")[1]
+
+        if regime_upper in ["CHOP", "CHOPPY", "VOLATILE", "UNSTABLE"]:
+            required_grade_str = "NO_TRADES"
+            required_grade_val = 99.0  # Impossible -> Block chop
+        elif regime_upper in ["BREAKOUT", "REVERSAL"]:
+            required_grade_str = "A"
+            required_grade_val = 4.0
+        elif regime_upper in ["RANGING", "RANGE", "SQUEEZE"]:
+            required_grade_str = "A+"
+            required_grade_val = 5.0
+        else:  # TRENDING_UP, TRENDING_DOWN, TRENDING
+            required_grade_str = "B+"
+            required_grade_val = 3.5
+
+        g10_pass = signal_grade_val >= required_grade_val
+        if pipeline_config and not pipeline_config.regime_enabled:
+            g10_pass = True
+        g10_score = min(100, (signal_grade_val / 5.0) * 100)
+        
         gates.append({
-            "gate": "Quality Grade",
+            "gate": "Regime-Aware Grade",
             "pass": g10_pass,
             "score": g10_score,
             "detail": (
-                f"Grade: {grade_str} "
-                f"(need {self.cfg.min_grade_to_trade}+)"
+                f"Grade: {signal_grade_str} | Regime: {regime_upper} "
+                f"(Required: {required_grade_str})"
             ),
         })
         total_score += g10_score * 0.10
@@ -588,7 +633,67 @@ class TradeFilter:
 
         if not g10_pass:
             failed_gates_count += 1
-            if not primary_kill_reason: primary_kill_reason = f"LOW_GRADE_{grade_str}"
+            if not primary_kill_reason: primary_kill_reason = f"REJECTED_REGIME_GRADE_{signal_grade_str}_IN_{regime_upper}"
+
+        # ── GATE 11: Expected Value (EV) Engine Gate (v2.1) ──
+        ev_info = getattr(signal, "ev_info", {}) or {}
+        ev_r = ev_info.get("ev_r", None)
+        ev_score = ev_info.get("normalized_score", None)
+        ev_reason = ev_info.get("reason", "EV calculation missing")
+        
+        if ev_r is not None and ev_score is not None:
+            g11_pass = ev_info.get("passes_gate", ev_r >= 0.50 and ev_score >= 60.0)
+            if pipeline_config and not pipeline_config.ev_enabled:
+                g11_pass = True
+            g11_score = min(100, float(ev_score))
+            gates.append({
+                "gate": "Expected Value (EV)",
+                "pass": g11_pass,
+                "score": g11_score,
+                "detail": ev_reason,
+            })
+            total_score += g11_score * 0.10
+            max_score += 10.0
+            
+            telemetry_gates["ExpectedValue"] = {
+                "passed": g11_pass,
+                "ev_r": ev_r,
+                "ev_score": ev_score,
+                "reason": ev_reason,
+                "details": ev_info.get("details", {})
+            }
+            
+            if not g11_pass:
+                failed_gates_count += 1
+                if not primary_kill_reason: primary_kill_reason = f"REJECTED_LOW_EV_{ev_r:+.2f}R"
+
+        # ── GATE 12: Trend Market Structure Reset Gate (v2.1) ──
+        trend_tracker = getattr(self, "trend_tracker", None)
+        if trend_tracker:
+            sig_dir = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
+            sig_meta = getattr(signal, "metadata", {}) or {}
+            struct_pass, struct_reason, struct_details = trend_tracker.check_reentry_allowed(sig_dir, sig_meta)
+            if pipeline_config and not pipeline_config.structure_enabled:
+                struct_pass = True
+            gates.append({
+                "gate": "Structure Reset",
+                "pass": struct_pass,
+                "score": 100 if struct_pass else 0,
+                "detail": struct_reason,
+            })
+            total_score += (100 if struct_pass else 0) * 0.05
+            max_score += 5.0
+            
+            telemetry_gates["StructureTracker"] = {
+                "passed": struct_pass,
+                "reason": struct_reason,
+                "details": struct_details
+            }
+            
+            if not struct_pass:
+                failed_gates_count += 1
+                if not primary_kill_reason: primary_kill_reason = "REJECTED_SAME_STRUCTURAL_TREND"
+
 
         # ── EVALUATION COMPLETE: Handle Rejections ──
         if failed_gates_count > 0:
@@ -626,7 +731,7 @@ class TradeFilter:
         self.passed_ += 1
 
         self.logger.info(
-            f"✅ Filter PASSED | Grade: {final_grade} | "
+            f"Filter PASSED | Grade: {final_grade} | "
             f"Score: {final_score:.0f} | "
             f"Gates: 10/10"
         )
@@ -638,6 +743,7 @@ class TradeFilter:
             filters_passed=10,
             filters_total=10,
             gate_details=gates,
+            telemetry=telemetry_gates,
         )
 
     def _kill(
@@ -647,6 +753,7 @@ class TradeFilter:
         reason: str,
         gates_passed: int,
         gates_total: int,
+        telemetry: Dict = None,
     ) -> FilterResult:
         """Record a filter kill and return failure result"""
 
@@ -666,6 +773,7 @@ class TradeFilter:
             filters_total=gates_total,
             kill_reason=reason,
             gate_details=gates,
+            telemetry=telemetry or {},
         )
 
     def get_filter_stats(self) -> Dict:

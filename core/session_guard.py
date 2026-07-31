@@ -54,6 +54,8 @@ from typing import Tuple
 logger = logging.getLogger("session_orchestrator")
 
 
+from dataclasses import dataclass
+
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
 class MarketSessionState(Enum):
@@ -79,6 +81,18 @@ class DataHealth(Enum):
     FRESH = auto()   # last candle age < 90s
     STALE = auto()   # last candle age 90–300s
     DEAD  = auto()   # last candle age > 300s or no data
+
+
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class RuntimeState:
+    """Immutable snapshot of exchange session, posture, data health, and polling interval."""
+    session: MarketSessionState
+    posture: RuntimePosture
+    data_health: DataHealth
+    poll_interval_s: float
+    is_trading_allowed: bool
 
 
 # ── Poll intervals (seconds) per session state ────────────────────────────────
@@ -282,6 +296,26 @@ class ExchangeSessionOrchestrator:
         self._cache_posture = posture
         self._cache_ts = _time.monotonic()
 
+    def get_runtime_state(self, last_candle_ts=None) -> RuntimeState:
+        """
+        Single authoritative runtime state snapshot for the current cycle.
+        Returns immutable RuntimeState containing session, posture, data health,
+        poll interval, and whether trade entries are allowed.
+        """
+        self._evaluate(last_candle_ts)
+        session = self._cache_session
+        posture = self._cache_posture
+        health = self._cache_data_health
+        poll_s = self.get_poll_interval_seconds(last_candle_ts)
+        trading_allowed = posture in (RuntimePosture.LIVE, RuntimePosture.DEGRADED)
+        return RuntimeState(
+            session=session,
+            posture=posture,
+            data_health=health,
+            poll_interval_s=poll_s,
+            is_trading_allowed=trading_allowed,
+        )
+
     def get_session_state(self, last_candle_ts=None) -> MarketSessionState:
         """Current NSE session state derived from wall clock and data freshness."""
         self._evaluate(last_candle_ts)
@@ -302,6 +336,15 @@ class ExchangeSessionOrchestrator:
         """Compute data health using timeframe-aware thresholds."""
         if last_candle_ts is None:
             return DataHealth.DEAD
+
+        # Non-live sessions (expected inactivity): if candles are hydrated, return FRESH.
+        # Feed staleness decay should only evaluate during active trading sessions.
+        state = self._compute_state_for_time(datetime.now().time())
+        if state in (MarketSessionState.CLOSED,
+                       MarketSessionState.WEEKEND_CLOSED,
+                       MarketSessionState.PRE_MARKET,
+                       MarketSessionState.POST_MARKET):
+            return DataHealth.FRESH
 
         try:
             if hasattr(last_candle_ts, "to_pydatetime"):
@@ -507,12 +550,19 @@ class ExchangeSessionOrchestrator:
         session: MarketSessionState,
         health: DataHealth,
     ) -> None:
-        """Log only when posture changes. Silent in steady state."""
+        """Log only when posture changes or live feed health changes. Silent in steady state."""
         if self._suppress_logs:
             self._last_posture = new_posture
             self._last_data_health = health
             return
-        if new_posture != self._last_posture or health != self._last_data_health:
+
+        posture_changed = new_posture != self._last_posture
+        health_changed_in_active_session = (
+            health != self._last_data_health and
+            new_posture in (RuntimePosture.LIVE, RuntimePosture.DEGRADED)
+        )
+
+        if posture_changed or health_changed_in_active_session:
             old_posture = self._last_posture.name if self._last_posture else "BOOT"
             logger.info(
                 f"⚡ Runtime posture: {old_posture} → {new_posture.name} | "

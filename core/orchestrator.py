@@ -55,6 +55,8 @@ class TradingOrchestrator:
                     await self.telemetry.init_telegram()
 
                 # ── Main Loop ──
+                from core.session_guard import orchestrator as session_guard, MarketSessionState
+
                 while self.running:
                     start_time = time.perf_counter()
                     self.last_cycle_time = time.time()
@@ -62,19 +64,18 @@ class TradingOrchestrator:
                     await self._run_cycle(session)
                     
                     # Check for auto-shutdown after market hours
-                    if getattr(self.ctx.settings, "auto_shutdown_after_market", False):
-                        from core.session_guard import orchestrator as session_guard, MarketSessionState
+                    if getattr(self.ctx.settings.trading, "auto_shutdown_after_market", False):
                         state = session_guard.get_session_state()
                         if state in (MarketSessionState.POST_MARKET, MarketSessionState.CLOSED, MarketSessionState.WEEKEND_CLOSED):
                             logger.info("Auto shutdown enabled and market is closed. Triggering orchestrator shutdown...")
                             self.stop()
                             break
 
-                    # Compute sleep interval
+                    # Compute session-aware sleep interval from single authoritative RuntimeState
+                    last_ts = getattr(self.ctx.data_manager, "last_market_activity_ts", None)
+                    runtime_state = session_guard.get_runtime_state(last_ts)
                     elapsed = time.perf_counter() - start_time
-                    # We can use the existing session guard to get the interval, but keep logic out of here
-                    # For now, default sleep of 1s minus elapsed
-                    sleep_time = max(0.1, 1.0 - elapsed)
+                    sleep_time = max(0.1, runtime_state.poll_interval_s - elapsed)
                     await asyncio.sleep(sleep_time)
             except asyncio.CancelledError:
                 logger.info("Shutdown signal received")
@@ -95,8 +96,12 @@ class TradingOrchestrator:
         """Executes a single cycle."""
         self.cycle_count += 1
         start_time = time.perf_counter()
+        from core.session_guard import orchestrator as session_guard
+        last_ts = getattr(self.ctx.data_manager, "last_market_activity_ts", None)
+        runtime_state = session_guard.get_runtime_state(last_ts)
+
         try:
-            # 1. Market Data Pipeline
+            # 1. Market Data Pipeline (Telemetry, indicators, and snapshots continue on every cycle)
             if hasattr(self.market_pipeline, "data_manager"):
                 df, snapshot = await self.market_pipeline.data_manager.update_latest_candle_async(session)
             else:
@@ -115,29 +120,37 @@ class TradingOrchestrator:
             pos_manager = getattr(system, "position_manager", None)
             
             # EOD force exit
-            from core.session_guard import orchestrator as session_guard
             if session_guard.is_force_exit_time():
                 if self.ctx.event_manager:
                     self.ctx.event_manager.publish(EndOfDayTriggered(source="orchestrator"))
-                # Simplified force exit handling here via pipelines in future. For now, legacy EOD logic is handled in position manager or main
 
             actions_to_execute = []
             if self.position_pipeline and pos_manager:
                 # For each open position, run position pipeline evaluate
-                # Simplified loop assuming position_pipeline handles list or single
                 open_positions = pos_manager.open_positions if not self.ctx.is_simulation else getattr(self.ctx.simulation, "open_trades", {})
                 for pid, pos in open_positions.items():
                     actions = self.position_pipeline.evaluate(pos, snapshot, df)
                     actions_to_execute.extend(actions)
 
-            # 3. Execution Pipeline (Apply Actions)
+            # 3. Execution Pipeline (Apply Exit Actions)
             if actions_to_execute and self.execution_pipeline:
                 await self.execution_pipeline.apply_position_actions(actions_to_execute)
 
-            # 4. Decision Pipeline
-            if self.decision_pipeline:
-                # In real flow, decision pipeline takes snapshot and returns TradingDecision
-                # But since it's intertwined with EntryEngine right now, we let it run via system
+            # 3b. Simulation Exit Monitoring
+            if self.ctx.is_simulation and self.ctx.simulation:
+                sim = self.ctx.simulation
+                if sim.open_trades:
+                    closed = sim.update_open_trades(
+                        snapshot.price, snapshot,
+                        data_manager=self.ctx.data_manager
+                    )
+                    for c in closed:
+                        logger.info(f"📕 SIM EXIT: {c.get('id')} | "
+                                    f"Reason: {c.get('exit_reason')} | "
+                                    f"PnL: ₹{c.get('net_pnl', 0):,.1f}")
+
+            # 4. Decision Pipeline (Gated by RuntimeState: only evaluate new entries if trading is allowed)
+            if self.decision_pipeline and runtime_state.is_trading_allowed:
                 if hasattr(self.ctx.system, "entry_engine"):
                     # Check pending first
                     confirmed = self.ctx.system.entry_engine.check_confirmations(snapshot, df)
@@ -146,13 +159,15 @@ class TradingOrchestrator:
                             await self.execution_pipeline.execute(pending, snapshot, self.ctx.is_simulation, mode="confirmed")
                 
                 # New decisions
-                # DecisionEngine.process() is the main evaluation entry point
                 if hasattr(self.ctx.system, "decision_engine"):
                     signal = self.ctx.system.decision_engine.process(df, snapshot)
                     if signal and signal.signal_type != SignalType.NO_TRADE:
                         self.ctx.system._last_decision_ts = time.time()
                         # Master gate approval
-                        pre_check = self.ctx.system.master.approve("BUY_CE", context={"posture": session_guard.get_posture(self.ctx.data_manager.last_market_activity_ts)})
+                        pre_check = self.ctx.system.master.approve(
+                            signal.signal_type.value,
+                            context={"posture": runtime_state.posture, "signal_obj": signal},
+                        )
                         if pre_check.approved and self.execution_pipeline:
                             # 5. Execution Pipeline (Entry)
                             await self.execution_pipeline.execute(signal, snapshot, self.ctx.is_simulation, mode="new")

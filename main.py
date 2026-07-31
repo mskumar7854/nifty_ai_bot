@@ -124,7 +124,7 @@ def sig_handler(signum, frame):
 
 class LegacySystem:
     """A bridge to hold references for legacy pipelines expecting ctx.system."""
-    def __init__(self, settings, db_manager):
+    def __init__(self, settings, db_manager, event_manager=None):
         from core.risk_manager import RiskManager
         from core.position_manager import PositionManager
         from core.entry_engine import EntryEngine
@@ -137,7 +137,7 @@ class LegacySystem:
         self.entry_engine = EntryEngine(settings)
         self.exit_engine = ExitEngine(settings)
         self.burnin_tracker = BurninTracker()
-        self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker)
+        self.simulation = SimulationEngine(settings, burnin_tracker=self.burnin_tracker, event_manager=event_manager)
         self.data_manager = None
         self.trading_enabled = True
         self.execution_failures = 0
@@ -176,7 +176,7 @@ def main():
         db_mgr = DBManager()
 
         # Bridge legacy references
-        ctx.system = LegacySystem(settings, db_mgr)
+        ctx.system = LegacySystem(settings, db_mgr, event_manager=event_manager)
         
         # Wire Pipelines (Assuming pipelines manage their own internal managers, else wire here)
         ctx.market_data = MarketDataPipeline(ctx)

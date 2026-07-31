@@ -96,6 +96,23 @@ class PartialExitExecuted(DomainEvent):
 class PositionClosed(DomainEvent):
     pass
 
+# ── Lifecycle Events ──
+@dataclass
+class TradeStateChanged(DomainEvent):
+    pass
+
+@dataclass
+class MfeUpdated(DomainEvent):
+    pass
+
+@dataclass
+class MaeUpdated(DomainEvent):
+    pass
+
+@dataclass
+class TradeEvaluated(DomainEvent):
+    pass
+
 # ── Risk Events ──
 @dataclass
 class CooldownStarted(DomainEvent):

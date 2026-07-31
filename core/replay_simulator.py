@@ -82,9 +82,8 @@ class ReplaySimulator:
     def simulate_rejection(self, row: sqlite3.Row) -> Optional[CounterfactualResult]:
         s = dict(row)
         
-        # Only evaluate rejected trades
-        if s.get("final_decision") != "REJECTED":
-            return None
+        # Evaluate all trades for compare_versions
+        pass
             
         # Parse fields
         try:

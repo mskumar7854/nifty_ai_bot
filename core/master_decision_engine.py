@@ -216,8 +216,12 @@ class MasterDecisionEngine:
 
         # ── G3: Core risk_manager kill switch (v4.6.1) ───────────
         if self.risk_manager is not None:
+            _dir = "BULLISH" if signal_type == "BUY_CE" else "BEARISH"
             ok, msg = self.risk_manager.can_take_new_trade(
-                type("_Sig", (), {"signal_type": type("_T", (), {"value": signal_type})()})()
+                type("_Sig", (), {
+                    "signal_type": type("_T", (), {"value": signal_type})(),
+                    "direction": type("_D", (), {"value": _dir})(),
+                })()
             )
             if not ok:
                 return _block("G3_RISK_CORE", msg)

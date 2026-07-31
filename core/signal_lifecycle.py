@@ -126,3 +126,13 @@ def log_position_closed(signal_id: str, order_id: str, exit_reason: str,
         "realized_pnl": round(realized_pnl, 2),
         "hold_duration_min": round(hold_duration_min, 1)
     }))
+
+def log_mav_state(signal_id: str, state: str, structure_level: float, score: float, reason: str = ''):
+    lifecycle_logger.info(json.dumps({
+        "event": f"MAV_{state}",
+        "signal_id": signal_id,
+        "ts": datetime.now().isoformat(),
+        "structure_level": structure_level,
+        "acceptance_score": score,
+        "reason": reason
+    }))

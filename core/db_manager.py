@@ -251,6 +251,45 @@ class DBManager:
             )
             """)
 
+            # 8. Decision Snapshots V2 (P2.0) - Deterministic Replay Foundation
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS decision_snapshots_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL UNIQUE,
+                timestamp TEXT NOT NULL,
+                symbol TEXT,
+                expiry TEXT,
+                mode TEXT,
+                schema_version TEXT,
+                pipeline_version TEXT,
+                strategy_version TEXT,
+                git_commit TEXT,
+                parent_snapshot_id TEXT,
+                trade_id TEXT,
+                shadow_trade_id TEXT,
+                experiment_id TEXT,
+                replay_run_id TEXT,
+                market_json TEXT,
+                pipeline_version TEXT,
+                strategy_version TEXT,
+                git_commit TEXT,
+                snapshot_hash TEXT NOT NULL,
+                
+                agents_json TEXT,
+                confidence_json TEXT,
+                confluence_json TEXT,
+                expected_value_json TEXT,
+                structure_json TEXT,
+                risk_json TEXT,
+                gate_results_json TEXT,
+                decision_json TEXT,
+                execution_json TEXT,
+                event_timeline_json TEXT,
+                replay_status_json TEXT,
+                outcome_json TEXT
+            )
+            """)
+
             await db.commit()
         logger.info("📦 SQLite Database connected and verified (v4.6.1 Hardened).")
 

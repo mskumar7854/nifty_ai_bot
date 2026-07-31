@@ -1,0 +1,40 @@
+{
+  "experiment": "MAV_v1",
+  "timestamp": "2026-07-30T21:38:25.705194",
+  "baseline": {
+    "candidates": 72548,
+    "executed": 72548,
+    "wins": 9100,
+    "losses": 63448,
+    "win_rate": 0.1254341952913933,
+    "net_r": -45248.0,
+    "gross_profit": 364000.0,
+    "gross_loss": 1268960.0,
+    "profit_factor": 0.2868490732568402,
+    "expectancy": -12.473948282516403
+  },
+  "candidate": {
+    "candidates": 72548,
+    "executed": 35331,
+    "wins": 3382,
+    "losses": 31949,
+    "win_rate": 0.0957233024822394,
+    "net_r": -25185.0,
+    "gross_profit": 135280.0,
+    "gross_loss": 638980.0,
+    "profit_factor": 0.21171241666405835,
+    "expectancy": -14.256601851065636
+  },
+  "classification": {
+    "precision": 0.10255509421909934,
+    "recall": 0.36802292263610314,
+    "true_positives": 3211,
+    "false_positives": 28099,
+    "true_negatives": 27687,
+    "false_negatives": 5514
+  },
+  "rejection_reasons": {
+    "FALSE_BREAKOUT": 17172,
+    "TIMEOUT": 10515
+  }
+}

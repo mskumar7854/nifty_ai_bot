@@ -82,6 +82,7 @@ from core.gap_penalty_manager import GapPenaltyManager
 from utils.logger import AgentLogger
 from config.settings import Settings
 from models import MarketRegime
+from models.decision_trace import DecisionTrace, TraceStage, StageAction
 from config.signal_weights import AGENT_WEIGHTS, MIN_CONFIDENCE, MIN_DIRECTION_GAP
 from core.threshold_tuner import ThresholdTuner
 from core.system_fingerprint import SystemFingerprint
@@ -150,16 +151,27 @@ _OI_FALLBACK_RECIPIENTS = {
 }
 
 class DecisionEngine:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, experiment_config=None):
         self.settings = settings
         self.logger = AgentLogger("decision_v3")
         self.scorer = ConfluenceScorer(settings)
         self.quality_grader = SignalQualityGrader(settings)
         self.calibrator = ConfidenceCalibrator()
+        
+        # ── Experiment Config for Research Platform ──
+        if experiment_config is None:
+            from core.experiment_config import ExperimentConfig
+            self.experiment_config = ExperimentConfig() # Default features
+        else:
+            self.experiment_config = experiment_config
 
         self.spike_freeze_until = 0.0
         self.session_started_date = None
         self.fingerprint = SystemFingerprint()
+        
+        # ── Market Acceptance Validator (MAV) ──
+        from core.market_acceptance_validator import MarketAcceptanceValidator
+        self.mav = MarketAcceptanceValidator()
         
         # ── State Tracking for Telemetry ──
         self.last_signal = None
@@ -371,16 +383,41 @@ class DecisionEngine:
     def learning_agent(self):
         return self.agents.get("learning")
 
-    def process(self, df, snapshot: "MarketSnapshot") -> "Signal":
+    def process(self, df, snapshot: "MarketSnapshot", historical_override = None) -> "Signal":
         start_ts = perf_counter()
         try:
-            signal = self._process_impl(df, snapshot)
+            signal = self._process_impl(df, snapshot, historical_override)
         except Exception as e:
             raise e
         finally:
             latency_ms = int((perf_counter() - start_ts) * 1000)
             try:
                 sig_val = locals().get('signal')
+                if hasattr(self, "current_trace") and self.current_trace and not self.current_trace._is_finalized:
+                    if sig_val and sig_val.signal_type.value == "TRADE":
+                        pipeline_stages = ["Agents", "Candidate Detection", "MAV", "Signal Integrity", "Risk Budget"]
+                        for st in pipeline_stages:
+                            if st == "MAV" and (not hasattr(self, 'experiment_config') or not self.experiment_config.enable_mav):
+                                st_act = StageAction.SKIPPED
+                            else:
+                                st_act = StageAction.PASSED
+                            self.current_trace.add_stage(
+                                stage_name=st,
+                                entered_at=self.current_trace.timestamp,
+                                exited_at=self.current_trace.timestamp,
+                                action=st_act
+                            )
+                        self.current_trace.add_stage(
+                            stage_name="Execution",
+                            entered_at=self.current_trace.timestamp,
+                            exited_at=datetime.now(),
+                            action=StageAction.PASSED,
+                            reason="Signal Generated"
+                        )
+                    self.current_trace.finalize()
+                    if sig_val:
+                        sig_val.trace = self.current_trace
+                
                 analytics_bus.publish("decision_cycle_completed", {
                     "cycle_id": getattr(self, "current_signal_id", "unknown"),
                     "latency_ms": latency_ms,
@@ -437,12 +474,33 @@ class DecisionEngine:
 
         return signal
 
-    def _process_impl(self, df, snapshot: "MarketSnapshot") -> "Signal":
+    def _process_impl(self, df, snapshot: "MarketSnapshot", historical_override = None) -> "Signal":
+        from models.signal import Signal
+        from models.decision_trace import DecisionTrace, TraceStage, StageAction, ReplayFidelity, ReplayMode
         self.current_signal_id = str(uuid.uuid4())[:8]
         outputs = []
         outputs_dict = {}
         self._last_decision_path = ["ENV_VALID"]
         self._sim_track_data = {}
+        
+        # Initialize DecisionTrace
+        experiment_id = "live"
+        benchmark_version = "N/A"
+        if hasattr(self, 'experiment_config') and self.experiment_config:
+            experiment_id = getattr(self.experiment_config, 'experiment_id', "live") or "live"
+            benchmark_version = getattr(self.experiment_config, 'benchmark_version', "N/A") or "N/A"
+            
+        self.current_trace = DecisionTrace(
+            cycle_id=self.current_signal_id,
+            timestamp=snapshot.timestamp,
+            engine_version="v3.8",
+            experiment_id=experiment_id,
+            benchmark_version=benchmark_version,
+            git_commit="latest",
+            replay_mode=historical_override.mode if hasattr(historical_override, 'mode') else ReplayMode.LIVE,
+            replay_fidelity=historical_override.fidelity if hasattr(historical_override, 'fidelity') else ReplayFidelity.LIVE,
+            replay_confidence=historical_override.confidence if hasattr(historical_override, 'confidence') else 1.0
+        )
 
         self.logger.debug("⚡ Engine v3 Cycle Started")
 
@@ -964,8 +1022,71 @@ class DecisionEngine:
                  f"regime: {reg_conf:.2f}, MPM={mpm.value})"],
                 outputs_dict)
 
-        # 4. Dynamic Confidence Gate
+        # 4. Market Acceptance Validator (MAV)
         # ─────────────────────────────────────────────────────────────────
+        # Runs ONLY for candidates that have passed the integrity and dominance gates.
+        # Defends against momentum spikes by requiring structural acceptance.
+        from core.market_acceptance_validator import AcceptanceState
+        from core.signal_lifecycle import log_mav_state
+        
+        # Check if we should track or evaluate a candidate
+        struct_details = outputs_dict.get("structure")
+        struct_lvl = None
+        
+        # We only care about breakout candidates if we have a structure read
+        if struct_details and struct_details.details:
+            s_dict = struct_details.details.get("structure", {})
+            if direction == Direction.BULLISH:
+                struct_lvl = s_dict.get("last_high")
+            elif direction == Direction.BEARISH:
+                struct_lvl = s_dict.get("last_low")
+        
+        # Evaluate against MAV (Feature Flagged)
+        if self.experiment_config.enable_mav:
+            if struct_lvl and df is not None and not df.empty:
+                if self.mav.state == AcceptanceState.IDLE or self.mav.direction != direction.name:
+                    self.mav.track_candidate(self.current_signal_id, direction.name, struct_lvl, snapshot.timestamp)
+                    log_mav_state(self.current_signal_id, "CANDIDATE_TRACKED", struct_lvl, 0.0, "Started tracking candidate")
+                
+                # Extract EMA 50 if available for context
+                ema_50 = None
+                pa_details = outputs_dict.get("price_action")
+                if pa_details and pa_details.details and "ema_50" in pa_details.details:
+                    ema_50 = pa_details.details["ema_50"]
+                    
+                mav_state = self.mav.evaluate_1m_candle(df, ema_50)
+                
+                if mav_state in [AcceptanceState.CANDIDATE, AcceptanceState.STRUCTURAL_BREAK, AcceptanceState.WAITING_ACCEPTANCE]:
+                    self.logger.info(f"🛡️ [MAV] Blocking trade: {mav_state.value} (Waiting for acceptance)")
+                    log_mav_state(self.current_signal_id, mav_state.name, struct_lvl, self.mav.acceptance_score, "Waiting")
+                    return self._no_trade_signal(
+                        snapshot,
+                        [f"Market Acceptance Validator: {mav_state.value} - waiting for acceptance candle"],
+                        outputs_dict
+                    )
+                elif mav_state == AcceptanceState.FALSE_BREAKOUT:
+                    self.logger.warning(f"🛡️ [MAV] FALSE BREAKOUT detected. Reason: {self.mav.failure_reason}")
+                    log_mav_state(self.current_signal_id, "FALSE_BREAKOUT", struct_lvl, self.mav.acceptance_score, self.mav.failure_reason)
+                    return self._no_trade_signal(
+                        snapshot,
+                        [f"Market Acceptance Validator: FALSE_BREAKOUT ({self.mav.failure_reason})"],
+                        outputs_dict
+                    )
+                elif mav_state == AcceptanceState.TIMEOUT:
+                    self.logger.warning(f"🛡️ [MAV] TIMEOUT detected. Resetting.")
+                    log_mav_state(self.current_signal_id, "TIMEOUT", struct_lvl, self.mav.acceptance_score, "Timeout")
+                    self.mav.reset()
+                    return self._no_trade_signal(
+                        snapshot,
+                        [f"Market Acceptance Validator: TIMEOUT - no acceptance reached in time"],
+                        outputs_dict
+                    )
+                elif mav_state == AcceptanceState.ACCEPTED:
+                    self.logger.info(f"✅ [MAV] Breakout ACCEPTED! Score: {self.mav.acceptance_score}")
+                    log_mav_state(self.current_signal_id, "ACCEPTED", struct_lvl, self.mav.acceptance_score, "Breakout Accepted")
+                    # We let the signal proceed through to Threshold Relaxation
+
+        # 5. Dynamic Confidence Gate
         # v3.6 UPGRADE:
         # Old: Relax ONLY when gap session is active (time-based).
         # New: Relax based on THREE independent signals:
@@ -1006,6 +1127,12 @@ class DecisionEngine:
         if gap_severity == "NONE" and reg_conf < 0.6:
             adaptive_confidence = max(adaptive_confidence - 0.03, 0.26)
             fallback_applied = True
+            
+        # [HISTORICAL MODE OVERRIDE]
+        if historical_override and historical_override.confidence_threshold is not None:
+            if getattr(historical_override, 'mode', None) == ReplayMode.HISTORICAL:
+                adaptive_confidence = historical_override.confidence_threshold
+                self.logger.info(f"🔄 [REPLAY OVERRIDE] Mode A (HISTORICAL) active. Forcing threshold to {adaptive_confidence:.3f}")
 
         self._last_raw_confidence = confidence
         self._last_adaptive_threshold = adaptive_confidence
@@ -1123,7 +1250,7 @@ class DecisionEngine:
         )
 
         current_regime = str(self._classify_market(snapshot, outputs_dict).value)
-        calibrated_confidence = self.calibrator.calibrate(confidence, current_regime)
+        calibrated_confidence, calib_telemetry = self.calibrator.calibrate(confidence, current_regime)
 
         self.logger.info(
             f"🧠 [CALIBRATION] Signal: {signal_type.value} | "
@@ -1156,6 +1283,7 @@ class DecisionEngine:
             # the REAL edge strength, not the raw pre-penalty score.
             "dominant_prob": round(confidence, 4),   # confidence IS dominant_prob at this point
             "calibrated_confidence": round(calibrated_confidence, 4),
+            "calibration_telemetry": calib_telemetry,
             # ── Runtime Fingerprint (incident replay / regression detection) ──
             "fingerprint": self.fingerprint.capture(
                 active_agents=sorted(self.agents.keys()),
@@ -1855,6 +1983,7 @@ class DecisionEngine:
         raw_total = sum(raw_weights.values())
 
         # ── Pass 2: apply concentration cap + accumulate scores ──
+        agent_contributions = []
         for name, output in agent_outputs.items():
             # Clean up fallback bonus (consumed in pass 1 check; pop here)
             output.details.pop("_oi_fallback_weight_bonus", None)
@@ -1877,20 +2006,25 @@ class DecisionEngine:
             total_weight_used += weight
 
             conf = output.get_clamped_confidence()
+            
+            is_squelched = (name in agent_pfs and agent_pfs[name] < 1.0 and raw_weights[name] == 0)
 
             if output.direction == Direction.BULLISH:
                 buy_score += weight * conf
                 directional_weight += weight
+                agent_contributions.append({"name": name, "dir": "BUY", "contrib": weight * conf, "squelched": is_squelched})
             elif output.direction == Direction.BEARISH:
                 sell_score += weight * conf
                 directional_weight += weight
+                agent_contributions.append({"name": name, "dir": "SELL", "contrib": weight * conf, "squelched": is_squelched})
             else:
                 neutral_weight += weight
+                agent_contributions.append({"name": name, "dir": "NEUTRAL", "contrib": weight * conf, "squelched": is_squelched})
             # Neutral/NO_TRADE adds 0 to score but counts toward total_weight
             # which naturally dilutes the final probability (as it should).
 
             # Log if a squelched agent is encountered during pass 2
-            if name in agent_pfs and agent_pfs[name] < 1.0 and raw_weights[name] == 0:
+            if is_squelched:
                 self.logger.warning(f"🔇 Agent {name} squelched. PF < 1.0 ({agent_pfs[name]:.2f})")
 
         if total_weight_used == 0:
@@ -1898,6 +2032,46 @@ class DecisionEngine:
             
         raw_buy = buy_score / total_weight_used
         raw_sell = sell_score / total_weight_used
+        
+        # ── Log Contribution Breakdown ──
+        dominant_dir = "BUY" if raw_buy >= raw_sell else "SELL"
+        dominant_score = raw_buy if dominant_dir == "BUY" else raw_sell
+        
+        pos_lines = []
+        neg_lines = []
+        pos_total = 0.0
+        neg_total = 0.0
+        
+        for ac in agent_contributions:
+            if ac["squelched"]:
+                continue
+            
+            # True impact on the final raw score
+            impact = (ac["contrib"] / total_weight_used) if total_weight_used > 0 else 0
+            
+            if ac["dir"] == "NEUTRAL" or impact == 0:
+                continue
+                
+            if ac["dir"] == dominant_dir:
+                pos_lines.append(f"{ac['name'].ljust(18)} +{impact:.3f}")
+                pos_total += impact
+            else:
+                neg_lines.append(f"{ac['name'].ljust(18)} -{impact:.3f}")
+                neg_total -= impact
+                
+        pos_str = "\n".join(pos_lines) if pos_lines else "None"
+        neg_str = "\n".join(neg_lines) if neg_lines else "None"
+        
+        self.logger.info(
+            f"📊 [{dominant_dir} Score Construction]\n\n"
+            f"Positive Contributions\n----------------------\n{pos_str}\n\n"
+            f"Negative Contributions\n----------------------\n{neg_str}\n\n"
+            f"Contribution Summary\n----------------------\n"
+            f"Positive Total : +{pos_total:.3f}\n"
+            f"Negative Total : {neg_total:.3f}\n"
+            f"Net Directional : {pos_total + neg_total:+.3f}\n\n"
+            f"Net {dominant_dir} Raw = {dominant_score:.4f}"
+        )
         
         adj_buy = raw_buy * regime_penalty
         adj_sell = raw_sell * regime_penalty
@@ -1928,19 +2102,83 @@ class DecisionEngine:
         final_reasons = reasons + blockers
 
         sig_id = getattr(self, "current_signal_id", None) or str(uuid.uuid4())[:8]
+        reason_str = final_reasons[0] if final_reasons else 'Unknown'
+        
+        # --- Trace Injection ---
+        if hasattr(self, "current_trace") and self.current_trace and not self.current_trace._is_finalized:
+            stage_name = "Agents"
+            if "Phase 1" in reason_str or "Phase 2" in reason_str or "Bad Regime" in reason_str or "Opening" in reason_str: 
+                stage_name = "Agents"
+            elif "Market Acceptance Validator" in reason_str: 
+                stage_name = "MAV"
+            elif "Phase 4" in reason_str or "Low Confidence" in reason_str: 
+                stage_name = "Signal Integrity"
+            elif "EV " in reason_str or "Risk" in reason_str or "Drawdown" in reason_str or "Execution Halt" in reason_str or "Phase 5" in reason_str: 
+                stage_name = "Risk Budget"
+            elif "Not enough agreeing" in reason_str or "Momentum Alignment" in reason_str or "Core Agents Neutral" in reason_str: 
+                stage_name = "Candidate Detection"
+                
+            pipeline_stages = ["Agents", "Candidate Detection", "MAV", "Signal Integrity", "Risk Budget"]
+            try:
+                fail_idx = pipeline_stages.index(stage_name)
+            except ValueError:
+                fail_idx = 0
+                
+            for i in range(fail_idx):
+                st_name = pipeline_stages[i]
+                if st_name == "MAV" and (not hasattr(self, 'experiment_config') or not self.experiment_config.enable_mav):
+                    st_act = StageAction.SKIPPED
+                else:
+                    st_act = StageAction.PASSED
+                    
+                self.current_trace.add_stage(
+                    stage_name=st_name,
+                    entered_at=self.current_trace.timestamp,
+                    exited_at=self.current_trace.timestamp,
+                    action=st_act
+                )
+            # MAV Waiting state is not an ERROR/REJECTED for the candidate, it's WAITING.
+            action = StageAction.WAITING if "waiting" in reason_str.lower() else StageAction.REJECTED
+            
+            self.current_trace.add_stage(
+                stage_name=stage_name,
+                entered_at=self.current_trace.timestamp,
+                exited_at=datetime.now(),
+                action=action,
+                reason=reason_str
+            )
+        # -----------------------
         
         track = getattr(self, "_sim_track_data", {})
         if track:
-            reason_str = final_reasons[0] if final_reasons else 'Unknown'
-            self.logger.info(
-                f"[SIMULATION_TRACKING] TradeTaken=FALSE "
-                f"RawBuy={track.get('raw_buy', 0):.4f} RawSell={track.get('raw_sell', 0):.4f} "
-                f"GapMult={track.get('gap_mult', 1):.4f} "
-                f"AdjBuy={track.get('adj_buy', 0):.4f} AdjSell={track.get('adj_sell', 0):.4f} "
-                f"SigmoidBuy={track.get('sig_buy', 0):.4f} SigmoidSell={track.get('sig_sell', 0):.4f} "
-                f"Threshold={getattr(self, '_last_adaptive_threshold', 0):.4f} "
-                f"RejectReason='{reason_str}'"
+            raw_buy = track.get('raw_buy', 0)
+            raw_sell = track.get('raw_sell', 0)
+            sig_buy = track.get('sig_buy', 0)
+            sig_sell = track.get('sig_sell', 0)
+            threshold = getattr(self, '_last_adaptive_threshold', 0)
+            dominant = "BUY" if raw_buy >= raw_sell else "SELL"
+            regime = self._classify_market(snapshot, outputs)
+            mpm_str = getattr(self, '_current_mpm', MarketParticipationMode.BALANCED).value if hasattr(self, '_current_mpm') else "UNKNOWN"
+            
+            pipeline_log = (
+                f"═══════════════════════════════════════════════\n"
+                f"DECISION PIPELINE\n"
+                f"═══════════════════════════════════════════════\n\n"
+                f"Market Regime        : {regime.name if hasattr(regime, 'name') else regime}\n"
+                f"MPM                  : {mpm_str}\n\n"
+                f"BUY Raw              : {raw_buy:.4f}\n"
+                f"SELL Raw             : {raw_sell:.4f}\n\n"
+                f"BUY Sigmoid          : {sig_buy:.4f}\n"
+                f"SELL Sigmoid         : {sig_sell:.4f}\n\n"
+                f"Integrity Threshold  : {threshold:.3f}\n\n"
+                f"Dominant             : {dominant}\n\n"
+                f"Decision             : NO TRADE\n\n"
+                f"Reject Reason\n"
+                f"--------------\n"
+                f"{reason_str}\n\n"
+                f"═══════════════════════════════════════════════"
             )
+            self.logger.info(pipeline_log)
         signal = Signal(
             id=sig_id,
             timestamp=datetime.now(),
@@ -1957,7 +2195,8 @@ class DecisionEngine:
                 for name, out in outputs.items()
             },
             metadata={
-                "decision_path": getattr(self, "_last_decision_path", [])
+                "decision_path": getattr(self, "_last_decision_path", []),
+                "sim_track_data": track
             }
         )
         self.logger.signal(f"⚪ NO TRADE | {reasons[0]}")
@@ -2093,6 +2332,11 @@ class DecisionEngine:
         else:
             top_drag_agent = "unknown"
             top_drag_effect = 0.0
+            
+        if hasattr(self, "_sim_track_data"):
+            self._sim_track_data["top_drag_agent"] = top_drag_agent
+            self._sim_track_data["top_drag_effect"] = round(top_drag_effect, 4)
+            self._sim_track_data["shortfall"] = round(threshold - dominant, 4)
 
         # ── 2. Regime Context (for regime-conditioned calibration) ─────────────
         # Captured at write-time — cannot be reconstructed later.

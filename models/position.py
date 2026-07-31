@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, Optional
+from models.lifecycle import TradeLifecycle
 
 class TradeHealth(Enum):
     HEALTHY = "HEALTHY"
@@ -33,13 +34,13 @@ class PositionAction:
     reason: str = ""
 
 @dataclass
-class PositionState:
+class PositionState(TradeLifecycle):
     """The canonical object representing a live trade."""
-    position_id: str
-    entry_time: datetime
-    signal_type: str
-    direction: str
-    entry_price: float
+    position_id: str = ""
+    entry_time: Optional[datetime] = None
+    signal_type: str = ""
+    direction: str = ""
+    entry_price: float = 0.0
     
     symbol: str = "NIFTY"
     security_id: str = ""

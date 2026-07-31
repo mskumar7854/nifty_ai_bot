@@ -8,6 +8,10 @@ from models import Signal, MarketSnapshot, SignalType
 from core.decision_engine import DecisionEngine
 from core.master_decision_engine import MasterDecisionEngine
 from core.trade_filter import TradeFilter
+from core.confidence_calibrator import ConfidenceCalibrator
+from core.expected_value_engine import ExpectedValueEngine
+from core.opportunity_ranker import OpportunityRanker
+from core.trend_structure_tracker import TrendStructureTracker
 from options_analyzer import OptionsAnalyzer
 from utils.logger import get_logger
 
@@ -15,8 +19,8 @@ logger = get_logger("decision_pipeline")
 
 class DecisionPipeline:
     """
-    Orchestrates the signal generation and validation process:
-    Snapshot -> Agents -> Decision Engine -> Trade Filter -> Master Decision -> Options Filter -> Signal
+    Orchestrates the signal generation, calibration, gating, and validation process (v2.1):
+    Snapshot -> Agents -> Calibration -> EV Engine -> Trade Filter -> Master Gate -> Options -> OMS
     """
     def __init__(self, ctx):
         self.ctx = ctx
@@ -30,10 +34,19 @@ class DecisionPipeline:
             exit_engine=getattr(_sys, "exit_engine", None),
         )
         self.trade_filter = TradeFilter(self.settings)
+        self.calibrator = ConfidenceCalibrator()
+        self.ev_engine = ExpectedValueEngine(min_ev_r=0.50, min_ev_score=60.0)
+        self.opportunity_ranker = OpportunityRanker()
+        self.trend_tracker = TrendStructureTracker(max_reentry_per_trend=2)
+        
+        # Link trend_tracker to trade_filter
+        self.trade_filter.trend_tracker = self.trend_tracker
+
         self.options_analyzer = OptionsAnalyzer(mode=self.settings.system_mode.mode)
         
         self.trade_sequence = 0
         self.no_trade_streak = 0
+
         
     def _fetch_options_sentiment(self, price_trend: str) -> Dict[str, Any]:
         """Wrapper for options analyzer fetch"""
@@ -90,6 +103,127 @@ class DecisionPipeline:
             self.ctx.telemetry.metrics_logger.log_cycle(summary)
             self.ctx.telemetry.metrics_logger.log_execution_truth(summary)
 
+
+    def _record_v2_snapshot(self, signal, snapshot, outputs=None, filter_result=None, final_decision="REJECTED", rejection_reason="", timeline=None):
+        if signal.signal_type == SignalType.NO_TRADE:
+            return
+            
+        try:
+            from models.snapshot_v2 import DecisionSnapshotV2, SnapshotMetadata, AgentOpinion, GateResult, ReplayStatus
+            from core.snapshot_v2 import persist_snapshot_v2
+            import datetime
+            import uuid
+            
+            mode_str = self.settings.system_mode.mode if hasattr(self.settings.system_mode, "mode") else str(self.settings.system_mode)
+            
+            # --- Lineage ---
+            trade_id = None
+            shadow_trade_id = None
+            
+            if final_decision == "EXECUTE":
+                trade_id = signal.id
+            
+            # --- Shadow Candidate Policy ---
+            if final_decision == "REJECTED":
+                # Check eligibility
+                conf_valid = getattr(signal, "confidence", 0.0) >= 0.60
+                ev_valid = getattr(signal, "ev_info", {}).get("ev_r", 0.0) > 0
+                
+                # Check gates failed
+                gates_failed = 0
+                if filter_result and hasattr(filter_result, "gate_details"):
+                    gates_failed = sum(1 for g in filter_result.gate_details if not g.get("pass", False))
+                elif filter_result is None and "Master Gate" in rejection_reason:
+                    gates_failed = 1
+                    
+                if conf_valid and ev_valid and gates_failed == 1:
+                    shadow_trade_id = f"shadow-{signal.id}"
+            
+            metadata = SnapshotMetadata(
+                snapshot_id=signal.id,
+                timestamp=datetime.datetime.now().isoformat(),
+                symbol="NIFTY",
+                expiry="UNKNOWN",
+                mode=mode_str,
+                parent_snapshot_id=None,
+                trade_id=trade_id,
+                shadow_trade_id=shadow_trade_id,
+                experiment_id=None,
+                replay_run_id=None
+            )
+            
+            market_json = {
+                "spot_price": getattr(snapshot, "price", 0.0),
+                "vix": getattr(snapshot, "vix", None),
+                "atr": getattr(snapshot, "atr", None),
+            }
+            
+            agents_json = {}
+            if outputs:
+                for name, out in outputs.items():
+                    if isinstance(out, dict):
+                        agents_json[name] = AgentOpinion(signal=out.get("direction", "UNKNOWN"), confidence=out.get("confidence", 0.0), details=out)
+                    elif hasattr(out, "direction"):
+                        agents_json[name] = AgentOpinion(signal=out.direction, confidence=out.confidence, details=getattr(out, "details", {}))
+            
+            conf_json = {
+                "raw": getattr(signal, "confidence", 0.0),
+                "calibrated": signal.metadata.get("calibrated_pwin", getattr(signal, "confidence", 0.0))
+            }
+            
+            confluence_json = {}
+            if getattr(signal, "confluence", None):
+                confluence_json = {
+                    "ratio": signal.confluence.confluence_ratio,
+                    "bullish": signal.confluence.bullish_agents,
+                    "bearish": signal.confluence.bearish_agents
+                }
+                
+            ev_json = getattr(signal, "ev_info", {})
+            
+            gate_results = {}
+            if filter_result and hasattr(filter_result, "gate_details"):
+                for g in filter_result.gate_details:
+                    gate_results[g.get("gate", "Unknown")] = GateResult(
+                        passed=g.get("pass", False),
+                        actual=g.get("score", 0.0),
+                        required=0.0,
+                        detail=g.get("detail", "")
+                    )
+                    
+            decision_json = {
+                "action": final_decision,
+                "reason": rejection_reason
+            }
+            
+            execution_json = {}
+            
+            replay_status = ReplayStatus(
+                deterministic=True,
+                missing_fields=[],
+                fallback_values=[]
+            )
+            
+            snap_v2 = DecisionSnapshotV2(
+                metadata=metadata,
+                market=market_json,
+                agents=agents_json,
+                confidence=conf_json,
+                confluence=confluence_json,
+                expected_value=ev_json,
+                structure=getattr(signal, "structure_info", {}),
+                risk=getattr(signal, "risk_info", {}),
+                gate_results=gate_results,
+                decision=decision_json,
+                execution=execution_json,
+                event_timeline=timeline or {},
+                replay=replay_status,
+                outcome=getattr(signal, "outcome", None)
+            )
+            persist_snapshot_v2(snap_v2)
+        except Exception as e:
+            logger.error(f"Failed to record V2 snapshot: {e}")
+
     def evaluate(self, df: pd.DataFrame, snapshot: MarketSnapshot, cycle_count: int, latencies: dict) -> Tuple[Optional[Signal], dict, float]:
         """
         Runs the decision flow.
@@ -98,16 +232,44 @@ class DecisionPipeline:
         """
         t_decision = time.perf_counter()
         
+        import datetime
+        timeline = {"Market Snapshot Created": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]}
+        
         # 1. Generate Signal
         signal = self.decision_engine.process(df, snapshot)
+        timeline["Agents Completed"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         latencies["decision_ms"] = int((time.perf_counter() - t_decision) * 1000)
         
         self.trade_sequence += 1
         signal.id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{self.trade_sequence:03d}-{uuid.uuid4().hex[:4].upper()}"
         signal.status = "PENDING"
 
+        # ── v2.1 Calibration & EV Engine ──
+        if signal.signal_type != SignalType.NO_TRADE:
+            regime_name = signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
+            calibrated_pwin, calib_telemetry = self.calibrator.calibrate(signal.confidence, regime_name)
+            timeline["Confidence Calibrated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            # Add telemetry to signal metadata
+            if not hasattr(signal, "metadata") or signal.metadata is None:
+                signal.metadata = {}
+            signal.metadata["calibration_telemetry"] = calib_telemetry
+            rr = getattr(signal, "risk_reward_ratio", 2.0)
+            spread_pct = getattr(snapshot, "spread_pct", 0.8)
+            
+            ev_result = self.ev_engine.evaluate(
+                calibrated_pwin=calibrated_pwin,
+                risk_reward_ratio=rr,
+                spread_pct=spread_pct
+            )
+            timeline["EV Calculated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            signal.ev_info = ev_result
+            signal.metadata["calibrated_pwin"] = calibrated_pwin
+            signal.metadata["ev_r"] = ev_result["ev_r"]
+            signal.metadata["ev_score"] = ev_result["normalized_score"]
+
         if hasattr(self.ctx.telemetry, "observer") and signal.signal_type != SignalType.NO_TRADE:
             self.ctx.telemetry.observer.on_signal()
+
 
         # Handle NO_TRADE
         if signal.signal_type == SignalType.NO_TRADE:
@@ -140,6 +302,7 @@ class DecisionPipeline:
                 signal.execution_status = "rejected"
                 signal.metadata["rejection_status"] = "Blocked by Simulation Guard"
                 signal.metadata["rejection_reason"] = "Max Open Positions"
+                self._record_v2_snapshot(signal, snapshot, None, None, "REJECTED", "Max Open Positions", timeline)
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
                 return None, {}, latencies["decision_ms"]
@@ -163,6 +326,8 @@ class DecisionPipeline:
                 }
             },
         )
+        timeline["Master Gate Evaluated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
         if not master_result.approved:
             if cycle_count % 30 == 0:
                 logger.warning(f"🛡️ Master Gate blocked: {master_result.reason}")
@@ -173,6 +338,7 @@ class DecisionPipeline:
             signal.metadata["rejection_reason"] = master_result.reason
             if hasattr(self.ctx.system, "_update_dashboard"):
                 self.ctx.system._update_dashboard(snapshot, signal)
+            self._record_v2_snapshot(signal, snapshot, None, None, "REJECTED", master_result.reason, timeline)
             self._log_canonical_truth(signal, cycle_count, False, master_result.reason, latencies)
             return None, {}, latencies["decision_ms"]
 
@@ -238,6 +404,7 @@ class DecisionPipeline:
             cost_info=_cost_info, position_manager_status=pm_status,
             confluence_score=(signal.confluence.confluence_ratio * 100 if signal.confluence else 0)
         )
+        timeline["TradeFilter Decision"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
         if self.ctx.simulation:
             self.ctx.simulation.record_signal(passed=filter_result.passed)
@@ -253,24 +420,7 @@ class DecisionPipeline:
             signal.metadata["rejection_status"] = "Blocked by Signal Integrity" if "integrity" in rej_reason.lower() else "Blocked by 10-Gate Filter"
             signal.metadata["rejection_reason"] = rej_reason
             
-            # Shadow Journal
-            try:
-                from core.snapshot import build_snapshot, persist_snapshot
-                _gap_mgr = getattr(self.decision_engine, "gap_penalty_manager", None)
-                _gap_status = _gap_mgr.get_status() if _gap_mgr else {}
-                rej_snap = build_snapshot(
-                    signal=signal, snapshot=snapshot, filter_result=filter_result,
-                    agent_outputs=outputs, gate_results={}, final_decision="REJECTED",
-                    rejection_reason=rej_reason, gap_context={
-                        "gap_penalty_active": _gap_mgr.is_active() if _gap_mgr else False,
-                        "gap_penalty_multiplier": _gap_status.get("multiplier", 1.0),
-                        "gap_severity":  _gap_status.get("severity", "NONE"),
-                        "gap_points":    _gap_status.get("gap_points", 0.0),
-                    }
-                )
-                persist_snapshot(rej_snap)
-            except Exception:
-                pass
+            self._record_v2_snapshot(signal, snapshot, outputs, filter_result, "REJECTED", rej_reason, timeline)
 
             if hasattr(self.ctx.system, "_update_dashboard"):
                 self.ctx.system._update_dashboard(snapshot, signal)
@@ -372,5 +522,13 @@ class DecisionPipeline:
 
         log_entry["spot_entry_price"] = snapshot.price
         log_entry["trade_id"] = signal.id
+
+        # Record trade entry in TrendStructureTracker (v2.1)
+        sig_dir_str = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
+        self.trend_tracker.record_trade_execution(sig_dir_str, snapshot.price)
+        
+        timeline["OMS Intent Generated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._record_v2_snapshot(signal, snapshot, outputs, filter_result, "EXECUTE", "Passed all gates", timeline)
         
         return signal, log_entry, latencies["decision_ms"]
+

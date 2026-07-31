@@ -115,17 +115,35 @@ class RiskManager:
     def can_take_new_trade(self, signal) -> Tuple[bool, str]:
         """
         The final 'Go/No-Go' check before a signal is processed.
+        Enforces Daily Risk Unit Budget and Portfolio Exposure Limits (v2.1).
         """
         # 1. Check Global Kill Switch (Daily Loss)
         if not self.trading_enabled:
-            return False, f"Risk Halted: Daily loss limit (₹{self.max_daily_loss:,.0f}) has been breached."
+            return False, f"REJECTED_RISK_BUDGET_EXHAUSTED: Daily loss limit (₹{self.max_daily_loss:,.0f}) has been breached."
+
+        # Check running daily PnL against max daily loss
+        limit = -abs(self.max_daily_loss)
+        if self.daily_pnl <= limit:
+            self.trading_enabled = False
+            self._persist_state_atomic()
+            return False, f"REJECTED_RISK_BUDGET_EXHAUSTED: Running PnL (₹{self.daily_pnl:,.0f}) <= limit (₹{limit:,.0f})"
             
         # 2. Check Timing (Weekend/Closing Gap)
         time_ok, time_msg = self.is_within_trading_hours()
         if not time_ok:
             return False, time_msg
+
+        # 3. Portfolio Greeks & Directional Concentration Check (v2.1)
+        sig_dir = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
+        pos_meta = getattr(signal, "position_meta", {}) or {}
+        active_same_dir_count = pos_meta.get("active_same_direction_positions", 0)
+        
+        # Limit active open positions in identical direction to max 2 concurrent positions
+        if active_same_dir_count >= 2:
+            return False, f"REJECTED_PORTFOLIO_EXPOSURE: Max 2 active {sig_dir} positions allowed simultaneously."
             
         return True, "OK"
+
     
     def get_status_report(self) -> dict:
         """Helper for the /status command."""
