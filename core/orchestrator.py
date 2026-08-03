@@ -158,19 +158,37 @@ class TradingOrchestrator:
                         if self.execution_pipeline:
                             await self.execution_pipeline.execute(pending, snapshot, self.ctx.is_simulation, mode="confirmed")
                 
-                # New decisions
-                if hasattr(self.ctx.system, "decision_engine"):
-                    signal = self.ctx.system.decision_engine.process(df, snapshot)
-                    if signal and signal.signal_type != SignalType.NO_TRADE:
-                        self.ctx.system._last_decision_ts = time.time()
-                        # Master gate approval
-                        pre_check = self.ctx.system.master.approve(
-                            signal.signal_type.value,
-                            context={"posture": runtime_state.posture, "signal_obj": signal},
-                        )
-                        if pre_check.approved and self.execution_pipeline:
-                            # 5. Execution Pipeline (Entry)
-                            await self.execution_pipeline.execute(signal, snapshot, self.ctx.is_simulation, mode="new")
+                # New decisions via DecisionPipeline
+                latencies = {"fetch_ms": int((time.perf_counter() - start_time) * 1000)}
+                result = self.decision_pipeline.evaluate(df, snapshot, self.cycle_count, latencies)
+                
+                if result.signal:
+                    gate_logs = []
+                    for g in result.gate_results:
+                        gate_logs.append(f"{'✓' if g.passed else '✗'} {g.name}")
+                        if not g.passed and g.reason:
+                            gate_logs.append(f"  Reason: {g.reason}")
+                            
+                    base_threshold = result.signal.metadata.get("base_threshold", 47.0)
+                    adaptive_threshold = getattr(result.signal, "adaptive_threshold", None) or result.signal.metadata.get("adaptive_threshold", base_threshold)
+                    threshold_str = f"{adaptive_threshold:.1f}%"
+                    if adaptive_threshold != base_threshold:
+                        threshold_str += " (Adaptive)"
+                            
+                    logger.info(
+                        f"\n{'═'*30}\n\n"
+                        f"Signal Generated\n"
+                        f"Confidence : {result.confidence:.1f}%\n"
+                        f"Threshold  : {threshold_str}\n\n"
+                        f"Decision Pipeline\n\n"
+                        + "\n".join(gate_logs) + "\n\n"
+                        f"{'APPROVED' if result.approved else 'REJECTED'}\n\n"
+                        f"{'═'*30}"
+                    )
+                    
+                if result.approved and self.execution_pipeline:
+                    self.ctx.system._last_decision_ts = time.time()
+                    await self.execution_pipeline.execute(result.signal, snapshot, self.ctx.is_simulation, mode="new")
 
             # 6. Telemetry Pipeline — push full status to dashboard
             if self.telemetry and hasattr(self.telemetry, "dashboard") and self.telemetry.dashboard:

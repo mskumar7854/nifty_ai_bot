@@ -1,10 +1,27 @@
 import time
 import uuid
 from datetime import datetime
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 import pandas as pd
+from dataclasses import dataclass, field
 
 from models import Signal, MarketSnapshot, SignalType
+
+@dataclass
+class GateResult:
+    name: str
+    passed: bool
+    reason: Optional[str] = None
+
+@dataclass
+class DecisionPipelineResult:
+    approved: bool
+    signal: Optional[Signal]
+    confidence: float
+    gate_results: List[GateResult] = field(default_factory=list)
+    rejection_reason: Optional[str] = None
+    telemetry: Dict = field(default_factory=dict)
+    latency_ms: float = 0.0
 from core.decision_engine import DecisionEngine
 from core.master_decision_engine import MasterDecisionEngine
 from core.trade_filter import TradeFilter
@@ -224,13 +241,13 @@ class DecisionPipeline:
         except Exception as e:
             logger.error(f"Failed to record V2 snapshot: {e}")
 
-    def evaluate(self, df: pd.DataFrame, snapshot: MarketSnapshot, cycle_count: int, latencies: dict) -> Tuple[Optional[Signal], dict, float]:
+    def evaluate(self, df: pd.DataFrame, snapshot: MarketSnapshot, cycle_count: int, latencies: dict) -> DecisionPipelineResult:
         """
         Runs the decision flow.
-        Returns (approved_signal, log_entry, execution_ms).
-        If rejected, approved_signal is None.
+        Returns a structured DecisionPipelineResult containing all gate decisions.
         """
         t_decision = time.perf_counter()
+        gate_results = []
         
         import datetime
         timeline = {"Market Snapshot Created": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]}
@@ -287,7 +304,11 @@ class DecisionPipeline:
                     f"⏳ NO-TRADE STREAK: {self.no_trade_streak} consecutive cycles with no signal. "
                     f"Last reason: [{reason}]."
                 )
-            return None, {}, latencies["decision_ms"]
+            return DecisionPipelineResult(
+                approved=False, signal=None, confidence=0.0, 
+                gate_results=gate_results, rejection_reason=reason,
+                telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+            )
 
         self.no_trade_streak = 0
 
@@ -296,6 +317,7 @@ class DecisionPipeline:
             active_sim_trades = len(self.ctx.simulation.open_trades)
             max_pos = self.settings.position.max_open_positions
             if active_sim_trades >= max_pos:
+                gate_results.append(GateResult("Simulation Guard", False, "Max Open Positions"))
                 if cycle_count % 30 == 0:
                     logger.warning(f"🛡️ Simulation Guard: Max open positions reached ({active_sim_trades}/{max_pos})")
                 self.ctx.simulation.record_signal(passed=False)
@@ -305,7 +327,13 @@ class DecisionPipeline:
                 self._record_v2_snapshot(signal, snapshot, None, None, "REJECTED", "Max Open Positions", timeline)
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
-                return None, {}, latencies["decision_ms"]
+                return DecisionPipelineResult(
+                    approved=False, signal=signal, confidence=signal.confidence,
+                    gate_results=gate_results, rejection_reason="Max Open Positions",
+                    telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+                )
+            else:
+                gate_results.append(GateResult("Simulation Guard", True))
 
         # 2. Master Gate
         exit_engine = getattr(self.ctx.system, "exit_engine", None)
@@ -328,6 +356,8 @@ class DecisionPipeline:
         )
         timeline["Master Gate Evaluated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
+        gate_results.append(GateResult("Master Gate", master_result.approved, getattr(master_result, "reason", None) if not master_result.approved else None))
+        
         if not master_result.approved:
             if cycle_count % 30 == 0:
                 logger.warning(f"🛡️ Master Gate blocked: {master_result.reason}")
@@ -340,7 +370,11 @@ class DecisionPipeline:
                 self.ctx.system._update_dashboard(snapshot, signal)
             self._record_v2_snapshot(signal, snapshot, None, None, "REJECTED", master_result.reason, timeline)
             self._log_canonical_truth(signal, cycle_count, False, master_result.reason, latencies)
-            return None, {}, latencies["decision_ms"]
+            return DecisionPipelineResult(
+                approved=False, signal=signal, confidence=signal.confidence,
+                gate_results=gate_results, rejection_reason=master_result.reason,
+                telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+            )
 
         # 3. 10-Gate Filter
         outputs = {n: a.last_output for n, a in self.decision_engine.agents.items() if hasattr(a, 'last_output') and a.last_output is not None}
@@ -406,11 +440,13 @@ class DecisionPipeline:
         )
         timeline["TradeFilter Decision"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
+        rej_reason = filter_result.kill_reason or '10-Gate Filter' if not filter_result.passed else None
+        gate_results.append(GateResult("TradeFilter", filter_result.passed, rej_reason))
+
         if self.ctx.simulation:
             self.ctx.simulation.record_signal(passed=filter_result.passed)
 
         if not filter_result.passed:
-            rej_reason = filter_result.kill_reason or '10-Gate Filter'
             log_entry["risk_reason"] = f"Filter Rejected: {rej_reason}"
             if hasattr(self.ctx.telemetry, "perf_logger"):
                 self.ctx.telemetry.perf_logger.log_signal(log_entry)
@@ -424,13 +460,20 @@ class DecisionPipeline:
 
             if hasattr(self.ctx.system, "_update_dashboard"):
                 self.ctx.system._update_dashboard(snapshot, signal)
-            return None, {}, latencies["decision_ms"]
+            return DecisionPipelineResult(
+                approved=False, signal=signal, confidence=signal.confidence,
+                gate_results=gate_results, rejection_reason=rej_reason,
+                telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+            )
 
         # 4. Regime Policy
         regime_adapter = getattr(self.ctx.system, "regime_adapter", None)
         if regime_adapter:
             signal = regime_adapter.apply_policy(signal)
-            if signal.execution_policy and signal.execution_policy.suppressed:
+            passed_regime = not (signal.execution_policy and signal.execution_policy.suppressed)
+            gate_results.append(GateResult("Regime Policy", passed_regime, getattr(signal.execution_policy, "reason", None) if not passed_regime else None))
+            
+            if not passed_regime:
                 logger.warning(f"🛡️ Regime Adapter blocked: {signal.execution_policy.reason}")
                 log_entry["filter_passed"] = False
                 log_entry["risk_reason"] = f"Regime Block: {signal.execution_policy.reason}"
@@ -446,7 +489,11 @@ class DecisionPipeline:
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
                 self._log_canonical_truth(signal, cycle_count, False, f"RegimeAdapter: {signal.execution_policy.reason}", latencies)
-                return None, {}, latencies["decision_ms"]
+                return DecisionPipelineResult(
+                    approved=False, signal=signal, confidence=signal.confidence,
+                    gate_results=gate_results, rejection_reason=signal.execution_policy.reason,
+                    telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+                )
 
         logger.info(f"🟢 Signal Engine CONFIRMED | Grade: {filter_result.grade} | Score: {filter_result.final_score:.0f} | {signal.signal_type.value}")
 
@@ -483,6 +530,7 @@ class DecisionPipeline:
 
         if options.get("available", False):
             if options["max_pain_distance"] < OptionsAnalyzer.MAX_PAIN_MIN_DISTANCE:
+                gate_results.append(GateResult("OptionsAnalyzer", False, "Near max-pain"))
                 logger.warning(f"⚠️ [OPTIONS] Near max-pain ({options['max_pain_distance']:.0f} pts) — trade skipped")
                 log_entry["filter_passed"] = False
                 log_entry["risk_reason"] = "max_pain_distance < 50"
@@ -496,12 +544,18 @@ class DecisionPipeline:
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
                 self._log_canonical_truth(signal, cycle_count, False, "Options: Near Max-Pain", latencies)
-                return None, {}, latencies["decision_ms"]
+                return DecisionPipelineResult(
+                    approved=False, signal=signal, confidence=signal.confidence,
+                    gate_results=gate_results, rejection_reason="Near max-pain",
+                    telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+                )
 
             if options_score >= 2:
+                gate_results.append(GateResult("OptionsAnalyzer", True))
                 log_entry["filter_passed"] = True
                 logger.info(f"✅ [OPTIONS] Passed — Score: {options_score} | PCR: {options.get('pcr', 0):.3f} | MaxPain: {options['max_pain_distance']:.0f} pts away")
             else:
+                gate_results.append(GateResult("OptionsAnalyzer", False, f"Low options score ({options_score})"))
                 logger.warning(f"❌ [OPTIONS] Score too low ({options_score}) — Signal: {signal.signal_type.value} | Sentiment: {options['sentiment']}")
                 log_entry["filter_passed"] = False
                 log_entry["risk_reason"] = f"Low options score ({options_score})"
@@ -515,7 +569,11 @@ class DecisionPipeline:
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
                 self._log_canonical_truth(signal, cycle_count, False, f"Options: Low score ({options_score})", latencies)
-                return None, {}, latencies["decision_ms"]
+                return DecisionPipelineResult(
+                    approved=False, signal=signal, confidence=signal.confidence,
+                    gate_results=gate_results, rejection_reason=f"Low options score ({options_score})",
+                    telemetry={}, latency_ms=latencies.get("decision_ms", 0.0)
+                )
         else:
             logger.debug("[OPTIONS] Data unavailable — skipping hard filter this cycle")
             log_entry["filter_passed"] = True
@@ -530,5 +588,9 @@ class DecisionPipeline:
         timeline["OMS Intent Generated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self._record_v2_snapshot(signal, snapshot, outputs, filter_result, "EXECUTE", "Passed all gates", timeline)
         
-        return signal, log_entry, latencies["decision_ms"]
+        return DecisionPipelineResult(
+            approved=True, signal=signal, confidence=signal.confidence,
+            gate_results=gate_results, telemetry=log_entry,
+            latency_ms=latencies.get("decision_ms", 0.0)
+        )
 

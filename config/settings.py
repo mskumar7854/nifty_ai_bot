@@ -415,20 +415,52 @@ class SessionStrategyConfig:
                 "reason": "Scanning for power hour setup",
             },
             "power_hour": {
-                "start": "14:15", "end": "15:10",
+                "start": "14:15", "end": "15:20",
                 "trade": True,
                 "max_trades": 1,
                 "strategy": "directional_momentum",
                 "min_confidence": 78,
                 "reason": "Institutional activity — 1 quality trade",
             },
-            "closing_zone": {
-                "start": "15:10", "end": "15:30",
+            "exit_window": {
+                "start": "15:20", "end": "15:40",
                 "trade": False,
-                "reason": "EXIT ONLY — close all positions",
+                "reason": "EXIT ONLY — flatten open positions before broker square-off",
             },
         }
     )
+
+
+# ══════════════════════════════════════════
+# MARKET CALENDAR & SESSION POLICY DATACLASSES
+# ══════════════════════════════════════════
+
+@dataclass
+class MarketCalendarConfig:
+    timezone: str = "Asia/Kolkata"
+    market_open: str = "09:15"
+    equity_close: str = "15:30"
+    fo_close: str = "15:40"
+    holidays: list = field(default_factory=list)
+    special_sessions: list = field(default_factory=list)
+
+
+@dataclass
+class MarketSessionConfig:
+    equity_close: str = "15:30"
+    fo_close: str = "15:40"
+    post_market_end: str = "16:00"
+
+
+@dataclass
+class BrokerPolicyConfig:
+    intraday_squareoff: str = "15:25"
+
+
+@dataclass
+class TradingPolicyConfig:
+    last_entry: str = "15:20"
+    force_exit: str = "15:24"
 
 
 # ══════════════════════════════════════════
@@ -882,10 +914,19 @@ class Settings:
         self.entry_timeframe = os.getenv("ENTRY_TIMEFRAME", "1min")
         self.trend_timeframe = os.getenv("TREND_TIMEFRAME", "5min")
 
+        # ── ⚓ MARKET CALENDAR & SESSION POLICIES (v5.0 / 3 Aug 2026 Sync) ──
+        self.market_calendar = MarketCalendarConfig()
+        self.market_session = MarketSessionConfig()
+        self.broker_policy = BrokerPolicyConfig()
+        self.trading_policy = TradingPolicyConfig(
+            last_entry=os.getenv("DAILY_CUTOFF_TIME", "15:20"),
+            force_exit=os.getenv("FORCE_EXIT_TIME", "15:24"),
+        )
+
         # ── ⚓ PRODUCTION PROTOCOL SYNC (v4.6.1) ──
         self.symbol = os.getenv("SYMBOL", "NIFTY")
         self.friday_cutoff = os.getenv("FRIDAY_CUTOFF_TIME", "15:10")
-        self.daily_cutoff = os.getenv("DAILY_CUTOFF_TIME", "15:20")
+        self.daily_cutoff = self.trading_policy.last_entry
         
         # ── Risk Override ──
         max_daily_loss = float(os.getenv("MAX_DAILY_LOSS", -2000))

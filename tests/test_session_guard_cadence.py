@@ -177,3 +177,69 @@ def test_simulated_trade_handles_string_session_phase_and_regime():
     assert trade is not None
     assert trade.regime == "TRENDING_DOWN"
 
+
+def test_boundary_session_timings_3aug2026():
+    """
+    Explicit boundary tests for August 3, 2026 exchange timing changes:
+      - 15:19:59 IST: Entry Allowed, POWER_HOUR
+      - 15:20:00 IST: Entry Rejected, EXIT_WINDOW
+      - 15:23:59 IST: No Force Exit
+      - 15:24:00 IST: Force Exit Triggered
+      - 15:39:59 IST: EXIT_WINDOW (Market open/monitoring)
+      - 15:40:00 IST: POST_MARKET
+      - 16:00:00 IST: CLOSED
+    """
+    orchestrator = ExchangeSessionOrchestrator(_suppress_logs=True)
+    today = datetime.now().date()
+
+    # 1. 15:19:59 IST
+    dt_151959 = datetime.combine(today, dtime(15, 19, 59))
+    assert orchestrator._compute_state_for_time(dt_151959.time()) == MarketSessionState.POWER_HOUR
+    assert orchestrator.is_entry_allowed(dt_151959) is True
+    assert orchestrator.should_force_exit(dt_151959) is False
+
+    # 2. 15:20:00 IST (Entry Cutoff)
+    dt_152000 = datetime.combine(today, dtime(15, 20, 0))
+    assert orchestrator._compute_state_for_time(dt_152000.time()) == MarketSessionState.EXIT_WINDOW
+    assert orchestrator.is_entry_allowed(dt_152000) is False
+    assert orchestrator.should_force_exit(dt_152000) is False
+
+    # 3. 15:23:59 IST (Before Force Exit Buffer)
+    dt_152359 = datetime.combine(today, dtime(15, 23, 59))
+    assert orchestrator._compute_state_for_time(dt_152359.time()) == MarketSessionState.EXIT_WINDOW
+    assert orchestrator.is_entry_allowed(dt_152359) is False
+    assert orchestrator.should_force_exit(dt_152359) is False
+
+    # 4. 15:24:00 IST (Force Exit Active)
+    dt_152400 = datetime.combine(today, dtime(15, 24, 0))
+    assert orchestrator._compute_state_for_time(dt_152400.time()) == MarketSessionState.EXIT_WINDOW
+    assert orchestrator.is_entry_allowed(dt_152400) is False
+    assert orchestrator.should_force_exit(dt_152400) is True
+
+    # 5. 15:39:59 IST (Last second of EXIT_WINDOW / Market Monitoring)
+    dt_153959 = datetime.combine(today, dtime(15, 39, 59))
+    assert orchestrator._compute_state_for_time(dt_153959.time()) == MarketSessionState.EXIT_WINDOW
+    assert orchestrator.is_entry_allowed(dt_153959) is False
+    assert orchestrator.is_post_market(dt_153959) is False
+
+    # 6. 15:40:00 IST (F&O Option Close -> POST_MARKET)
+    dt_154000 = datetime.combine(today, dtime(15, 40, 0))
+    assert orchestrator._compute_state_for_time(dt_154000.time()) == MarketSessionState.POST_MARKET
+    assert orchestrator.is_post_market(dt_154000) is True
+
+    # 7. 16:00:00 IST (POST_MARKET End -> CLOSED)
+    dt_160000 = datetime.combine(today, dtime(16, 0, 0))
+    assert orchestrator._compute_state_for_time(dt_160000.time()) == MarketSessionState.CLOSED
+
+    # 8. Test SessionCapabilities matrix
+    caps_power = orchestrator.get_capabilities(dt_151959)
+    assert caps_power.can_open_positions is True
+    assert caps_power.can_exit_positions is True
+    assert caps_power.can_collect_market_data is True
+
+    caps_exit = orchestrator.get_capabilities(dt_152400)
+    assert caps_exit.can_open_positions is False
+    assert caps_exit.can_exit_positions is True
+    assert caps_exit.can_collect_market_data is True
+
+

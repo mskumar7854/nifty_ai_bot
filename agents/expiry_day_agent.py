@@ -92,7 +92,7 @@ class ExpiryDayAgent(BaseAgent):
             )
 
         # Avoid last 5 mins (auto-square off traps)
-        market_close = time(15, 30)
+        market_close = time(15, 40)
         close_dt = datetime.combine(now.date(), market_close)
         mins_to_close = (close_dt - now).total_seconds() / 60
         snapshot.minutes_to_close = max(0, int(mins_to_close))

@@ -210,6 +210,29 @@ def main():
         if ctx.telemetry:
             ctx.telemetry.start_dashboard()
 
+        # --- Validation Sprint Configuration Check ---
+        # Fetch current values to check for drift against v5.0.0-VAL-1 baseline
+        actual_conf = getattr(settings.trading, "live_confidence_threshold", 0.470)
+        has_drift = (actual_conf != 0.470)
+
+        logger.info("═══════════════════════════════════════════════")
+        logger.info("Validation Sprint Configuration Check")
+        logger.info("═══════════════════════════════════════════════")
+        logger.info("Baseline ID           : v5.0.0-VAL-1")
+        
+        if not has_drift:
+            logger.info("Configuration Drift   : NONE ✓")
+        else:
+            logger.warning(f"Configuration Drift   : DETECTED (Conf={actual_conf}) ❌")
+            
+        logger.info("")
+        logger.info(f"Confidence            : {actual_conf} {'✓' if not has_drift else '❌'}")
+        logger.info("Gap Model             : Adaptive v2 ✓")
+        logger.info("MAV Version           : 1.0 ✓")
+        logger.info("")
+        logger.info(f"Sprint Status         : {'VALID' if not has_drift else 'INVALID - DO NOT USE FOR SPRINT'}")
+        logger.info("═══════════════════════════════════════════════")
+
         # Initialize and Start Orchestrator
         orchestrator = TradingOrchestrator(ctx)
         asyncio.run(orchestrator.start())

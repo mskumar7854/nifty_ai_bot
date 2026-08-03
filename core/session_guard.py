@@ -62,10 +62,11 @@ class MarketSessionState(Enum):
     CLOSED          = auto()   # Weekday nights
     WEEKEND_CLOSED  = auto()   # Saturday/Sunday or detected holidays
     PRE_MARKET      = auto()
-    OPEN_STORM = auto()
+    OPEN_STORM      = auto()
     LIVE_MARKET     = auto()
     LUNCH_DRIFT     = auto()
     POWER_HOUR      = auto()
+    EXIT_WINDOW     = auto()   # 15:20–15:40 — No new trades, exit & flatten only
     POST_MARKET     = auto()
 
 
@@ -83,7 +84,16 @@ class DataHealth(Enum):
     DEAD  = auto()   # last candle age > 300s or no data
 
 
-from dataclasses import dataclass
+@dataclass(frozen=True)
+class SessionCapabilities:
+    """Explicit capability matrix per session state."""
+    can_open_positions: bool
+    can_modify_positions: bool
+    can_exit_positions: bool
+    can_collect_market_data: bool
+    can_generate_signals: bool
+    can_publish_orders: bool
+
 
 @dataclass(frozen=True)
 class RuntimeState:
@@ -93,6 +103,7 @@ class RuntimeState:
     data_health: DataHealth
     poll_interval_s: float
     is_trading_allowed: bool
+    capabilities: SessionCapabilities | None = None
 
 
 # ── Poll intervals (seconds) per session state ────────────────────────────────
@@ -100,10 +111,11 @@ _POLL_INTERVALS = {
     MarketSessionState.CLOSED:           300,   # 5 min — weekday nights
     MarketSessionState.WEEKEND_CLOSED:  1800,   # 30 min — weekends/holidays
     MarketSessionState.PRE_MARKET:        60,   # 1 min
-    MarketSessionState.OPEN_STORM:   15,   # 15 s
+    MarketSessionState.OPEN_STORM:        15,   # 15 s
     MarketSessionState.LIVE_MARKET:        1,   # 1 s
     MarketSessionState.LUNCH_DRIFT:        5,   # 5 s
     MarketSessionState.POWER_HOUR:         1,   # 1 s
+    MarketSessionState.EXIT_WINDOW:        1,   # 1 s — rapid exit monitoring
     MarketSessionState.POST_MARKET:       60,   # 1 min
 }
 
@@ -112,10 +124,11 @@ _SESSION_LABELS = {
     MarketSessionState.CLOSED:          "🔴 MARKET CLOSED — Standby",
     MarketSessionState.WEEKEND_CLOSED:  "🔴 MARKET CLOSED — Weekend/Holiday",
     MarketSessionState.PRE_MARKET:      "🟡 PRE-MARKET — Preparation",
-    MarketSessionState.OPEN_STORM: "🟠 OPENING SESSION — High Volatility Protection",
+    MarketSessionState.OPEN_STORM:      "🟠 OPENING SESSION — High Volatility Protection",
     MarketSessionState.LIVE_MARKET:     "🟢 LIVE MARKET — Active",
     MarketSessionState.LUNCH_DRIFT:     "🟡 LUNCH DRIFT — Reduced Activity",
     MarketSessionState.POWER_HOUR:      "🟢 POWER HOUR — Active",
+    MarketSessionState.EXIT_WINDOW:     "🟠 EXIT WINDOW — Risk Reduction & Force Flattening",
     MarketSessionState.POST_MARKET:     "🔴 POST-MARKET — Standby",
 }
 
@@ -142,11 +155,12 @@ _HOLIDAY_THRESHOLD_S = 3600  # If >1h stale during live hours, assume holiday
 # Lunch confidence penalty (applied by caller via get_confidence_penalty())
 LUNCH_CONFIDENCE_PENALTY = 0.10   # –10%
 
-# ── P0: EOD Flattening Guard ─────────────────────────────────────────────────
-# No new entries after this time.  All open positions must be force-closed by
-# FORCE_EXIT_TIME.  Both values are IST wall-clock (HH, MM).
-EOD_NO_NEW_ENTRY_TIME = dtime(15, 0)   # 15:00 — entry cutoff
-EOD_FORCE_EXIT_TIME   = dtime(15, 20)  # 15:20 — hard force-exit deadline
+# ── P0: Session & Risk Cutoff Guard Defaults (3 Aug 2026 Sync) ───────────────
+# Single source of truth defaults (overridden dynamically via Settings if passed)
+EOD_NO_NEW_ENTRY_TIME = dtime(15, 20)  # 15:20 — entry cutoff
+EOD_FORCE_EXIT_TIME   = dtime(15, 24)  # 15:24 — hard force-exit deadline before broker 15:25 squareoff
+FO_MARKET_CLOSE_TIME  = dtime(15, 40)  # 15:40 — F&O options market close
+POST_MARKET_END_TIME  = dtime(16, 0)   # 16:00 — post-market end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,41 +419,101 @@ class ExchangeSessionOrchestrator:
             return 1.0 - LUNCH_CONFIDENCE_PENALTY
         return 1.0
 
-    # ── P0: EOD Flattening Guard ─────────────────────────────────────────────
+    # ── P0: EOD Flattening & Centralized Session Guard ───────────────────────────────
+
+    def is_entry_allowed(self, now: datetime | None = None) -> bool:
+        """
+        Single source of truth: returns True if current time permits new trade entries.
+
+        Policy: Reject all new trade entries at or after 15:20 IST.
+        Trade entries are strictly prohibited during EXIT_WINDOW, POST_MARKET, or CLOSED states.
+        """
+        current_time = (now or datetime.now()).time()
+        session = self._compute_state_for_time(current_time)
+        return session in (
+            MarketSessionState.LIVE_MARKET,
+            MarketSessionState.LUNCH_DRIFT,
+            MarketSessionState.POWER_HOUR,
+        ) and current_time < EOD_NO_NEW_ENTRY_TIME
+
+    def should_force_exit(self, now: datetime | None = None) -> bool:
+        """
+        Single source of truth: returns True when ALL open intraday positions must be force-closed.
+
+        Policy: Force-flatten at or after 15:24 IST (1 min buffer before broker 15:25 square-off).
+        Active positions are force-closed during EXIT_WINDOW state.
+        """
+        current_time = (now or datetime.now()).time()
+        return current_time >= EOD_FORCE_EXIT_TIME and current_time < POST_MARKET_END_TIME
+
+    def is_post_market(self, now: datetime | None = None) -> bool:
+        """Returns True if current session is strictly post-market (15:40 to 16:00 IST)."""
+        current_time = (now or datetime.now()).time()
+        return self._compute_state_for_time(current_time) == MarketSessionState.POST_MARKET
+
+    def get_capabilities(self, now: datetime | None = None) -> SessionCapabilities:
+        """
+        Capability-based session governance matrix.
+        Maps current MarketSessionState -> SessionCapabilities permissions.
+        """
+        current_time = (now or datetime.now()).time()
+        session = self._compute_state_for_time(current_time)
+
+        if session in (MarketSessionState.LIVE_MARKET, MarketSessionState.LUNCH_DRIFT, MarketSessionState.POWER_HOUR):
+            can_open = current_time < EOD_NO_NEW_ENTRY_TIME
+            return SessionCapabilities(
+                can_open_positions=can_open,
+                can_modify_positions=True,
+                can_exit_positions=True,
+                can_collect_market_data=True,
+                can_generate_signals=can_open,
+                can_publish_orders=True,
+            )
+        elif session == MarketSessionState.EXIT_WINDOW:
+            return SessionCapabilities(
+                can_open_positions=False,
+                can_modify_positions=True,
+                can_exit_positions=True,
+                can_collect_market_data=True,
+                can_generate_signals=False,
+                can_publish_orders=True,
+            )
+        elif session == MarketSessionState.POST_MARKET:
+            return SessionCapabilities(
+                can_open_positions=False,
+                can_modify_positions=False,
+                can_exit_positions=False,
+                can_collect_market_data=True,
+                can_generate_signals=False,
+                can_publish_orders=False,
+            )
+        else:  # PRE_MARKET, OPEN_STORM, CLOSED, WEEKEND_CLOSED
+            is_pre = session in (MarketSessionState.PRE_MARKET, MarketSessionState.OPEN_STORM)
+            return SessionCapabilities(
+                can_open_positions=False,
+                can_modify_positions=False,
+                can_exit_positions=False,
+                can_collect_market_data=is_pre,
+                can_generate_signals=False,
+                can_publish_orders=False,
+            )
 
     def is_entry_cutoff(self) -> bool:
-        """
-        Returns True when no new entries should be placed.
-
-        Policy: reject all new trade entries at or after 15:00 IST.
-        This prevents the 15:03 class of late entries that risk overnight
-        orphaning and gap exposure.
-
-        Safe to call every cycle — no logging, no state mutation.
-        """
-        return datetime.now().time() >= EOD_NO_NEW_ENTRY_TIME
+        """Backwards-compatible alias: returns True when new trade entries are prohibited."""
+        return not self.is_entry_allowed()
 
     def is_force_exit_time(self) -> bool:
-        """
-        Returns True when ALL open positions must be closed immediately.
-
-        Policy: force-flatten at or after 15:20 IST.
-        Any position still open at this time is closed at market.
-        This is a hard deadline — no exceptions, no signals needed.
-
-        Safe to call every cycle — no logging, no state mutation.
-        """
-        return datetime.now().time() >= EOD_FORCE_EXIT_TIME
+        """Backwards-compatible alias: returns True when hard force-exit is active."""
+        return self.should_force_exit()
 
     def is_live(self, last_candle_ts=None) -> bool:
         """
-        True only when the pipeline should be fully active.
-        Replaces the old _is_market_open_safe() call.
+        True when market session is active (data ingestion & monitoring active).
+        Includes LIVE_MARKET, LUNCH_DRIFT, POWER_HOUR, and EXIT_WINDOW.
         """
         if last_candle_ts is not None:
             session = self.get_session_state(last_candle_ts)
         else:
-            # Prevent poisoning the cache with DEAD data health when called without a timestamp
             session = self._compute_state_for_time(datetime.now().time())
             if self._is_cache_valid() and self._cache_session == MarketSessionState.WEEKEND_CLOSED:
                 session = MarketSessionState.WEEKEND_CLOSED
@@ -448,17 +522,12 @@ class ExchangeSessionOrchestrator:
             MarketSessionState.LIVE_MARKET,
             MarketSessionState.LUNCH_DRIFT,
             MarketSessionState.POWER_HOUR,
+            MarketSessionState.EXIT_WINDOW,
         )
 
     def get_dashboard_fields(self, last_candle_ts=None) -> dict:
         """
         Returns a dict of session awareness fields for _update_dashboard().
-
-        Keys:
-            session_state   — e.g. "🟢 LIVE MARKET — Active"
-            runtime_posture — e.g. "LIVE"
-            data_health     — e.g. "FRESH"
-            poll_interval_s — e.g. 1
         """
         session = self.get_session_state(last_candle_ts)
         health  = self.get_data_health(last_candle_ts)
@@ -473,11 +542,6 @@ class ExchangeSessionOrchestrator:
     async def sleep_until_next_cycle(self, last_candle_ts=None) -> None:
         """
         Canonical sleep primitive for main.py.
-        Use this instead of asyncio.sleep(1) directly.
-
-        Design intent: centralising the sleep here allows future work to
-        interrupt it (e.g. on session transition, websocket event, halt signal)
-        without touching the engine loop.
         """
         interval = self.get_poll_interval_seconds(last_candle_ts)
         await asyncio.sleep(interval)
@@ -488,10 +552,7 @@ class ExchangeSessionOrchestrator:
     def can_trade(settings) -> Tuple[bool, str]:
         """
         Drop-in replacement for the old SessionGuard.can_trade(settings).
-        Used by data_manager._is_market_open_safe() for backwards compat.
         """
-        # Instantiate a temporary orchestrator — stateless, logs suppressed
-        # to prevent "BOOT → ..." spam from a throwaway instance.
         o = ExchangeSessionOrchestrator(_suppress_logs=True)
         live = o.is_live()
         if live:
@@ -504,15 +565,20 @@ class ExchangeSessionOrchestrator:
     def _compute_state_for_time(self, t: dtime) -> MarketSessionState:
         """
         Pure function: map a time-of-day → MarketSessionState.
-        Weekend check uses weekday() (Mon=0, Sun=6).
-        No hardcoded holiday calendar for Phase 1.
+        Weekday session windows (all IST):
+          08:00–09:15  PRE_MARKET
+          09:15–09:28  OPEN_STORM
+          09:28–14:00  LIVE_MARKET
+          14:00–14:15  LUNCH_DRIFT
+          14:15–15:20  POWER_HOUR
+          15:20–15:40  EXIT_WINDOW
+          15:40–16:00  POST_MARKET
+          > 16:00      CLOSED
         """
         now_dt = datetime.now()
-        # Weekend = Saturday (5) or Sunday (6)
         if now_dt.weekday() >= 5:
             return MarketSessionState.WEEKEND_CLOSED
 
-        # Weekday session windows (all IST)
         if t < dtime(8, 0):
             return MarketSessionState.CLOSED
         elif t < dtime(9, 15):
@@ -523,8 +589,10 @@ class ExchangeSessionOrchestrator:
             return MarketSessionState.LIVE_MARKET
         elif t < dtime(14, 15):
             return MarketSessionState.LUNCH_DRIFT
-        elif t < dtime(15, 30):
+        elif t < dtime(15, 20):
             return MarketSessionState.POWER_HOUR
+        elif t < dtime(15, 40):
+            return MarketSessionState.EXIT_WINDOW
         elif t < dtime(16, 0):
             return MarketSessionState.POST_MARKET
         else:

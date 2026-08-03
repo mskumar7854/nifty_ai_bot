@@ -131,11 +131,11 @@ class SessionStrategy:
         return True, "Session OK", rules
 
     def is_exit_only(self) -> bool:
-        """True when in closing zone — exit only, no new trades"""
+        """True when in closing/exit window — exit only, no new trades"""
         rules = self.get_current_rules()
-        return rules["session"] == "closing_zone"
+        return rules["session"] in ("closing_zone", "exit_window")
 
     def is_market_hours(self) -> bool:
-        """True if within any market session"""
+        """True if within any market session (09:15 to 15:40 IST)"""
         now = _now_ist().time()
-        return time(9, 15) <= now <= time(15, 30)
+        return time(9, 15) <= now <= time(15, 40)

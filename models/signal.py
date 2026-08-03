@@ -19,6 +19,7 @@ class Signal:
     confidence: float
     strength: Strength
     
+    adaptive_threshold: Optional[float] = None
     status: str = "new"
     execution_status: str = "pending"
     created_at: float = field(default_factory=time.time)

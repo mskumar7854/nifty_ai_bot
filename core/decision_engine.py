@@ -1170,10 +1170,9 @@ class DecisionEngine:
                 self.logger.error(f"Failed to log threshold applied: {e}")
 
         if confidence < adaptive_confidence:
-            reason = (f"Low Confidence Gate ({confidence:.2f} < {adaptive_confidence:.2f}, "
+            reason = (f"Low Confidence ({confidence:.2f} < {adaptive_confidence:.2f}, "
                       f"regime: {reg_conf:.2f}, MPM={mpm.value}, gap_elapsed: {gap_mins_elapsed:.0f}min)")
-            self._last_decision_path.append("LOW_CONF_REJECTED")
-            return self._no_trade_signal(snapshot, [reason], outputs_dict)
+            self._last_decision_path.append(reason)
             
         final_confluence = self.scorer.score(outputs)
         direction_agents = final_confluence.bullish_agents if direction == Direction.BULLISH else final_confluence.bearish_agents
@@ -1284,6 +1283,8 @@ class DecisionEngine:
             "dominant_prob": round(confidence, 4),   # confidence IS dominant_prob at this point
             "calibrated_confidence": round(calibrated_confidence, 4),
             "calibration_telemetry": calib_telemetry,
+            "adaptive_threshold": round(adaptive_confidence * 100, 1),
+            "base_threshold": round(live_conf * 100, 1),
             # ── Runtime Fingerprint (incident replay / regression detection) ──
             "fingerprint": self.fingerprint.capture(
                 active_agents=sorted(self.agents.keys()),
@@ -1318,6 +1319,7 @@ class DecisionEngine:
             signal_type=signal_type,
             direction=direction,
             confidence=round(confidence * 100, 1), # Store as % for display
+            adaptive_threshold=round(adaptive_confidence * 100, 1),
             weighted_score=round(confidence, 3),   # Store as 0-1 for logic
             buy_score=round(buy_prob, 3),
             sell_score=round(sell_prob, 3),

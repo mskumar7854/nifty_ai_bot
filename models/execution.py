@@ -51,3 +51,42 @@ class ExecutionPolicy:
             "tp2_multiplier": self.tp2_multiplier,
             "position_scale": self.position_scale,
         }
+
+@dataclass(frozen=True)
+class ExecutedTrade:
+    """
+    Immutable representation of an execution reality.
+    This model contains strictly what happened, decoupled from why it happened.
+    """
+    schema_version: int
+    execution_version: int
+
+    trade_id: str
+    decision_snapshot_id: str
+    execution_context: str  # e.g., 'SIMULATION', 'DHAN_LIVE'
+
+    timestamp: str  # ISO Format
+    
+    # Immutable Contract Metadata
+    security_id: str
+    trading_symbol: str
+    expiry: str
+    strike: float
+    option_type: str
+    
+    quantity: int
+    side: str  # 'BUY' | 'SELL'
+    
+    # Execution Facts
+    entry_price: float
+    exit_price: float
+    fill_timestamp: str  # ISO Format
+    broker_order_id: Optional[str]
+    
+    initial_sl: float
+    final_sl: float
+    target_price: float
+    
+    pnl: float
+    realized_r: float
+

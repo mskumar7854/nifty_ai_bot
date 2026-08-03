@@ -74,7 +74,7 @@ class TimeSessionAgent(BaseAgent):
 
         # ── 3. SPECIFIC TIME DANGERS ──
         market_open = time(9, 15)
-        market_close = time(15, 30)
+        market_close = time(15, 40)
 
         # First N minutes — avoid
         minutes_since_open = 0
@@ -87,12 +87,12 @@ class TimeSessionAgent(BaseAgent):
             warnings.append(f"⏰ First {self.th.avoid_first_minutes} min — wild volatility, avoid")
             details["first_minutes"] = True
 
-        # Last N minutes — avoid
+        # Last N minutes / past cutoff — avoid
         if current_time >= market_close:
             base_score = 0
         elif current_time >= time(15, 20):
             base_score = 15
-            warnings.append("⏰ Last 10 minutes — avoid new entries")
+            warnings.append("⏰ Past 15:20 entry cutoff — exit window active, avoid new entries")
             details["closing_minutes"] = True
 
         # ── 4. OPENING RANGE PERIOD ──
@@ -176,9 +176,9 @@ class TimeSessionAgent(BaseAgent):
             return SessionPhase.LUNCH
         elif t < time(14, 0):
             return SessionPhase.AFTERNOON
-        elif t < time(15, 15):
+        elif t < time(15, 20):
             return SessionPhase.POWER_HOUR
-        elif t < time(15, 30):
+        elif t < time(15, 40):
             return SessionPhase.CLOSING
         else:
             return SessionPhase.AFTER_HOURS

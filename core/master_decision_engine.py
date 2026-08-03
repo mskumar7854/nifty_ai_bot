@@ -302,9 +302,11 @@ class MasterDecisionEngine:
         if weekday == 4 and current_time >= self.FRIDAY_CUTOFF:
             return False, f"Weekend Buffer: no new trades after {self.FRIDAY_CUTOFF} on Friday"
 
-        # Hard market close
-        if current_time >= self.MARKET_CLOSE:
-            return False, f"Market closing buffer: no new trades after {self.MARKET_CLOSE}"
+        # Check session orchestrator entry permission (cutoff at 15:20)
+        from core.session_guard import ExchangeSessionOrchestrator
+        orchestrator = ExchangeSessionOrchestrator(_suppress_logs=True)
+        if not orchestrator.is_entry_allowed(now):
+            return False, f"Entry cutoff reached: no new trades permitted (cutoff {self.MARKET_CLOSE})"
 
         # Weekend — should never happen if bot is correctly scheduled
         if weekday >= 5:

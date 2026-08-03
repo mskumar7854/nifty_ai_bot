@@ -7,6 +7,10 @@ from datetime import datetime
 
 logger = logging.getLogger("rejection_telemetry")
 
+# Telemetry Rejection & Exit Reason Codes (3 Aug 2026 Sync)
+ENTRY_AFTER_CUTOFF = "ENTRY_AFTER_CUTOFF"            # Trade entry rejected past 15:20 IST cutoff
+BROKER_SQUAREOFF_BUFFER = "BROKER_SQUAREOFF_BUFFER"  # Force flattened prior to 15:25 IST broker square-off
+
 @dataclass
 class GateEvaluation:
     gate_name: str

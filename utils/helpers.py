@@ -26,10 +26,10 @@ def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> f
 
 
 def is_market_hours() -> bool:
-    """Check if current time is within Indian market hours"""
+    """Check if current time is within Indian market hours (09:15 to 15:40 IST)."""
     now = get_ist_now().time()
     market_open = time(9, 15)
-    market_close = time(15, 30)
+    market_close = time(15, 40)
     return market_open <= now <= market_close
 
 
@@ -40,9 +40,9 @@ def is_pre_market() -> bool:
 
 
 def is_post_market() -> bool:
-    """Check if it's strictly post-market (15:30 to 16:00) to allow clean shutdown."""
+    """Check if it's strictly post-market (15:40 to 16:00) to allow clean shutdown."""
     now = get_ist_now().time()
-    return time(15, 30) <= now <= time(16, 0)
+    return time(15, 40) <= now <= time(16, 0)
 
 
 def save_json(data: dict, filepath: str):

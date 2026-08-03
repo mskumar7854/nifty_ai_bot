@@ -144,14 +144,21 @@ class SimulatedTrade(TradeLifecycle):
         return self.trade_id
 
     def to_dict(self) -> dict:
+        inst = self.instrument if isinstance(self.instrument, dict) else {}
         return {
             "id": self.trade_id,
             "time": self.timestamp.isoformat(),
             "signal": self.signal_type.value,
             "direction": self.direction.value,
+            "security_id": inst.get("security_id", ""),
+            "trading_symbol": inst.get("symbol", ""),
+            "strike": inst.get("strike", 0),
+            "option_type": inst.get("type", ""),
+            "expiry": inst.get("expiry", ""),
             "confidence": self.confidence,
             "grade": self.grade,
             "entry": self.entry_price,
+            "initial_sl": self.original_sl if self.original_sl > 0 else self.stop_loss,
             "sl": self.stop_loss,
             "target1": self.target_1,
             "exit": self.simulated_exit_price,
