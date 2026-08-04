@@ -187,39 +187,44 @@ class StructureAgent(BaseAgent):
         details["vwap_structure"] = vwap_structure
 
         # ══════════════════════════════════════
-        # COMBINE STRUCTURE SIGNALS
+        # COMBINE STRUCTURE SIGNALS (Hierarchical Confidence Model)
         # ══════════════════════════════════════
 
-        # Direction from structure
-        if self.structure_type == "BULLISH":
+        # Component directional votes
+        bos_bull = 1.0 if (bos.get("detected") and bos.get("direction") == "bullish") else 0.0
+        bos_bear = 1.0 if (bos.get("detected") and bos.get("direction") == "bearish") else 0.0
+        
+        choch_bull = 1.0 if (choch.get("detected") and choch.get("to") == "BULLISH") else 0.0
+        choch_bear = 1.0 if (choch.get("detected") and choch.get("to") == "BEARISH") else 0.0
+        
+        macro_bull = 1.0 if self.structure_type == "BULLISH" else 0.0
+        macro_bear = 1.0 if self.structure_type == "BEARISH" else 0.0
+
+        # Weighted hierarchy: BOS (60%), CHoCH (20%), Macro Swings (20%)
+        weighted_bear_score = 0.60 * bos_bear + 0.20 * choch_bear + 0.20 * macro_bear
+        weighted_bull_score = 0.60 * bos_bull + 0.20 * choch_bull + 0.20 * macro_bull
+
+        if weighted_bear_score > weighted_bull_score and weighted_bear_score >= 0.50:
+            struct_direction = Direction.BEARISH
+            struct_score = min(max(int(weighted_bear_score * 100), 65), 90)
+        elif weighted_bull_score > weighted_bear_score and weighted_bull_score >= 0.50:
             struct_direction = Direction.BULLISH
-            struct_score = 75
+            struct_score = min(max(int(weighted_bull_score * 100), 65), 90)
         elif self.structure_type == "BEARISH":
             struct_direction = Direction.BEARISH
-            struct_score = 75
+            struct_score = 60
+        elif self.structure_type == "BULLISH":
+            struct_direction = Direction.BULLISH
+            struct_score = 60
         else:
             struct_direction = Direction.NEUTRAL
             struct_score = 40
 
-        # BOS/CHoCH boost
-        event_score = 50
-        if bos["detected"]:
-            if bos["direction"] == "bullish":
-                event_score = 85
-                if struct_direction == Direction.BULLISH:
-                    struct_score += 10
-            elif bos["direction"] == "bearish":
-                event_score = 85
-                if struct_direction == Direction.BEARISH:
-                    struct_score += 10
-
-        if choch["detected"]:
-            event_score = 90
-            # CHoCH suggests reversal
-            if choch["to"] == "BULLISH":
-                struct_direction = Direction.BULLISH
-            elif choch["to"] == "BEARISH":
-                struct_direction = Direction.BEARISH
+        details["hierarchical_score"] = {
+            "bull_score": round(weighted_bull_score, 2),
+            "bear_score": round(weighted_bear_score, 2),
+            "dominant": struct_direction.value if hasattr(struct_direction, "value") else str(struct_direction)
+        }
 
         # Order block proximity score
         ob_score = 50

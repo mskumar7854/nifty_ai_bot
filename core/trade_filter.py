@@ -168,20 +168,44 @@ class TradeFilter:
             # Strong consensus: ≥90% agreement (structural not required)
             _chop_strong_consensus = _chop_consensus >= 90.0
 
+            # Multi-factor directional persistence check: ADX > 35 + EMA Stack + BOS + Directional Persistence
+            _regime_adx = regime_info.get("adx", 0.0) if regime_info else 0.0
+            _regime_ema_stack = regime_info.get("ema_structure", "") if regime_info else ""
+            _has_ema_stack = _regime_ema_stack in ["BEARISH_STACK", "BULLISH_STACK"]
+            _has_directional_persistence = False
+            if structure_info:
+                s_val = str(structure_info.get("structure", ""))
+                p_val = str(structure_info.get("pattern", ""))
+                _has_directional_persistence = (
+                    any(k in s_val for k in ["BEARISH", "BULLISH", "downtrend", "uptrend"]) or
+                    any(k in p_val for k in ["Lower Highs", "Higher Highs", "Higher Lows", "Lower Lows"])
+                )
+
+            _chop_multi_factor_trend = (
+                _regime_adx >= 35.0 and
+                _has_ema_stack and
+                _chop_structural and
+                _has_directional_persistence
+            )
+
             signal_grade_str = signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade)
             is_good_grade = signal_grade_str in ["A+", "A", "B+", "B"]
 
-            if chop_blocked and is_good_grade and (_chop_high_conviction or _chop_strong_consensus):
+            if chop_blocked and (
+                (is_good_grade and (_chop_high_conviction or _chop_strong_consensus)) or
+                _chop_multi_factor_trend
+            ):
                 self.logger.info(
-                    "Chop zone override: Grade %s with consensus=%.0f%%, structural=%s",
-                    signal_grade_str, _chop_consensus, _chop_structural
+                    "Chop zone override: Grade %s with consensus=%.0f%%, structural=%s, multi_factor_trend=%s",
+                    signal_grade_str, _chop_consensus, _chop_structural, _chop_multi_factor_trend
                 )
                 chop_blocked = False
-                _chop_override_reason = (
-                    f"HIGH_CONVICTION(consensus={_chop_consensus:.0f}%,structural={_chop_structural})"
-                    if _chop_high_conviction
-                    else f"STRONG_CONSENSUS(consensus={_chop_consensus:.0f}%)"
-                )
+                if _chop_multi_factor_trend:
+                    _chop_override_reason = f"MULTI_FACTOR_TREND(ADX={_regime_adx:.1f},EMA={_regime_ema_stack})"
+                elif _chop_high_conviction:
+                    _chop_override_reason = f"HIGH_CONVICTION(consensus={_chop_consensus:.0f}%,structural={_chop_structural})"
+                else:
+                    _chop_override_reason = f"STRONG_CONSENSUS(consensus={_chop_consensus:.0f}%)"
 
             # ── Diagnostic log: always fires during chop window ──
             _chop_decision = "ALLOW" if not chop_blocked else "BLOCK"

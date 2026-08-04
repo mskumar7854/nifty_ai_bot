@@ -2022,18 +2022,22 @@ class DecisionEngine:
             else:
                 neutral_weight += weight
                 agent_contributions.append({"name": name, "dir": "NEUTRAL", "contrib": weight * conf, "squelched": is_squelched})
-            # Neutral/NO_TRADE adds 0 to score but counts toward total_weight
-            # which naturally dilutes the final probability (as it should).
+            # Neutral/NO_TRADE agents act as TRUE ABSTENTIONS ("no opinion").
+            # They do NOT dilute the directional probability denominator.
 
             # Log if a squelched agent is encountered during pass 2
             if is_squelched:
                 self.logger.warning(f"🔇 Agent {name} squelched. PF < 1.0 ({agent_pfs[name]:.2f})")
 
-        if total_weight_used == 0:
-            return 0.0, 0.0
-            
-        raw_buy = buy_score / total_weight_used
-        raw_sell = sell_score / total_weight_used
+        if directional_weight == 0:
+            raw_buy = 0.0
+            raw_sell = 0.0
+        else:
+            raw_buy = buy_score / directional_weight
+            raw_sell = sell_score / directional_weight
+
+        effective_participation_ratio = (directional_weight / total_weight_used) if total_weight_used > 0 else 0.0
+        abstention_rate = (neutral_weight / total_weight_used) if total_weight_used > 0 else 0.0
         
         # ── Log Contribution Breakdown ──
         dominant_dir = "BUY" if raw_buy >= raw_sell else "SELL"
@@ -2048,8 +2052,8 @@ class DecisionEngine:
             if ac["squelched"]:
                 continue
             
-            # True impact on the final raw score
-            impact = (ac["contrib"] / total_weight_used) if total_weight_used > 0 else 0
+            # Impact relative to active directional weight
+            impact = (ac["contrib"] / directional_weight) if directional_weight > 0 else 0
             
             if ac["dir"] == "NEUTRAL" or impact == 0:
                 continue
@@ -2088,6 +2092,8 @@ class DecisionEngine:
                 "total_weight": round(total_weight_used, 4),
                 "neutral_weight": round(neutral_weight, 4),
                 "directional_weight": round(directional_weight, 4),
+                "effective_participation_ratio": round(effective_participation_ratio, 4),
+                "abstention_rate": round(abstention_rate, 4),
                 "regime_penalty": regime_penalty
             })
         )

@@ -14,11 +14,11 @@ def test_confidence_calibrator():
     calibrator = ConfidenceCalibrator()
     
     # Fractional input
-    cal_trending = calibrator.calibrate(0.85, "TRENDING_DOWN")
+    cal_trending, _ = calibrator.calibrate(0.85, "TRENDING_DOWN")
     assert 0.50 <= cal_trending <= 0.85
     
     # Continuous Platt fallback
-    cal_platt = calibrator.calibrate(0.92, "CUSTOM_REGIME")
+    cal_platt, _ = calibrator.calibrate(0.92, "CUSTOM_REGIME")
     assert 0.10 <= cal_platt <= 0.95
 
 
@@ -55,17 +55,17 @@ def test_trend_structure_tracker():
     tracker = TrendStructureTracker(max_reentry_per_trend=2)
     
     # First trade in BEARISH trend -> Allowed
-    ok1, reason1 = tracker.check_reentry_allowed("BEARISH")
+    ok1, _, _ = tracker.check_reentry_allowed("BEARISH")
     assert ok1 is True
     tracker.record_trade_execution("BEARISH", 24000.0)
     
     # Second trade without structural reset -> Allowed (within max limit 2)
-    ok2, reason2 = tracker.check_reentry_allowed("BEARISH")
+    ok2, _, _ = tracker.check_reentry_allowed("BEARISH")
     assert ok2 is True
     tracker.record_trade_execution("BEARISH", 23980.0)
     
     # Third trade without structural reset -> REJECTED
-    ok3, reason3 = tracker.check_reentry_allowed("BEARISH")
+    ok3, reason3, _ = tracker.check_reentry_allowed("BEARISH")
     assert ok3 is False
     assert "REJECTED_SAME_STRUCTURAL_TREND" in reason3
     
@@ -73,7 +73,7 @@ def test_trend_structure_tracker():
     tracker.register_structural_event("BOS")
     
     # Re-entry after structural reset -> Allowed!
-    ok4, reason4 = tracker.check_reentry_allowed("BEARISH")
+    ok4, reason4, _ = tracker.check_reentry_allowed("BEARISH")
     assert ok4 is True
     assert "STRUCTURAL_RESET_CONFIRMED" in reason4
 

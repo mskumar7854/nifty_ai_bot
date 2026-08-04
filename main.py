@@ -14,6 +14,7 @@ import asyncio
 import signal
 import atexit
 import logging
+from datetime import datetime
 from typing import Optional
 
 # Force UTF-8 Encoding on Windows

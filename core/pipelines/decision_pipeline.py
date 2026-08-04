@@ -128,7 +128,6 @@ class DecisionPipeline:
         try:
             from models.snapshot_v2 import DecisionSnapshotV2, SnapshotMetadata, AgentOpinion, GateResult, ReplayStatus
             from core.snapshot_v2 import persist_snapshot_v2
-            import datetime
             import uuid
             
             mode_str = self.settings.system_mode.mode if hasattr(self.settings.system_mode, "mode") else str(self.settings.system_mode)
@@ -158,7 +157,7 @@ class DecisionPipeline:
             
             metadata = SnapshotMetadata(
                 snapshot_id=signal.id,
-                timestamp=datetime.datetime.now().isoformat(),
+                timestamp=datetime.now().isoformat(),
                 symbol="NIFTY",
                 expiry="UNKNOWN",
                 mode=mode_str,
@@ -249,12 +248,11 @@ class DecisionPipeline:
         t_decision = time.perf_counter()
         gate_results = []
         
-        import datetime
-        timeline = {"Market Snapshot Created": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]}
+        timeline = {"Market Snapshot Created": datetime.now().strftime("%H:%M:%S.%f")[:-3]}
         
         # 1. Generate Signal
         signal = self.decision_engine.process(df, snapshot)
-        timeline["Agents Completed"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        timeline["Agents Completed"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         latencies["decision_ms"] = int((time.perf_counter() - t_decision) * 1000)
         
         self.trade_sequence += 1
@@ -265,7 +263,7 @@ class DecisionPipeline:
         if signal.signal_type != SignalType.NO_TRADE:
             regime_name = signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
             calibrated_pwin, calib_telemetry = self.calibrator.calibrate(signal.confidence, regime_name)
-            timeline["Confidence Calibrated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            timeline["Confidence Calibrated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             # Add telemetry to signal metadata
             if not hasattr(signal, "metadata") or signal.metadata is None:
                 signal.metadata = {}
@@ -278,7 +276,7 @@ class DecisionPipeline:
                 risk_reward_ratio=rr,
                 spread_pct=spread_pct
             )
-            timeline["EV Calculated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            timeline["EV Calculated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             signal.ev_info = ev_result
             signal.metadata["calibrated_pwin"] = calibrated_pwin
             signal.metadata["ev_r"] = ev_result["ev_r"]
@@ -354,7 +352,7 @@ class DecisionPipeline:
                 }
             },
         )
-        timeline["Master Gate Evaluated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        timeline["Master Gate Evaluated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
         gate_results.append(GateResult("Master Gate", master_result.approved, getattr(master_result, "reason", None) if not master_result.approved else None))
         
@@ -438,7 +436,7 @@ class DecisionPipeline:
             cost_info=_cost_info, position_manager_status=pm_status,
             confluence_score=(signal.confluence.confluence_ratio * 100 if signal.confluence else 0)
         )
-        timeline["TradeFilter Decision"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        timeline["TradeFilter Decision"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
         rej_reason = filter_result.kill_reason or '10-Gate Filter' if not filter_result.passed else None
         gate_results.append(GateResult("TradeFilter", filter_result.passed, rej_reason))
@@ -585,7 +583,7 @@ class DecisionPipeline:
         sig_dir_str = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
         self.trend_tracker.record_trade_execution(sig_dir_str, snapshot.price)
         
-        timeline["OMS Intent Generated"] = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        timeline["OMS Intent Generated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self._record_v2_snapshot(signal, snapshot, outputs, filter_result, "EXECUTE", "Passed all gates", timeline)
         
         return DecisionPipelineResult(

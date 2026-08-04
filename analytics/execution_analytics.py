@@ -77,6 +77,79 @@ class ExecutionAnalyticsEngine:
         }
         self._write_to_log(record)
 
+    def generate_kpis(self, target_date: str = None) -> dict:
+        """
+        Generates Execution Quality KPIs for daily audit summaries.
+        Reads actual agent weight telemetry from decision snapshots.
+        """
+        import sqlite3
+        import pandas as pd
+        import numpy as np
+        if target_date is None:
+            target_date = datetime.now().strftime("%Y-%m-%d")
+
+        db_path = os.path.join("data", "trading_v4_sim.db")
+        signals_gen = 0
+        signals_exec = 0
+        part_ratios = []
+        abst_ratios = []
+        ev_passed = 0
+        ev_failed = 0
+
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                df_snaps = pd.read_sql_query(
+                    f"SELECT agents_json, decision_json, expected_value_json FROM decision_snapshots_v2 WHERE timestamp LIKE '{target_date}%'",
+                    conn
+                )
+                conn.close()
+
+                signals_gen = len(df_snaps)
+                for _, row in df_snaps.iterrows():
+                    d_json = json.loads(row["decision_json"]) if row["decision_json"] else {}
+                    if d_json.get("action") == "EXECUTE":
+                        signals_exec += 1
+
+                    ev_json = json.loads(row["expected_value_json"]) if row["expected_value_json"] else {}
+                    if ev_json.get("passes_gate", False):
+                        ev_passed += 1
+                    else:
+                        ev_failed += 1
+
+                    a_json = json.loads(row["agents_json"]) if row["agents_json"] else {}
+                    dir_w = 0.0
+                    neu_w = 0.0
+                    for a_name, a_out in a_json.items():
+                        if isinstance(a_out, dict):
+                            d_val = a_out.get("signal", "NEUTRAL")
+                            w_val = 0.15 # standard agent weight share
+                            if any(k in d_val for k in ["BULLISH", "BEARISH", "BUY", "SELL"]):
+                                dir_w += w_val
+                            else:
+                                neu_w += w_val
+
+                    tot_w = dir_w + neu_w
+                    if tot_w > 0:
+                        part_ratios.append(dir_w / tot_w)
+                        abst_ratios.append(neu_w / tot_w)
+            except Exception as e:
+                self.logger.error(f"Error calculating KPIs from DB: {e}")
+
+        avg_part = float(np.mean(part_ratios) * 100) if part_ratios else 0.0
+        avg_abst = float(np.mean(abst_ratios) * 100) if abst_ratios else 0.0
+
+        kpis = {
+            "target_date": target_date,
+            "signals_generated": signals_gen,
+            "signals_executed": signals_exec,
+            "effective_participation_pct": round(avg_part, 1),
+            "average_abstention_rate_pct": round(avg_abst, 1),
+            "ev_gate_passed": ev_passed,
+            "ev_gate_failed": ev_failed
+        }
+        return kpis
+
     def _write_to_log(self, record: dict):
         try:
             with open(self.log_file, "a") as f:

@@ -1,0 +1,50 @@
+{
+  "date": "2026-08-04",
+  "signals": {
+    "total": 44,
+    "buy_ce": 15,
+    "buy_pe": 29,
+    "executed": 0,
+    "rejected": 44,
+    "rejection_reasons": {
+      "LOW_AGENT_AGREEMENT": 29,
+      "LOW_CONFIDENCE": 9,
+      "CHOP_ZONE_ACTIVE": 5,
+      "LOW_CONFLUENCE": 1
+    }
+  },
+  "market": {
+    "open": 24636.95,
+    "high": 24636.95,
+    "low": 24441.05,
+    "close": 24473.75,
+    "gap_pct": 0.0
+  },
+  "errors": {
+    "fatal": 0,
+    "recoverable": 0
+  },
+  "execution_quality": {
+    "participation_pct": 41.5,
+    "abstention_pct": 58.5,
+    "avg_confidence": 38.8,
+    "avg_ev": 0.48
+  },
+  "filter_quality": {
+    "TP": 0.0,
+    "TN": 7.0,
+    "FP": 0.0,
+    "FN": 7.0,
+    "Precision": 0.0,
+    "Recall": 0.0,
+    "Specificity": 1.0,
+    "F1_Score": 0.0,
+    "MCC": 0.0
+  },
+  "campaign": {
+    "completed": 2,
+    "required": 20,
+    "remaining": 18
+  },
+  "overall_status": "\u2705 PASS"
+}
