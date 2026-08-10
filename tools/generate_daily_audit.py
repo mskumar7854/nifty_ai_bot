@@ -83,6 +83,7 @@ def _count_log_errors(target_date: str) -> dict:
     """Parse nifty_ai.log for fatal/recoverable error counts on target_date."""
     fatal = 0
     recoverable = 0
+    infra_degraded = False
     log_path = LOG_DIR / "nifty_ai.log"
     if log_path.exists():
         with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -94,26 +95,38 @@ def _count_log_errors(target_date: str) -> dict:
                     fatal += 1
                 elif "ERROR" in upper or "EXCEPTION" in upper:
                     recoverable += 1
-    return {"fatal": fatal, "recoverable": recoverable}
+                    
+                if "RATE_LIMIT" in upper or " 805" in upper or "CIRCUIT OPEN" in upper or "CIRCUIT TRIPPED" in upper:
+                    infra_degraded = True
+                    
+    return {"fatal": fatal, "recoverable": recoverable, "infrastructure_degraded": infra_degraded}
 
 
-def _get_market_summary(df_snaps: pd.DataFrame) -> dict:
-    if df_snaps.empty:
-        return {"open": 0, "high": 0, "low": 0, "close": 0, "gap_pct": 0}
-    spots = []
-    for _, row in df_snaps.iterrows():
-        m = json.loads(row["market_json"]) if row["market_json"] else {}
-        s = m.get("spot_price", 0)
-        if s:
-            spots.append(s)
-    if not spots:
-        return {"open": 0, "high": 0, "low": 0, "close": 0, "gap_pct": 0}
+def _get_market_summary(target_date: str) -> dict:
+    """Read canonical market summary. Never derive from decision snapshots."""
+    market_file = Path("data") / f"market_session_{target_date}.json"
+    if market_file.exists():
+        try:
+            with open(market_file, "r") as f:
+                data = json.load(f)
+            return {
+                "open": data.get("open", 0),
+                "high": data.get("high", 0),
+                "low": data.get("low", 0),
+                "close": data.get("close", 0),
+                "gap_pct": data.get("gap_pct", 0),
+                "status": "COMPLETE"
+            }
+        except Exception:
+            pass
+
     return {
-        "open": round(spots[0], 2),
-        "high": round(max(spots), 2),
-        "low": round(min(spots), 2),
-        "close": round(spots[-1], 2),
-        "gap_pct": 0.0
+        "open": 0,
+        "high": 0,
+        "low": 0,
+        "close": 0,
+        "gap_pct": 0,
+        "status": "INCOMPLETE_SESSION_DATA"
     }
 
 
@@ -221,7 +234,7 @@ def _load_campaign_trend(target_date: str) -> dict:
             err = sc.get("errors", {})
             # We don't have per-session PF in the scorecard; use replay expectancy proxy
             # We'll track what we can
-            if err.get("fatal", 0) == 0:
+            if err.get("fatal", 0) == 0 and not err.get("infrastructure_degraded", False):
                 consecutive_healthy += 1
             else:
                 consecutive_healthy = 0
@@ -248,7 +261,7 @@ def generate_daily_audit(target_date: str = None):
     # Collect all data
     df_snaps = _load_snapshots(target_date)
     df_trades = _load_trades(target_date)
-    market = _get_market_summary(df_snaps)
+    market = _get_market_summary(target_date)
     signals = _get_signal_breakdown(df_snaps)
     errors = _count_log_errors(target_date)
     eq = _get_execution_quality(df_snaps)
@@ -265,12 +278,18 @@ def generate_daily_audit(target_date: str = None):
     # Determine overall daily status
     has_fatal = errors["fatal"] > 0
     data_ok = len(df_snaps) > 0
+    infra_degraded = errors.get("infrastructure_degraded", False)
+    
     if has_fatal:
-        overall_status = "❌ FAILURE"
+        overall_status = "❌ RUNTIME_FAILURE"
     elif not data_ok:
         overall_status = "⚠️ NO DATA"
+    elif infra_degraded:
+        overall_status = "🟡 INFRASTRUCTURE_DEGRADED"
+    elif signals["executed"] == 0:
+        overall_status = "✅ HEALTHY_NO_TRADE"
     else:
-        overall_status = "✅ PASS"
+        overall_status = "✅ HEALTHY"
 
     # Campaign trend from prior sessions
     trend = _load_campaign_trend(target_date)
@@ -287,6 +306,10 @@ def generate_daily_audit(target_date: str = None):
         decision_icon = "🟡"
         decision_label = "REVIEW REQUIRED"
         decision_reason = "No trading data recorded. Check bot connectivity and data feed."
+    elif infra_degraded:
+        decision_icon = "🟡"
+        decision_label = "INFRASTRUCTURE DEGRADED"
+        decision_reason = "System experienced significant API rate limits or circuit breaker trips. Session excluded from strategy-readiness campaign."
     elif errors["recoverable"] > 10:
         decision_icon = "🟡"
         decision_label = "REVIEW REQUIRED"
@@ -332,12 +355,14 @@ def generate_daily_audit(target_date: str = None):
     # 2. Market Summary
     lines.append("## 2. Market Summary")
     lines.append("")
+    lines.append(f"**Status**: {market.get('status', 'UNKNOWN')}")
+    lines.append("")
     lines.append(f"| Metric | Value |")
     lines.append(f"| :--- | ---: |")
-    lines.append(f"| Open | {market['open']} |")
-    lines.append(f"| High | {market['high']} |")
-    lines.append(f"| Low | {market['low']} |")
-    lines.append(f"| Close | {market['close']} |")
+    lines.append(f"| Open | {market['open'] if market['open'] else '---'} |")
+    lines.append(f"| High | {market['high'] if market['high'] else '---'} |")
+    lines.append(f"| Low | {market['low'] if market['low'] else '---'} |")
+    lines.append(f"| Close | {market['close'] if market['close'] else '---'} |")
     lines.append("")
 
     # 3. System Health
@@ -450,9 +475,10 @@ def generate_daily_audit(target_date: str = None):
     lines.append(f"| Metric | Value |")
     lines.append(f"| :--- | ---: |")
     lines.append(f"| Replay Sessions | {campaign['completed']} / {campaign['required']} |")
+    is_session_healthy = not has_fatal and not infra_degraded
     lines.append(f"| Replay Expectancy (Today) | {replay_expectancy:+.2f}R |")
     lines.append(f"| Runtime Errors (Today) | {errors['fatal']} fatal, {errors['recoverable']} recoverable |")
-    lines.append(f"| Consecutive Healthy Sessions | {trend['consecutive_healthy'] + (1 if not has_fatal else 0)} |")
+    lines.append(f"| Consecutive Healthy Sessions | {trend['consecutive_healthy'] + (1 if is_session_healthy else 0)} |")
     lines.append("")
 
     # 11. Daily Conclusion

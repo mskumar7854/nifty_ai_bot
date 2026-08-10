@@ -75,7 +75,15 @@ class TradingOrchestrator:
                     last_ts = getattr(self.ctx.data_manager, "last_market_activity_ts", None)
                     runtime_state = session_guard.get_runtime_state(last_ts)
                     elapsed = time.perf_counter() - start_time
-                    sleep_time = max(0.1, runtime_state.poll_interval_s - elapsed)
+                    
+                    infra_state = getattr(self.ctx.data_manager, "infrastructure_state", None)
+                    if infra_state and infra_state.suspended and infra_state.resume_at:
+                        remaining = infra_state.resume_at - time.time()
+                        base_interval = max(5.0, min(60.0, remaining))
+                    else:
+                        base_interval = runtime_state.poll_interval_s
+                        
+                    sleep_time = max(0.1, base_interval - elapsed)
                     await asyncio.sleep(sleep_time)
             except asyncio.CancelledError:
                 logger.info("Shutdown signal received")
@@ -150,17 +158,30 @@ class TradingOrchestrator:
                                     f"PnL: ₹{c.get('net_pnl', 0):,.1f}")
 
             # 4. Decision Pipeline (Gated by RuntimeState: only evaluate new entries if trading is allowed)
+            infra_state = getattr(self.ctx.data_manager, "infrastructure_state", None)
+            is_suspended = infra_state.suspended if infra_state else False
+            
+            if is_suspended:
+                if not getattr(self, "_logged_suspend", False):
+                    logger.warning(f"Infrastructure degraded. Trading suspended. Reason: {infra_state.reason}")
+                    self._logged_suspend = True
+            else:
+                if getattr(self, "_logged_suspend", False):
+                    logger.info("Infrastructure recovered. Resuming trading.")
+                self._logged_suspend = False
+
             if self.decision_pipeline and runtime_state.is_trading_allowed:
                 if hasattr(self.ctx.system, "entry_engine"):
-                    # Check pending first
+                    # Check pending first (execution engine continues)
                     confirmed = self.ctx.system.entry_engine.check_confirmations(snapshot, df)
                     for eid, pending in confirmed:
                         if self.execution_pipeline:
                             await self.execution_pipeline.execute(pending, snapshot, self.ctx.is_simulation, mode="confirmed")
                 
-                # New decisions via DecisionPipeline
-                latencies = {"fetch_ms": int((time.perf_counter() - start_time) * 1000)}
-                result = self.decision_pipeline.evaluate(df, snapshot, self.cycle_count, latencies)
+                if not is_suspended:
+                    # New decisions via DecisionPipeline
+                    latencies = {"fetch_ms": int((time.perf_counter() - start_time) * 1000)}
+                    result = self.decision_pipeline.evaluate(df, snapshot, self.cycle_count, latencies)
                 
                 if result.signal:
                     gate_logs = []
@@ -186,9 +207,10 @@ class TradingOrchestrator:
                         f"{'═'*30}"
                     )
                     
-                if result.approved and self.execution_pipeline:
-                    self.ctx.system._last_decision_ts = time.time()
-                    await self.execution_pipeline.execute(result.signal, snapshot, self.ctx.is_simulation, mode="new")
+                if not is_suspended:
+                    if result.approved and self.execution_pipeline:
+                        self.ctx.system._last_decision_ts = time.time()
+                        await self.execution_pipeline.execute(result.signal, snapshot, self.ctx.is_simulation, mode="new")
 
             # 6. Telemetry Pipeline — push full status to dashboard
             if self.telemetry and hasattr(self.telemetry, "dashboard") and self.telemetry.dashboard:
@@ -218,7 +240,7 @@ class TradingOrchestrator:
                     status_data = {
                         "orchestrator": {
                             "session_state": dash_fields.get("session_state", "---"),
-                            "runtime_posture": dash_fields.get("runtime_posture", "---"),
+                            "runtime_posture": f"SUSPENDED ({infra_state.reason})" if (infra_state and infra_state.suspended) else dash_fields.get("runtime_posture", "---"),
                             "data_health": dash_fields.get("data_health", "---"),
                         },
                         "latency_ms": latency_ms,

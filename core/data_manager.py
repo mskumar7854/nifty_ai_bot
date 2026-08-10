@@ -12,6 +12,13 @@ import numpy as np
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class InfrastructureState:
+    suspended: bool
+    resume_at: Optional[float]
+    reason: Optional[str]
 
 from models import MarketSnapshot, DataSource, OptionQuote
 from utils.indicators import (
@@ -231,6 +238,37 @@ class DataManager:
 
     # Removed legacy get_latest_data, get_snapshot, and fetch_latest
 
+
+    @property
+    def infrastructure_state(self) -> InfrastructureState:
+        import time
+        now = time.time()
+        
+        # Check OI circuit
+        oi_open = self.oi_circuit.get("open_until", 0.0)
+        # Check Quote circuit
+        quote_open = self.quote_circuit.get("open_until", 0.0)
+        
+        if now < oi_open or now < quote_open:
+            resume_at = max(oi_open, quote_open)
+            
+            reason_parts = []
+            if now < oi_open:
+                reason_parts.append(f"OI:{self.oi_circuit.get('reason', 'UNKNOWN')}")
+            if now < quote_open:
+                reason_parts.append(f"QUOTE:{self.quote_circuit.get('reason', 'UNKNOWN')}")
+                
+            return InfrastructureState(
+                suspended=True,
+                resume_at=resume_at,
+                reason=" | ".join(reason_parts)
+            )
+            
+        return InfrastructureState(
+            suspended=False,
+            resume_at=None,
+            reason=None
+        )
 
     def _save_circuit_state(self):
         try:

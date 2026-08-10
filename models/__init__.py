@@ -7,6 +7,7 @@ from .agent import AgentOutput, ConfluenceResult
 from .market import MarketSnapshot, OptionQuote, SessionPhase, TrapType, DataSource
 from .trade import TradeOutcome
 from .position import PositionState, TradeHealth, ExitDecision, ExitDecisionType, PositionAction
+from .sr_zone import SRZone, SRInteraction, SRState
 
 __all__ = [
     "MarketRegime", "RegimeState",
@@ -17,5 +18,6 @@ __all__ = [
     "MarketSnapshot", "OptionQuote", "SessionPhase", "TrapType", "DataSource",
     "TradeOutcome",
     "PositionState", "TradeHealth", "ExitDecision", "ExitDecisionType", "PositionAction",
-    "StrikeZone", "OIAnalysis", "MarketStructureAnalysis"
+    "StrikeZone", "OIAnalysis", "MarketStructureAnalysis",
+    "SRZone", "SRInteraction", "SRState",
 ]

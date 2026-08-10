@@ -248,6 +248,9 @@ class StructureAgent(BaseAgent):
             details["fvg_verdict"] = (
                 "Price near unfilled FVG — magnet zone"
             )
+            
+        # Event score fallback (neutral) since it's not dynamically computed yet
+        event_score = 50
 
         # Combine
         factors = {

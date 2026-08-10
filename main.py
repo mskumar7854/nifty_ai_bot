@@ -251,6 +251,14 @@ def main():
             system_state.save_operational_state(data)
         except Exception:
             pass
+            
+        try:
+            import subprocess
+            logger.info("Generating Daily Audit Report...")
+            subprocess.run([sys.executable, "tools/generate_daily_audit.py"], check=False)
+        except Exception as e:
+            logger.error(f"Failed to generate daily audit report: {e}")
+            
         release_lock()
 
 if __name__ == "__main__":

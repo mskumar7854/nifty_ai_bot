@@ -184,6 +184,15 @@ class DecisionEngine:
         self.oi_logger = OIAnalyticsLogger()
         self._shadow_oi = OIAgent(settings)
 
+        # ── S/R Engine (Shadow Mode — Gate 1) ──
+        # Runs every cycle but does NOT influence trade decisions.
+        # Logs zones, interactions, and forward returns to CSV.
+        # Promotion to active scoring requires Gate 2 validation.
+        from core.sr_engine import SREngine
+        from core.sr_analytics_logger import SRAnalyticsLogger
+        self.sr_engine = SREngine(settings)
+        self.sr_logger = SRAnalyticsLogger()
+
         # ── Mode detection — used for simulation-safe threshold relaxation ──
         self._is_simulation = os.getenv("SYSTEM_MODE", "SIMULATION").upper() == "SIMULATION"
 
@@ -719,6 +728,61 @@ class DecisionEngine:
         core_confluence = self.scorer.score(outputs)
         if core_confluence.dominant_direction == Direction.NEUTRAL:
              return self._no_trade_signal(snapshot, ["Phase 2 Halt: Core Agents Neutral (No Setup)"], outputs_dict)
+
+        # ── S/R ENGINE UPDATE (Shadow Mode — runs every cycle) ──────────────
+        # Extracts OI zones from shadow OI agent (if available) and combines
+        # with price-action pivots to build a complete S/R zone map.
+        # The sr_state is logged to CSV but does NOT affect trade decisions.
+        # ───────────────────────────────────────────────────────────────────────
+        _sr_state = None
+        try:
+            _oi_sup_zone = None
+            _oi_res_zone = None
+            # Try to extract OI zones from the shadow OI run (logged in the finally block)
+            # or from outputs_dict if OI agent is active
+            if "oi" in outputs_dict:
+                _oi_msa = outputs_dict["oi"].details.get("market_structure", {})
+                _oi_data = _oi_msa.get("oi", {})
+                if _oi_data:
+                    from models.oi_analysis import StrikeZone as _SZ
+                    _sup_raw = _oi_data.get("support_zone")
+                    _res_raw = _oi_data.get("resistance_zone")
+                    if _sup_raw and isinstance(_sup_raw, dict):
+                        _oi_sup_zone = _SZ(
+                            low=_sup_raw["low"], high=_sup_raw["high"],
+                            strength=_sup_raw.get("strength", 0),
+                            total_oi=_sup_raw.get("total_oi", 0),
+                            peak_strike=_sup_raw.get("peak_strike", 0),
+                            num_strikes=_sup_raw.get("num_strikes", 0),
+                        )
+                    elif _sup_raw and hasattr(_sup_raw, "low"):
+                        _oi_sup_zone = _sup_raw
+                    if _res_raw and isinstance(_res_raw, dict):
+                        _oi_res_zone = _SZ(
+                            low=_res_raw["low"], high=_res_raw["high"],
+                            strength=_res_raw.get("strength", 0),
+                            total_oi=_res_raw.get("total_oi", 0),
+                            peak_strike=_res_raw.get("peak_strike", 0),
+                            num_strikes=_res_raw.get("num_strikes", 0),
+                        )
+                    elif _res_raw and hasattr(_res_raw, "low"):
+                        _oi_res_zone = _res_raw
+
+            _sr_state = self.sr_engine.update(df, snapshot, _oi_sup_zone, _oi_res_zone)
+            self.sr_logger.log_state(_sr_state, snapshot, engine_decision="pending")
+
+            # Log interaction events with forward return tracking
+            if _sr_state.latest_event:
+                self.sr_logger.log_interaction(_sr_state.latest_event)
+                self.logger.debug(
+                    f"📊 [SR] {_sr_state.latest_event.event_type} at "
+                    f"{_sr_state.latest_event.zone_mid:.0f} | "
+                    f"Bias: {_sr_state.sr_bias} ({_sr_state.sr_bias_score:+.1f}) | "
+                    f"Zones: {_sr_state.total_zones} | "
+                    f"{_sr_state.trade_context[:80]}"
+                )
+        except Exception as e:
+            self.logger.error(f"S/R Engine update failed (non-fatal): {e}")
 
         # ─── EARLY KILL-SWITCH (Pre-Phase 3) ───────────────────────────────────────
         # Compute a quick preliminary score to detect hopeless cases BEFORE
@@ -1311,6 +1375,8 @@ class DecisionEngine:
             },
             "raw_confidence": round(getattr(self, "_last_raw_confidence", 0) * 100, 1),
             "suppression_reason": "REGIME_UNCERTAINTY" if _final_regime_penalty < 0.85 else ("RISK/VOLATILITY" if _final_regime_penalty < 0.95 else "AGENT_DIVERGENCE"),
+            # ── S/R Engine Context (Shadow Mode — informational only) ──
+            "sr_state": _sr_state.to_dict() if _sr_state else None,
         }
 
         signal = Signal(
