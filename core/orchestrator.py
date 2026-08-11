@@ -237,6 +237,15 @@ class TradingOrchestrator:
                     cycle_elapsed = time.perf_counter() - start_time
                     latency_ms = int(cycle_elapsed * 1000)
 
+                    # Position telemetry normalization
+                    positions = []
+                    pos_manager = getattr(self.ctx.system, "position_manager", None)
+                    if pos_manager:
+                        # Normalize dictionary to list and filter for active positions
+                        positions = [
+                            pos.to_dict() for pos in pos_manager.open_positions.values() if pos.is_active
+                        ]
+
                     status_data = {
                         "orchestrator": {
                             "session_state": dash_fields.get("session_state", "---"),
@@ -253,6 +262,12 @@ class TradingOrchestrator:
                         "risk": {
                             "trading_enabled": getattr(self.ctx.system, "trading_enabled", True),
                         },
+                        "positions": positions,
+                        "position_telemetry": {
+                            "count": len(positions),
+                            "active": positions,
+                        },
+                        "closed_positions_today": pos_manager.closed_positions_today if pos_manager else []
                     }
                     self.telemetry.dashboard.update_status(status_data)
                 except Exception as te:

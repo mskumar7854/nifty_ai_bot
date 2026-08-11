@@ -322,6 +322,7 @@ class DecisionPipeline:
                 signal.execution_status = "rejected"
                 signal.metadata["rejection_status"] = "Blocked by Simulation Guard"
                 signal.metadata["rejection_reason"] = "Max Open Positions"
+                signal.metadata["rejection_stage"] = "Simulation Guard"
                 self._record_v2_snapshot(signal, snapshot, None, None, "REJECTED", "Max Open Positions", timeline)
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
@@ -364,6 +365,7 @@ class DecisionPipeline:
             signal.execution_status = "rejected"
             signal.metadata["rejection_status"] = "Blocked by Master Gate"
             signal.metadata["rejection_reason"] = master_result.reason
+            signal.metadata["rejection_stage"] = "Master Gate"
             if hasattr(self.ctx.system, "_update_dashboard"):
                 self.ctx.system._update_dashboard(snapshot, signal)
             self._record_v2_snapshot(signal, snapshot, None, None, "REJECTED", master_result.reason, timeline)
@@ -453,6 +455,7 @@ class DecisionPipeline:
             signal.execution_status = "rejected"
             signal.metadata["rejection_status"] = "Blocked by Signal Integrity" if "integrity" in rej_reason.lower() else "Blocked by 10-Gate Filter"
             signal.metadata["rejection_reason"] = rej_reason
+            signal.metadata["rejection_stage"] = "10-Gate Filter"
             
             self._record_v2_snapshot(signal, snapshot, outputs, filter_result, "REJECTED", rej_reason, timeline)
 
@@ -483,6 +486,7 @@ class DecisionPipeline:
                 signal.execution_status = "rejected"
                 signal.metadata["rejection_status"] = "Blocked by Regime Adapter"
                 signal.metadata["rejection_reason"] = signal.execution_policy.reason
+                signal.metadata["rejection_stage"] = "Regime Adapter"
                 
                 if hasattr(self.ctx.system, "_update_dashboard"):
                     self.ctx.system._update_dashboard(snapshot, signal)
@@ -537,6 +541,7 @@ class DecisionPipeline:
                 signal.execution_status = "rejected"
                 signal.metadata["rejection_status"] = "Blocked by Options Filter"
                 signal.metadata["rejection_reason"] = log_entry["risk_reason"]
+                signal.metadata["rejection_stage"] = "Options Hard Filter"
                 if self.ctx.simulation:
                     self.ctx.simulation.record_signal(passed=False)
                 if hasattr(self.ctx.system, "_update_dashboard"):
@@ -562,6 +567,7 @@ class DecisionPipeline:
                 signal.execution_status = "rejected"
                 signal.metadata["rejection_status"] = "Blocked by Options Score"
                 signal.metadata["rejection_reason"] = log_entry["risk_reason"]
+                signal.metadata["rejection_stage"] = "Options Hard Filter"
                 if self.ctx.simulation:
                     self.ctx.simulation.record_signal(passed=False)
                 if hasattr(self.ctx.system, "_update_dashboard"):

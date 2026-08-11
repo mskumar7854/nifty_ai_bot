@@ -167,6 +167,14 @@ DASHBOARD_HTML = """
                 <div id="signal-icon" style="font-size: 40px">⏳</div>
                 <div class="signal-type" id="signal-type">WAITING FOR SIGNAL</div>
                 
+                <div id="execution-badge-container" style="display:none; text-align: center; margin: 10px 0; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 4px;">
+                    <div id="exec-badge" style="font-weight: bold; font-size: 14px; margin-bottom: 5px;"></div>
+                    <div style="font-size: 12px; color: #aaa;">
+                        <span id="exec-stage-label" style="display:none;">Stage: <span id="exec-stage" style="color: #fff;"></span> | </span>
+                        <span id="exec-reason-label" style="display:none;">Reason: <span id="exec-reason" style="color: #ffaa00;"></span></span>
+                    </div>
+                </div>
+                
                 <div id="execution-details" style="display:none;">
                     <div class="exec-grid">
                         <div class="exec-item"><span class="exec-label">Premium Entry</span><span class="exec-value" id="p-entry">—</span></div>
@@ -201,8 +209,8 @@ DASHBOARD_HTML = """
                 
                 <div class="confluence-meter">
                     <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px; color:#888;">
-                        <span id="conf-bull-text" class="bullish">BUY 0%</span>
-                        <span id="conf-bear-text" class="bearish">SELL 0%</span>
+                        <span id="conf-bull-text" class="bullish">BULLISH 0%</span>
+                        <span id="conf-bear-text" class="bearish">BEARISH 0%</span>
                     </div>
                     <div class="confluence-bar" style="background:#111; display:flex; justify-content:space-between;">
                         <div class="confluence-bull" id="conf-bull-fill" style="width: 0%; background:#00ff88;"></div>
@@ -466,17 +474,52 @@ DASHBOARD_HTML = """
             const container = document.getElementById('signal-container');
             const execDetails = document.getElementById('execution-details');
             const noTradeDetails = document.getElementById('no-trade-details');
+            const badgeContainer = document.getElementById('execution-badge-container');
 
             if (sig) {
-                const isTrade = sig.signal === 'BUY_CE' || sig.signal === 'BUY_PE';
                 const isCE = sig.signal === 'BUY_CE';
                 
-                document.getElementById('signal-type').textContent = sig.signal !== 'NO_TRADE' ? `🟢 ACTIVE SIGNAL — ${sig.symbol || 'NIFTY'} ${isCE ? 'CE' : 'PE'}` : 'NO TRADE DETECTED';
-                document.getElementById('signal-icon').textContent = isTrade ? (isCE ? '🟢' : '🔴') : '⏳';
+                // 1. Determine UI state based on exact hierarchy
+                let uiState = 'NO_TRADE';
+                if (data.positions && data.positions.length > 0) {
+                    uiState = 'ACTIVE_POSITION';
+                } else if (sig.signal_state === 'CANDIDATE' && (sig.execution_state === 'BLOCKED' || sig.execution_state === 'REJECTED')) {
+                    uiState = 'CANDIDATE_BLOCKED';
+                } else if (sig.signal_state === 'CANDIDATE') {
+                    uiState = 'CANDIDATE_PENDING';
+                }
                 
+                // 2. Render Signal State (Top Banner)
+                document.getElementById('signal-type').textContent = sig.signal_state === 'CANDIDATE' ? `🧠 SIGNAL CANDIDATE — ${sig.symbol || 'NIFTY'} ${isCE ? 'CE' : 'PE'}` : 'NO TRADE DETECTED';
+                document.getElementById('signal-icon').textContent = sig.signal_state === 'CANDIDATE' ? (isCE ? '🟢' : '🔴') : '⏳';
                 container.className = 'panel signal-panel ' + (isCE ? 'buy-ce' : (sig.signal==='BUY_PE' ? 'buy-pe' : ''));
 
-                if (isTrade) {
+                // 3. Render Execution State (Badge)
+                if (uiState === 'ACTIVE_POSITION') {
+                    badgeContainer.style.display = 'block';
+                    document.getElementById('exec-badge').innerHTML = '🟢 ACTIVE POSITION';
+                    document.getElementById('exec-badge').style.color = '#00ff88';
+                    document.getElementById('exec-stage-label').style.display = 'none';
+                    document.getElementById('exec-reason-label').style.display = 'none';
+                } else if (uiState === 'CANDIDATE_BLOCKED') {
+                    badgeContainer.style.display = 'block';
+                    document.getElementById('exec-badge').innerHTML = '🔴 EXECUTION BLOCKED';
+                    document.getElementById('exec-badge').style.color = '#ff4444';
+                    document.getElementById('exec-stage-label').style.display = 'inline';
+                    document.getElementById('exec-reason-label').style.display = 'inline';
+                    document.getElementById('exec-stage').textContent = sig.rejection_stage || 'Execution Gate';
+                    document.getElementById('exec-reason').textContent = sig.rejection_reason || 'Unknown Reason';
+                } else if (uiState === 'CANDIDATE_PENDING') {
+                    badgeContainer.style.display = 'block';
+                    document.getElementById('exec-badge').innerHTML = '⏳ EXECUTION PENDING';
+                    document.getElementById('exec-badge').style.color = '#ffaa00';
+                    document.getElementById('exec-stage-label').style.display = 'none';
+                    document.getElementById('exec-reason-label').style.display = 'none';
+                } else {
+                    badgeContainer.style.display = 'none';
+                }
+
+                if (uiState !== 'NO_TRADE') {
                     execDetails.style.display = 'block';
                     noTradeDetails.style.display = 'none';
                     
@@ -558,8 +601,8 @@ DASHBOARD_HTML = """
                     const bullPct = total > 0 ? (bull / total) * 100 : 0;
                     const bearPct = total > 0 ? (bear / total) * 100 : 0;
                     
-                    document.getElementById('conf-bull-text').textContent = `BUY ${Math.round(bullPct)}%`;
-                    document.getElementById('conf-bear-text').textContent = `SELL ${Math.round(bearPct)}%`;
+                    document.getElementById('conf-bull-text').textContent = `BULLISH ${Math.round(bullPct)}%`;
+                    document.getElementById('conf-bear-text').textContent = `BEARISH ${Math.round(bearPct)}%`;
                     document.getElementById('conf-bull-fill').style.width = bullPct + '%';
                     document.getElementById('conf-bear-fill').style.width = bearPct + '%';
                 }

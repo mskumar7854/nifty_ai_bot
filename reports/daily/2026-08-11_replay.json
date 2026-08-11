@@ -1,0 +1,36 @@
+[
+  {
+    "date":"2026-08-11",
+    "time":"09:28",
+    "snapshot_id":"20260811-092817-001-5298",
+    "signal":"BUY_CE",
+    "spot":24496.1,
+    "raw_conf":37.5,
+    "sl_pts":77.5,
+    "mfe_pts":0.0,
+    "mfe_r":0.0,
+    "mae_pts":61.5,
+    "mae_r":0.79,
+    "outcome":"TIME_EXIT",
+    "realized_r":-0.47,
+    "classification":"TN",
+    "reason":"LOW_CONFIDENCE"
+  },
+  {
+    "date":"2026-08-11",
+    "time":"13:38",
+    "snapshot_id":"20260811-133805-14692-35E4",
+    "signal":"BUY_PE",
+    "spot":24459.45,
+    "raw_conf":33.3,
+    "sl_pts":10.0,
+    "mfe_pts":0.0,
+    "mfe_r":0.0,
+    "mae_pts":0.0,
+    "mae_r":0.0,
+    "outcome":"TIME_EXIT",
+    "realized_r":0.0,
+    "classification":"TN",
+    "reason":"LOW_AGENT_AGREEMENT"
+  }
+]

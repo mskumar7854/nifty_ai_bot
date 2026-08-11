@@ -61,13 +61,25 @@ class Signal:
     trace: Optional[Any] = None  # Store the DecisionTrace
 
     def to_dict(self) -> dict:
+        # Determine internal normalized states for dashboard UI
+        signal_state = "NO_SIGNAL" if self.signal_type == SignalType.NO_TRADE else "CANDIDATE"
+        execution_state = self.execution_status.upper() if getattr(self, "execution_status", "") else "PENDING"
+        if signal_state == "NO_SIGNAL":
+            execution_state = "NOT_REQUESTED"
+            
         return {
             "time": self.timestamp.strftime("%H:%M:%S"),
             "signal": self.signal_type.value,
             "direction": self.direction.value,
             "confidence": f"{self.confidence:.1f}%",
             "execution_status": self.execution_status,
+            
+            # Normalized UI Telemetry Contract
+            "signal_state": signal_state,
+            "execution_state": execution_state,
             "rejection_reason": self.metadata.get("rejection_reason", ""),
+            "rejection_stage": self.metadata.get("rejection_stage", ""),
+            
             "grade": self.grade.value,
             "strength": self.strength.value,
             "entry": self.entry_price,
