@@ -122,7 +122,7 @@ class TradeFilterConfig:
     # ── CONFIDENCE GATE (RAISED) ──
     min_signal_confidence: float = 80.0         # was 75 → now 80
     min_confluence_score: float = 70.0          # was 65 → now 70
-    min_agent_agreement_pct: float = 55.0       # was 50 → now 55
+    min_agent_agreement_pct: float = 35.0       # v5.0.2-REF: lowered to 35.0 (was 55.0) to capture specialist opportunities
 
     # ── REGIME GATE ──
     allowed_regimes_for_momentum: List[str] = field(

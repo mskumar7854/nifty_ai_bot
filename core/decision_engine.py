@@ -1425,6 +1425,23 @@ class DecisionEngine:
             f"Grade: {signal.grade.value}{_prob_cap_note} | "
             f"Unified penalty: {regime_penalty:.3f}"
         )
+
+        # v5.0.1-FIX: Runtime Grade Audit — captures all grading inputs for
+        # replay fidelity verification. This log proves whether the runtime
+        # grader produces the expected grade or whether the Grade D findings
+        # from the snapshot analysis were a persistence artifact.
+        _conf_ratio = signal.confluence.confluence_ratio if signal.confluence else 0
+        _rr_ratio = getattr(signal, "risk_reward_ratio", 0)
+        _dom_pct = meta.get("dominance_pct", 0)
+        _dir_align = meta.get("directional_alignment", False)
+        _dom_prob = meta.get("dominant_prob", None)
+        self.logger.info(
+            f"[GRADE_AUDIT] signal={signal.id} grade={signal.grade.value} "
+            f"confluence_ratio={_conf_ratio:.3f} risk_reward={_rr_ratio:.2f} "
+            f"dominance_pct={_dom_pct} directional_alignment={_dir_align} "
+            f"regime={signal.regime.value if hasattr(signal.regime, 'value') else signal.regime} "
+            f"dominant_prob={f'{_dom_prob:.4f}' if _dom_prob is not None else 'None'}"
+        )
         
         # Enforce MIN_ACTIVE_DIRECTIONAL_AGENTS for A / A+
         MIN_ACTIVE_DIRECTIONAL_AGENTS = 4

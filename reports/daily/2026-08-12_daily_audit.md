@@ -4,7 +4,7 @@
 
 # Daily Trading Session Audit
 
-**Date**: 2026-08-11  
+**Date**: 2026-08-12  
 **Campaign**: 2026-08-SHADOW-V1  
 **Engine**: v5.0.0-REF  
 **Mode**: SIMULATION  
@@ -19,13 +19,13 @@
 
 | Metric | Value |
 | :--- | ---: |
-| Trading Cycles | 46 |
-| Signals Generated | 46 |
+| Trading Cycles | 47 |
+| Signals Generated | 47 |
 | Trades Executed | 0 |
 | Runtime Errors (Fatal) | 0 |
 | Runtime Errors (Recoverable) | 0 |
 | Data Integrity | 100% |
-| Campaign Progress | 7 / 20 sessions |
+| Campaign Progress | 8 / 20 sessions |
 
 ## 2. Market Summary
 
@@ -50,27 +50,29 @@
 
 | Metric | Value |
 | :--- | ---: |
-| Signals Generated | 46 |
-| BUY_CE | 24 |
-| BUY_PE | 22 |
+| Signals Generated | 47 |
+| BUY_CE | 23 |
+| BUY_PE | 24 |
 | Trades Executed | 0 |
-| Rejected | 46 |
+| Rejected | 47 |
 
 **Top Rejection Reasons**:
 
 | Reason | Count |
 | :--- | ---: |
-| LOW_AGENT_AGREEMENT | 41 |
-| LOW_CONFIDENCE | 5 |
+| LOW_AGENT_AGREEMENT | 39 |
+| LOW_CONFIDENCE | 6 |
+| CHOP_ZONE_ACTIVE | 1 |
+| LOW_CONFLUENCE | 1 |
 
 ## 5. Execution Quality
 
 | Metric | Value |
 | :--- | ---: |
-| Effective Participation | 40.2% |
-| Neutral Abstention | 59.8% |
-| Average Confidence | 52.3% |
-| Average EV | 0.59R |
+| Effective Participation | 42.3% |
+| Neutral Abstention | 57.7% |
+| Average Confidence | 53.6% |
+| Average EV | 0.57R |
 | Precision | 0.0 |
 | Recall | 0.0 |
 | Balanced Accuracy | 0.5 |
@@ -81,19 +83,19 @@
 
 | Metric | Value |
 | :--- | ---: |
-| Candidate Signals | 2 |
+| Candidate Signals | 11 |
 | True Positives (TP) | 0 |
-| True Negatives (TN) | 2 |
+| True Negatives (TN) | 10 |
 | False Positives (FP) | 0 |
-| False Negatives (FN) | 0 |
-| Replay Win Rate | 0.0% |
-| Replay Expectancy | -0.27R |
+| False Negatives (FN) | 1 |
+| Replay Win Rate | 9.1% |
+| Replay Expectancy | -0.57R |
 
 ## 7. Readiness Campaign Progress
 
 | Gate | Status |
 | :--- | :---: |
-| Replay Sessions (7/20) | ❌ |
+| Replay Sessions (8/20) | ❌ |
 | Profit Factor > 1.50 | ✅ |
 | Expectancy > +0.40R | ❌ |
 | Drawdown < 5.0R | ✅ |
@@ -103,7 +105,7 @@
 | Fatal Runtime Errors = 0 | ✅ |
 | Telemetry Integrity 100% | ✅ |
 
-**Campaign Status**: 🛑 NOT READY (13 sessions remaining)
+**Campaign Status**: 🛑 NOT READY (12 sessions remaining)
 
 ## 8. Issues Detected
 
@@ -122,8 +124,8 @@ overall_status: NOT_READY
 
 | Metric | Value |
 | :--- | ---: |
-| Replay Sessions | 7 / 20 |
-| Replay Expectancy (Today) | -0.27R |
+| Replay Sessions | 8 / 20 |
+| Replay Expectancy (Today) | -0.57R |
 | Runtime Errors (Today) | 0 fatal, 0 recoverable |
 | Consecutive Healthy Sessions | 7 |
 
@@ -131,9 +133,9 @@ overall_status: NOT_READY
 
 Today's simulation completed successfully.
 No fatal runtime failure(s) occurred.
-No trades were executed. 46 signal(s) were rejected by filters.
+No trades were executed. 47 signal(s) were rejected by filters.
 Replay validation showed negative expectancy.
-The validation campaign now contains **7** of the required **20** sessions.
+The validation campaign now contains **8** of the required **20** sessions.
 Live deployment remains **blocked** under the Stage-Gate Governance Policy until all readiness criteria are satisfied.
 
 ## 12. Tomorrow's Checklist
@@ -147,7 +149,7 @@ Live deployment remains **blocked** under the Stage-Gate Governance Policy until
 
 **No engineering changes scheduled.**  
 **Code Freeze**: ACTIVE  
-**Campaign Progress**: 7 / 20
+**Campaign Progress**: 8 / 20
 
 ---
-*Report generated automatically at 2026-08-11T15:40:03.209087 by `tools/generate_daily_audit.py`*
+*Report generated automatically at 2026-08-12T15:40:08.856512 by `tools/generate_daily_audit.py`*

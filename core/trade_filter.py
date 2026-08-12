@@ -290,8 +290,27 @@ class TradeFilter:
         # ── GATE 1: Confidence (Delegated to Decision Engine Tuner) ──
         # We no longer use a static grade-based floor. 
         # The authoritative threshold comes from the ThresholdTuner (via DecisionEngine's adaptive_threshold).
-        adaptive_threshold = getattr(signal, "adaptive_threshold", None) or getattr(signal, "metadata", {}).get("adaptive_threshold", self.cfg.min_signal_confidence * 100.0)
-        
+        # v5.0.1-FIX: Use explicit None checks instead of `or` (0.0 is falsy).
+        # v5.0.1-FIX: Fallback uses min_signal_confidence directly (already 0-100%).
+        adaptive_threshold = getattr(signal, "adaptive_threshold", None)
+
+        if adaptive_threshold is None:
+            adaptive_threshold = getattr(signal, "metadata", {}).get(
+                "adaptive_threshold"
+            )
+
+        if adaptive_threshold is None:
+            adaptive_threshold = self.cfg.min_signal_confidence
+
+        # v5.0.1-FIX: Sanity guard — detect invalid thresholds loudly, normalize safely.
+        if adaptive_threshold > 100.0:
+            self.logger.error(
+                f"[GATE_CONFIG_ERROR] adaptive_threshold={adaptive_threshold}% is invalid (>100%). "
+                f"Expected range: 0..100. Source: fallback. "
+                f"Normalizing to min_signal_confidence={self.cfg.min_signal_confidence}%"
+            )
+            adaptive_threshold = self.cfg.min_signal_confidence
+
         # ── Apply high-conviction relaxation ──
         if _high_conviction or _strong_consensus:
             # Score compressed by regime penalty, not quality failure

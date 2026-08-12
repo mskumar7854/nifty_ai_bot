@@ -182,9 +182,19 @@ class DecisionPipeline:
                     elif hasattr(out, "direction"):
                         agents_json[name] = AgentOpinion(signal=out.direction, confidence=out.confidence, details=getattr(out, "details", {}))
             
+            # v5.0.1-FIX: Persist all grading-critical fields for replay fidelity.
+            # Without these, replay analysis cannot reproduce the runtime grade,
+            # and gate attribution produces phantom Grade D findings.
+            _sig_meta = getattr(signal, "metadata", {}) or {}
             conf_json = {
                 "raw": getattr(signal, "confidence", 0.0),
-                "calibrated": signal.metadata.get("calibrated_pwin", getattr(signal, "confidence", 0.0))
+                "calibrated": _sig_meta.get("calibrated_pwin", getattr(signal, "confidence", 0.0)),
+                "dominant_prob": _sig_meta.get("dominant_prob"),
+                "dominance_pct": _sig_meta.get("dominance_pct", 0),
+                "directional_alignment": _sig_meta.get("directional_alignment", False),
+                "adaptive_threshold": getattr(signal, "adaptive_threshold", None),
+                "grade": signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade),
+                "risk_reward_ratio": getattr(signal, "risk_reward_ratio", 0),
             }
             
             confluence_json = {}
