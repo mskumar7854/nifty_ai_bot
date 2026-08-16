@@ -23,7 +23,7 @@ def get_git_commit_hash() -> str:
     except Exception:
         return "a4f8e91b2c3d"
 
-def generate_scorecard(campaign_id: str = "2026-08-SHADOW-V1") -> dict:
+def generate_scorecard(campaign_id: str = "2026-08-SHADOW-V2") -> dict:
     """
     Automated Stage-Gate Readiness Scorecard Generator.
     Calculates gate metrics exclusively from real observed database snapshots and OMS execution logs.

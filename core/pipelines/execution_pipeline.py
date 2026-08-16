@@ -45,12 +45,19 @@ class ExecutionPipeline:
         # ── PHASE A ──
         # 1. Resolve Instrument
         try:
+            regime_ctx = signal.metadata.get("regime_context") if hasattr(signal, "metadata") and signal.metadata else None
+            regime_val = regime_ctx or signal.regime
+            
             instrument_info = OptionContractBuilder.resolve_instrument(
                 direction=signal.direction.value,
                 spot=snapshot.price,
                 confidence=signal.confidence,
-                regime=signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime)
+                regime=regime_val
             )
+            if instrument_info.get("strike") is None or instrument_info.get("selection_type") == "NO_TRADE":
+                reason = instrument_info.get("selection_reason", "NO_TRADE policy")
+                logger.warning(f"🚫 [EXEC] Strike policy blocked execution: {reason}")
+                return self._build_failed_result(f"Strike Policy Blocked: {reason}")
         except Exception as e:
             logger.error(f"❌ [EXEC] Instrument resolution failed: {e}")
             return self._build_failed_result(f"Instrument Resolution Failed: {e}")
@@ -70,6 +77,9 @@ class ExecutionPipeline:
             if quote is None:
                 return self._build_failed_result("Premium Fetch Returned None")
             instrument_info["security_id"] = getattr(quote, "security_id", "")
+            instrument_info["actual_iv"] = getattr(quote, "iv", None)
+            instrument_info["spread_pct"] = getattr(quote, "spread_pct", None)
+            instrument_info["volume"] = getattr(quote, "volume", None)
         except Exception as e:
             logger.error(f"❌ [EXEC] Quote fetch failed: {e}")
             return self._build_failed_result(f"Premium Fetch Failed: {e}")
@@ -93,6 +103,9 @@ class ExecutionPipeline:
         signal.metadata["premium_t1"] = levels["premium_t1"]
         signal.metadata["premium_t2"] = levels["premium_t2"]
         signal.metadata["decay_risk"] = levels["decay_risk"]
+        signal.metadata["pricing_method"] = levels.get("pricing_method", "DELTA_APPROXIMATION")
+        signal.metadata["delta_source"] = levels.get("delta_source", "HEURISTIC")
+        signal.metadata["delta_used"] = levels.get("delta_used", 0.50)
 
         # 4. Route to Simulation or Queue
         if is_simulation:
@@ -338,12 +351,23 @@ class ExecutionPipeline:
             try:
                 if action_type == "FULL_EXIT":
                     if self.settings.system_mode.mode != "SIMULATION":
-                        await __import__('asyncio').to_thread(
+                        close_res = await __import__('asyncio').to_thread(
                             pos_manager.close_position, 
                             pid, 
                             0.0,  # Price usually fetched inside or passed if available
                             getattr(action, "reason", "FULL_EXIT")
                         )
+                        if close_res and hasattr(self.ctx, "telemetry") and self.ctx.telemetry:
+                            try:
+                                await self.ctx.telemetry.dispatch_trade_close(
+                                    trade_id=pid,
+                                    pnl=close_res.get("net_pnl", close_res.get("pnl", 0.0)),
+                                    outcome=close_res.get("reason", "FULL_EXIT"),
+                                    symbol=getattr(self.settings, "symbol", "NIFTY"),
+                                    hold_mins=close_res.get("hold_minutes", 0.0)
+                                )
+                            except Exception as alert_err:
+                                logger.error(f"Live exit alert failed safely: {alert_err}")
                     else:
                         if hasattr(system, "simulation"):
                             system.simulation._close_trade(pid, 0.0, getattr(action, "reason", "FULL_EXIT"))

@@ -3,17 +3,40 @@ from dataclasses import dataclass
 from typing import Dict, Any
 
 class MarketRegime(Enum):
-    TRENDING_UP = "TRENDING_UP"
-    TRENDING_DOWN = "TRENDING_DOWN"
+    STRONG_TREND_UP = "STRONG_TREND_UP"
+    WEAK_TREND_UP = "WEAK_TREND_UP"
+    STRONG_TREND_DOWN = "STRONG_TREND_DOWN"
+    WEAK_TREND_DOWN = "WEAK_TREND_DOWN"
     RANGING = "RANGING"
-    VOLATILE = "VOLATILE"
+    VOLATILE_CHOPPY = "VOLATILE_CHOPPY"
     SQUEEZE = "SQUEEZE"
     BREAKOUT = "BREAKOUT"
-    LOW_VOL = "LOW_VOL"
-    TREND_UP = "TREND_UP"     # Legacy compatibility
-    TREND_DOWN = "TREND_DOWN" # Legacy compatibility
-    RANGE = "RANGE"           # Legacy compatibility
     UNKNOWN = "UNKNOWN"
+    # Legacy compatibility aliases
+    TRENDING_UP = "TRENDING_UP"
+    TRENDING_DOWN = "TRENDING_DOWN"
+    VOLATILE = "VOLATILE"
+    LOW_VOL = "LOW_VOL"
+    TREND_UP = "TREND_UP"
+    TREND_DOWN = "TREND_DOWN"
+    RANGE = "RANGE"
+
+@dataclass
+class RegimeContext:
+    raw_regime: str
+    normalized_regime: MarketRegime
+    trend_strength: str  # "STRONG" | "WEAK" | "NEUTRAL"
+    strike_policy: str   # "ATM" | "ITM_1_STEP" | "NO_TRADE"
+    details: Dict[str, Any] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "raw_regime": self.raw_regime,
+            "normalized_regime": self.normalized_regime.value if hasattr(self.normalized_regime, "value") else str(self.normalized_regime),
+            "trend_strength": self.trend_strength,
+            "strike_policy": self.strike_policy,
+            "details": self.details or {}
+        }
 
 @dataclass
 class RegimeState:
@@ -31,3 +54,4 @@ class RegimeState:
             "trend_strength": round(self.trend_strength, 2),
             "tradability": round(self.tradability, 2)
         }
+

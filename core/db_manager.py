@@ -290,6 +290,30 @@ class DBManager:
             )
             """)
 
+            # 9. Persistent Trade Outcomes (P0)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS trade_outcomes (
+                trade_id TEXT PRIMARY KEY,
+                signal_timestamp TEXT,
+                opened_at TEXT,
+                closed_at TEXT,
+                contract TEXT,
+                strike REAL,
+                option_type TEXT,
+                qty INTEGER,
+                entry REAL,
+                sl REAL,
+                target REAL,
+                exit_price REAL,
+                net_pnl REAL,
+                r_multiple REAL,
+                result TEXT,
+                confidence REAL,
+                grade TEXT,
+                source TEXT
+            )
+            """)
+
             await db.commit()
         logger.info("📦 SQLite Database connected and verified (v4.6.1 Hardened).")
 

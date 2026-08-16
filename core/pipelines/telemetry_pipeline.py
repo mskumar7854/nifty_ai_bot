@@ -13,6 +13,8 @@ from performance_logger import PerformanceLogger
 from utils.tasks import fire_and_log
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
+from models import Signal, SignalType
+
 logger = get_logger("telemetry")
 
 class TelemetryPipeline:
@@ -45,6 +47,9 @@ class TelemetryPipeline:
         )
         self.alert_manager = AlertManager(self.settings, self.telegram_bot)
         
+        # Idempotency cache for trade close notifications
+        self._notified_close_trades: set = set()
+        
         # 3. Dashboard
         self.dashboard = None
         if self.settings.dashboard.enabled:
@@ -69,6 +74,62 @@ class TelemetryPipeline:
         self._latency_history = []
         self._current_latencies = {}
         self._last_telemetry_log_ts = 0.0
+
+    async def dispatch_signal(self, signal: Signal) -> None:
+        """
+        Dispatches actionable trading signals to alert channels (Telegram/Console).
+        Guaranteed non-blocking, isolated from decision and execution pipelines.
+        """
+        if signal is None:
+            return
+            
+        stype = getattr(signal, "signal_type", None)
+        if stype == SignalType.NO_TRADE or str(stype).upper() in ("NO_TRADE", "SIGNALTYPE.NO_TRADE"):
+            return
+
+        if self.alert_manager:
+            try:
+                await self.alert_manager.dispatch(signal)
+            except Exception as e:
+                logger.error(f"Signal alert dispatch failed safely: {e}")
+
+    async def dispatch_trade_close(
+        self,
+        trade_id: str,
+        pnl: float,
+        outcome: str,
+        symbol: str = "",
+        hold_mins: float = 0.0
+    ) -> None:
+        """
+        Dispatches trade-close outcome alert to Telegram with idempotency protection.
+        """
+        if not trade_id:
+            return
+
+        tid_str = str(trade_id)
+        if tid_str in self._notified_close_trades:
+            logger.debug("Trade close alert already sent for %s — skipping duplicate", tid_str)
+            return
+
+        self._notified_close_trades.add(tid_str)
+        if len(self._notified_close_trades) > 1000:
+            try:
+                self._notified_close_trades.pop()
+            except KeyError:
+                pass
+
+        if self.telegram_bot and hasattr(self.telegram_bot, "notify_trade_close"):
+            try:
+                await self.telegram_bot.notify_trade_close(
+                    trade_id=tid_str,
+                    pnl=float(pnl),
+                    outcome=str(outcome),
+                    symbol=str(symbol),
+                    hold_mins=float(hold_mins)
+                )
+            except Exception as e:
+                logger.error(f"Trade close alert dispatch failed safely: {e}")
 
     def start_dashboard(self):
         if self.dashboard:

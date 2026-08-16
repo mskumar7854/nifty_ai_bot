@@ -21,6 +21,10 @@ def persist_snapshot_v2(snap: DecisionSnapshotV2, db_path: Optional[str] = None)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         with conn:
+            try:
+                conn.execute("ALTER TABLE decision_snapshots_v2 ADD COLUMN amd_json TEXT DEFAULT '{}'")
+            except Exception:
+                pass
             conn.execute(
                 """
                 INSERT OR IGNORE INTO decision_snapshots_v2 (
@@ -28,12 +32,12 @@ def persist_snapshot_v2(snap: DecisionSnapshotV2, db_path: Optional[str] = None)
                     schema_version, pipeline_version, strategy_version, git_commit, snapshot_hash,
                     parent_snapshot_id, trade_id, shadow_trade_id, experiment_id, replay_run_id,
                     market_json, agents_json, confidence_json, confluence_json, expected_value_json, 
-                    structure_json, risk_json, gate_results_json, decision_json, execution_json, 
+                    structure_json, risk_json, amd_json, gate_results_json, decision_json, execution_json, 
                     event_timeline_json, replay_status_json, outcome_json
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -47,6 +51,7 @@ def persist_snapshot_v2(snap: DecisionSnapshotV2, db_path: Optional[str] = None)
                     json.dumps(snap.expected_value, default=str),
                     json.dumps(snap.structure, default=str),
                     json.dumps(snap.risk, default=str),
+                    json.dumps(snap.amd, default=str),
                     json.dumps({k: {"passed": v.passed, "actual": v.actual, "required": v.required, "detail": v.detail} for k, v in snap.gate_results.items()}, default=str),
                     json.dumps(snap.decision, default=str),
                     json.dumps(snap.execution, default=str),

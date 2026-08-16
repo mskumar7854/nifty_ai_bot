@@ -39,3 +39,8 @@ Every future change must satisfy these rules.
 ## Rule 8: Architecture Versioning
 - Embed ARCHITECTURE_VERSION = "3.2" inside all replay logs and telemetry.
 - Prevents ambiguity years down the line about which platform produced which trades.
+
+## Rule 9: Rejection Taxonomy (Predictive vs. Capacity)
+- **Predictive Rejection**: Signal fails economic or structural gating (e.g., LOW_CONFIDENCE, LOW_EV, PEV_TOO_LOW, GRADE_FAILURE). Represents strategy quality.
+- **Capacity / Operational Rejection**: Signal is good, but execution is blocked by state limits (e.g., MAX_OPEN_POSITIONS, DAILY_TRADE_LIMIT, OMS_CAPACITY). Represents portfolio constraints.
+- These two must NEVER be conflated in telemetry, scoring, or analysis, to avoid mistaking capacity limits for predictive failures.

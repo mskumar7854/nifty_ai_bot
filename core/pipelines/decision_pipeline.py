@@ -55,9 +55,23 @@ class DecisionPipeline:
         self.ev_engine = ExpectedValueEngine(min_ev_r=0.50, min_ev_score=60.0)
         self.opportunity_ranker = OpportunityRanker()
         self.trend_tracker = TrendStructureTracker(max_reentry_per_trend=2)
-        
         # Link trend_tracker to trade_filter
         self.trade_filter.trend_tracker = self.trend_tracker
+        
+        # Instantiate AMDEngine (V1 Read-Only Shadow Mode)
+        from core.amd_engine import AMDEngine
+        
+        tf_str = getattr(self.settings, "entry_timeframe", "5min")
+        try:
+            tf_mins = int(tf_str.replace("min", "").replace("m", ""))
+        except:
+            tf_mins = 5
+            
+        if hasattr(self.settings, "amd"):
+            self.amd_engine = AMDEngine(self.settings.amd, symbol=getattr(self.settings, "symbol", "NIFTY"), timeframe_minutes=tf_mins)
+        else:
+            from config.settings import AMDConfig
+            self.amd_engine = AMDEngine(AMDConfig(), symbol=getattr(self.settings, "symbol", "NIFTY"), timeframe_minutes=tf_mins)
 
         self.options_analyzer = OptionsAnalyzer(mode=self.settings.system_mode.mode)
         
@@ -239,6 +253,7 @@ class DecisionPipeline:
                 expected_value=ev_json,
                 structure=getattr(signal, "structure_info", {}),
                 risk=getattr(signal, "risk_info", {}),
+                amd=getattr(signal, "amd_state", None).to_dict() if hasattr(signal, "amd_state") else {},
                 gate_results=gate_results,
                 decision=decision_json,
                 execution=execution_json,
@@ -263,6 +278,44 @@ class DecisionPipeline:
         # 1. Generate Signal
         signal = self.decision_engine.process(df, snapshot)
         timeline["Agents Completed"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
+        # 1b. Evaluate AMD Shadow Mode
+        try:
+            if not df.empty:
+                current_candle = df.iloc[-1]
+                ts = df.index[-1] if hasattr(df.index, 'date') else datetime.now()
+                atr = getattr(snapshot, "atr", current_candle.get("atr", 50.0))
+                struct_facts = getattr(signal, "structure_info", {})
+                
+                # Check for Identity / Session Changes
+                snap_sym = getattr(snapshot, "symbol", self.amd_engine.symbol)
+                snap_tf = getattr(snapshot, "timeframe", self.amd_engine.timeframe_minutes)
+                
+                identity_changed = (snap_sym != self.amd_engine.symbol) or (snap_tf != self.amd_engine.timeframe_minutes)
+                session_changed = self.amd_engine.state.timestamp and self.amd_engine.state.timestamp.date() != ts.date()
+                
+                if identity_changed or session_changed:
+                    self.amd_engine.symbol = snap_sym
+                    self.amd_engine.timeframe_minutes = snap_tf
+                    self.amd_engine.reset()
+                
+                # Evaluate State
+                amd_state = self.amd_engine.evaluate(
+                    candle=current_candle,
+                    atr=atr,
+                    structural_facts=struct_facts,
+                    timestamp=ts
+                )
+                signal.amd_state = amd_state
+                timeline["AMD Evaluated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        except Exception as e:
+            logger.error(f"AMD Engine failed: {e}")
+            from models.amd_state import AMDState
+            err_state = AMDState()
+            err_state.amd_status = "ERROR"
+            err_state.amd_error_type = type(e).__name__
+            signal.amd_state = err_state
+
         latencies["decision_ms"] = int((time.perf_counter() - t_decision) * 1000)
         
         self.trade_sequence += 1

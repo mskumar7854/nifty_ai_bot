@@ -23,6 +23,7 @@ No exceptions. No shortcuts.
 
 import os
 import json
+import sqlite3
 import uuid
 import numpy as np
 from datetime import datetime, date, timedelta
@@ -571,9 +572,20 @@ class SimulationEngine:
 
         # ── Adjust SL/TP relative to actual fill price + Execution Policy ──
         premium_levels = getattr(signal, "metadata", {}).get("premium_levels", {})
+        if not premium_levels and getattr(signal, "metadata", {}).get("premium_sl"):
+            premium_levels = {
+                "premium_entry": signal.metadata.get("premium_entry"),
+                "premium_sl": signal.metadata.get("premium_sl"),
+                "premium_t1": signal.metadata.get("premium_t1"),
+                "premium_t2": signal.metadata.get("premium_t2"),
+            }
+
+        pricing_method = "PREMIUM_LEVELS"
+        delta_source = "ACTUAL" if instrument.get("actual_delta") is not None else ("HEURISTIC" if instrument.get("estimated_delta_heuristic") is not None else "DEFAULT")
+        delta_used = instrument.get("actual_delta") or instrument.get("estimated_delta_heuristic") or 0.50
         
-        if premium_levels and "premium_sl" in premium_levels:
-            # We are trading an option. Use the translated premium distances.
+        if premium_levels and "premium_sl" in premium_levels and premium_levels["premium_sl"] is not None:
+            # Priority 1: Use explicit translated premium levels
             expected_entry = premium_levels.get("premium_entry", realistic_entry)
             expected_sl = premium_levels.get("premium_sl", expected_entry - 5.0)
             
@@ -592,14 +604,20 @@ class SimulationEngine:
             orig_t1_dist = t1_dist
             orig_t2_dist = abs(expected_t2 - expected_entry)
         else:
-            # Fallback for Spot simulation
-            sl_dist = abs(signal.entry_price - signal.stop_loss) * sl_multiplier
-            t1_dist = abs(signal.target_1 - signal.entry_price)
-            t2_dist = abs(signal.target_2 - signal.entry_price) * tp2_multiplier
+            # Fallback approximation: Scale spot distances by option delta (never 1:1 spot points)
+            pricing_method = "FALLBACK_APPROXIMATION"
+            raw_spot_sl_dist = abs(signal.entry_price - signal.stop_loss)
+            raw_spot_t1_dist = abs(signal.target_1 - signal.entry_price)
+            raw_spot_t2_dist = abs(signal.target_2 - signal.entry_price)
             
-            orig_sl_dist = abs(signal.entry_price - signal.stop_loss)
-            orig_t1_dist = abs(signal.target_1 - signal.entry_price)
-            orig_t2_dist = abs(signal.target_2 - signal.entry_price)
+            base_sl_dist = max(raw_spot_sl_dist * delta_used, realistic_entry * 0.15, 5.0)
+            sl_dist = base_sl_dist * sl_multiplier
+            t1_dist = max(raw_spot_t1_dist * delta_used, base_sl_dist * 1.5)
+            t2_dist = max(raw_spot_t2_dist * delta_used, base_sl_dist * 2.5) * tp2_multiplier
+            
+            orig_sl_dist = base_sl_dist
+            orig_t1_dist = t1_dist
+            orig_t2_dist = abs(raw_spot_t2_dist * delta_used)
 
         adjusted_sl = round(realistic_entry - sl_dist, 2)
         adjusted_t1 = round(realistic_entry + t1_dist, 2)
@@ -668,6 +686,9 @@ class SimulationEngine:
         trade.transition_to(TradeState.ORDER_PENDING, self.event_manager)
         trade.transition_to(TradeState.ORDER_FILLED, self.event_manager)
         trade.transition_to(TradeState.POSITION_OPEN, self.event_manager, payload=trade.to_dict())
+        
+        # Persist as OPEN
+        self._persist_trade_outcome(trade)
 
         # ── Phase B: Record execution into BurninTracker ──
         if self.burnin_tracker:
@@ -724,9 +745,9 @@ class SimulationEngine:
                 return atm_premium
 
         # ── Tier 3: Delta approximation (emergency fallback) ──
-        # Estimate premium change from spot movement.
-        # Use a conservative delta of 0.5 for ATM options.
-        spot_move = current_spot - (snapshot.price if snapshot else current_spot)
+        # Estimate premium change from spot movement relative to trade entry spot.
+        trade_spot_entry = getattr(trade, "spot_entry", None) or (snapshot.price if snapshot else current_spot)
+        spot_move = current_spot - trade_spot_entry
         is_ce = trade.signal_type == SignalType.BUY_CE
         delta = 0.5 if is_ce else -0.5
         estimated_premium = trade.entry_price + (spot_move * delta)
@@ -1010,6 +1031,9 @@ class SimulationEngine:
 
         trade.transition_to(TradeState.EXIT_TRIGGERED, self.event_manager, payload={"reason": reason, "exit_price": exit_price})
         trade.transition_to(TradeState.POSITION_CLOSED, self.event_manager, payload=trade.to_dict())
+        
+        # Persist as CLOSED
+        self._persist_trade_outcome(trade)
         
         # ── TRADE_EVALUATED ──
         # Calculate EV vs Realized
@@ -1439,6 +1463,47 @@ class SimulationEngine:
     # ══════════════════════════════════════
     # PERSISTENCE
     # ══════════════════════════════════════
+
+    def _persist_trade_outcome(self, trade: SimulatedTrade):
+        """Synchronously persists the trade outcome to SQLite (Observability only)."""
+        try:
+            # We use a direct synchronous sqlite3 connection here since the engine is synchronous.
+            db_path = "data/trading_v4_sim.db"
+            if not os.path.exists(os.path.dirname(db_path)):
+                os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            
+            with sqlite3.connect(db_path) as conn:
+                cur = conn.cursor()
+                
+                # We do INSERT OR REPLACE to support both OPEN and CLOSED states
+                cur.execute("""
+                INSERT OR REPLACE INTO trade_outcomes (
+                    trade_id, signal_timestamp, opened_at, closed_at, contract, strike, option_type,
+                    qty, entry, sl, target, exit_price, net_pnl, r_multiple, result, confidence, grade, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    trade.trade_id,
+                    trade.timestamp.isoformat() if trade.timestamp else None,
+                    trade.timestamp.isoformat() if trade.timestamp else None, # opened_at
+                    datetime.now().isoformat() if trade.result != "OPEN" else None, # closed_at
+                    trade.signal_type.value if hasattr(trade.signal_type, 'value') else str(trade.signal_type),
+                    trade.spot_entry, # We approximate strike using spot if not explicitly passed
+                    "CE" if "CE" in str(trade.signal_type) else ("PE" if "PE" in str(trade.signal_type) else ""),
+                    trade.qty,
+                    trade.entry_price,
+                    trade.stop_loss,
+                    trade.target_1,
+                    trade.simulated_exit_price,
+                    trade.net_pnl,
+                    (trade.net_pnl / (abs(trade.entry_price - trade.stop_loss) * trade.qty)) if trade.stop_loss > 0 and trade.entry_price > 0 and trade.qty > 0 else 0.0,
+                    trade.result,
+                    trade.confidence,
+                    trade.grade,
+                    "simulation_engine"
+                ))
+                conn.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to persist trade outcome for {trade.trade_id}: {e}")
 
     def _save_state(self):
         state = {

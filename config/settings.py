@@ -883,6 +883,27 @@ class EnginePipelineConfig:
 
 
 # ══════════════════════════════════════════
+# AMD (ACCUMULATION-MANIPULATION-EXPANSION) CONFIG
+# ══════════════════════════════════════════
+
+@dataclass
+class AMDConfig:
+    """Configuration for the AMD shadow detector (V1)."""
+    min_range_duration_minutes: int = 15
+    max_range_atr_multiple: float = 1.2
+    min_sweep_atr_multiple: float = 0.10
+    
+    # Directional Rejection Thresholds
+    min_bullish_rejection_wick_ratio: float = 0.60
+    min_bullish_close_location: float = 0.50
+    min_bearish_rejection_wick_ratio: float = 0.60
+    max_bearish_close_location: float = 0.50
+    
+    min_displacement_atr_multiple: float = 1.2
+    max_acceptance_candles: int = 3
+
+
+# ══════════════════════════════════════════
 # MASTER SETTINGS CLASS
 # ══════════════════════════════════════════
 
@@ -899,6 +920,9 @@ class Settings:
             mode=self.mode,
         )
         
+        # ── AMD CONFIG (V1 SHADOW MODE) ──
+        self.amd = AMDConfig()
+
         # ── V3 PIPELINE ──
         self.pipeline = EnginePipelineConfig()
 

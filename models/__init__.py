@@ -1,4 +1,4 @@
-from .regime import MarketRegime, RegimeState
+from .regime import MarketRegime, RegimeState, RegimeContext
 from .oi_analysis import StrikeZone, OIAnalysis, MarketStructureAnalysis
 from .enums import Direction, SignalType, Strength, SignalGrade, SignalStatus
 from .signal import Signal
@@ -10,7 +10,7 @@ from .position import PositionState, TradeHealth, ExitDecision, ExitDecisionType
 from .sr_zone import SRZone, SRInteraction, SRState
 
 __all__ = [
-    "MarketRegime", "RegimeState",
+    "MarketRegime", "RegimeState", "RegimeContext",
     "Direction", "SignalType", "Strength", "SignalGrade", "SignalStatus",
     "Signal",
     "ExecutionPolicy", "ExecutionResult",

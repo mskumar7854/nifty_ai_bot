@@ -156,6 +156,16 @@ class TradingOrchestrator:
                         logger.info(f"📕 SIM EXIT: {c.get('id')} | "
                                     f"Reason: {c.get('exit_reason')} | "
                                     f"PnL: ₹{c.get('net_pnl', 0):,.1f}")
+                        if self.telemetry and hasattr(self.telemetry, "dispatch_trade_close"):
+                            asyncio.create_task(
+                                self.telemetry.dispatch_trade_close(
+                                    trade_id=c.get("id", ""),
+                                    pnl=c.get("net_pnl", 0.0),
+                                    outcome=c.get("result", c.get("exit_reason", "EXIT")),
+                                    symbol=c.get("trading_symbol", "NIFTY"),
+                                    hold_mins=c.get("hold_min", 0.0)
+                                )
+                            )
 
             # 4. Decision Pipeline (Gated by RuntimeState: only evaluate new entries if trading is allowed)
             infra_state = getattr(self.ctx.data_manager, "infrastructure_state", None)
@@ -211,6 +221,10 @@ class TradingOrchestrator:
                     if result.approved and self.execution_pipeline:
                         self.ctx.system._last_decision_ts = time.time()
                         await self.execution_pipeline.execute(result.signal, snapshot, self.ctx.is_simulation, mode="new")
+                        
+                        # Dispatched asynchronously outside critical execution path
+                        if self.telemetry and hasattr(self.telemetry, "dispatch_signal"):
+                            asyncio.create_task(self.telemetry.dispatch_signal(result.signal))
 
             # 6. Telemetry Pipeline — push full status to dashboard
             if self.telemetry and hasattr(self.telemetry, "dashboard") and self.telemetry.dashboard:

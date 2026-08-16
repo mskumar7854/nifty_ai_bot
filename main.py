@@ -176,10 +176,14 @@ def main():
         from core.db_manager import DBManager
         db_mgr = DBManager()
 
-        # Bridge legacy references
+        # Bridge legacy references and managers onto context
         ctx.system = LegacySystem(settings, db_mgr, event_manager=event_manager)
+        ctx.db_manager = db_mgr
+        ctx.burnin_tracker = ctx.system.burnin_tracker
+        ctx.simulation = ctx.system.simulation
+        ctx.readiness_scorer = getattr(ctx.system, "readiness_scorer", None) or getattr(ctx.system.burnin_tracker, "readiness_scorer", None)
         
-        # Wire Pipelines (Assuming pipelines manage their own internal managers, else wire here)
+        # Wire Pipelines
         ctx.market_data = MarketDataPipeline(ctx)
         
         # Populate context with data manager for legacy compatibility where needed
@@ -199,13 +203,6 @@ def main():
         
         if hasattr(ctx.decision, "decision_engine"): ctx.system.decision_engine = ctx.decision.decision_engine
         if hasattr(ctx.decision, "master"): ctx.system.master = ctx.decision.master
-
-        # Wire legacy components onto context so telemetry/dashboard can find them
-        ctx.db_manager = db_mgr
-        ctx.burnin_tracker = ctx.system.burnin_tracker
-        ctx.simulation = ctx.system.simulation
-        # Readiness scorer may exist on burnin_tracker or separately
-        ctx.readiness_scorer = getattr(ctx.system, "readiness_scorer", None) or getattr(ctx.system.burnin_tracker, "readiness_scorer", None)
 
         # Start the web dashboard (localhost:5000) in a background thread
         if ctx.telemetry:

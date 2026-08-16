@@ -691,10 +691,10 @@ class TelegramController:
             )
         return self.app
 
-    async def notify_trade_close(self, trade_id: str, pnl: float, outcome: str) -> None:
+    async def notify_trade_close(self, trade_id: str, pnl: float, outcome: str, symbol: str = "", hold_mins: float = 0.0) -> None:
         try:
-            text = format_trade_close_message(trade_id, pnl, outcome)
+            text = format_trade_close_message(trade_id, pnl, outcome, symbol=symbol, hold_mins=hold_mins)
             await self._send_admin_msg(text)
-            logger.info("notify_trade_close sent: trade=%s pnl=%.0f outcome=%s", trade_id, pnl, outcome.upper())
+            logger.info("notify_trade_close sent: trade=%s pnl=%.0f outcome=%s symbol=%s hold=%.1fm", trade_id, pnl, outcome.upper(), symbol, hold_mins)
         except Exception:
             logger.exception("notify_trade_close failed silently: trade=%s pnl=%.0f", trade_id, pnl)

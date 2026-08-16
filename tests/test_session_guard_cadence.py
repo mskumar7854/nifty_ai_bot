@@ -34,10 +34,11 @@ def test_pre_market_data_health_remains_fresh():
     Assert: DataHealth remains FRESH even as wall-clock time advances by several minutes.
     """
     orchestrator = ExchangeSessionOrchestrator(_suppress_logs=True)
-    yesterday_candle_ts = datetime.now() - timedelta(hours=17)
+    base_date = datetime(2026, 8, 14).date()  # Fixed weekday (Friday)
+    yesterday_candle_ts = datetime(2026, 8, 13, 15, 29, 0)
     
     # Mock datetime.now() to 08:58 IST
-    pre_market_time = datetime.now().replace(hour=8, minute=58, second=0)
+    pre_market_time = datetime(2026, 8, 14, 8, 58, 0)
     
     with patch("core.session_guard.datetime") as mock_datetime:
         mock_datetime.now.return_value = pre_market_time
@@ -53,31 +54,34 @@ def test_pre_market_data_health_remains_fresh():
         mock_datetime.now.return_value = pre_market_time + timedelta(minutes=7)
         orchestrator._invalidate_cache()
         
-        runtime_state_after = orchestrator.get_runtime_state(last_candle_ts=yesterday_candle_ts)
-        assert runtime_state_after.session == MarketSessionState.PRE_MARKET
-        assert runtime_state_after.data_health == DataHealth.FRESH
-        assert runtime_state_after.is_trading_allowed is False
+        runtime_state_adv = orchestrator.get_runtime_state(last_candle_ts=yesterday_candle_ts)
+        assert runtime_state_adv.session == MarketSessionState.PRE_MARKET
+        assert runtime_state_adv.posture == RuntimePosture.STANDBY
+        # Crucial assertion: Stale timer does NOT accumulate during PRE_MARKET
+        assert runtime_state_adv.data_health == DataHealth.FRESH
+        assert runtime_state_adv.poll_interval_s == 60.0
 
 
 def test_session_poll_intervals():
     """Verify poll intervals across various market session states."""
     orchestrator = ExchangeSessionOrchestrator(_suppress_logs=True)
+    base_weekday = datetime(2026, 8, 14)
     
     # 07:30 - CLOSED
     with patch("core.session_guard.datetime") as mock_dt:
-        mock_dt.now.return_value = datetime.now().replace(hour=7, minute=30)
+        mock_dt.now.return_value = base_weekday.replace(hour=7, minute=30)
         orchestrator._invalidate_cache()
         assert orchestrator.get_poll_interval_seconds() == 300.0
         
     # 08:30 - PRE_MARKET
     with patch("core.session_guard.datetime") as mock_dt:
-        mock_dt.now.return_value = datetime.now().replace(hour=8, minute=30)
+        mock_dt.now.return_value = base_weekday.replace(hour=8, minute=30)
         orchestrator._invalidate_cache()
         assert orchestrator.get_poll_interval_seconds() == 60.0
 
     # 09:20 - OPEN_STORM
     with patch("core.session_guard.datetime") as mock_dt:
-        mock_dt.now.return_value = datetime.now().replace(hour=9, minute=20)
+        mock_dt.now.return_value = base_weekday.replace(hour=9, minute=20)
         orchestrator._invalidate_cache()
         assert orchestrator.get_poll_interval_seconds() == 15.0
 
@@ -97,7 +101,7 @@ async def test_orchestrator_suppresses_decision_in_pre_market():
     )
     
     ctx.data_manager = MagicMock()
-    ctx.data_manager.last_market_activity_ts = datetime.now()
+    ctx.data_manager.last_market_activity_ts = datetime(2026, 8, 14, 8, 50)
     
     # Setup mock snapshot & df
     snapshot = MagicMock()
@@ -118,8 +122,8 @@ async def test_orchestrator_suppresses_decision_in_pre_market():
     
     orchestrator = TradingOrchestrator(ctx)
     
-    # Mock PRE_MARKET state (08:50 AM)
-    pre_market_time = datetime.now().replace(hour=8, minute=50)
+    # Mock PRE_MARKET state (08:50 AM on Friday)
+    pre_market_time = datetime(2026, 8, 14, 8, 50)
     with patch("core.session_guard.datetime") as mock_dt:
         mock_dt.now.return_value = pre_market_time
         
@@ -142,7 +146,7 @@ def test_simulated_trade_handles_string_session_phase_and_regime():
     
     signal = Signal(
         id="test-sig-001",
-        timestamp=datetime.now(),
+        timestamp=datetime(2026, 8, 14, 10, 0),
         signal_type=SignalType.BUY_PE,
         direction=Direction.BEARISH,
         confidence=75.0,
@@ -161,7 +165,7 @@ def test_simulated_trade_handles_string_session_phase_and_regime():
     snapshot.rsi = 55.0
     snapshot.atr = 50.0
     snapshot.india_vix = 14.5
-    snapshot.timestamp = datetime.now()
+    snapshot.timestamp = datetime(2026, 8, 14, 10, 0)
     
     # Executing open_simulated_trade should complete without AttributeError: 'str' object has no attribute 'value'
     trade = engine.open_simulated_trade(
@@ -190,56 +194,59 @@ def test_boundary_session_timings_3aug2026():
       - 16:00:00 IST: CLOSED
     """
     orchestrator = ExchangeSessionOrchestrator(_suppress_logs=True)
-    today = datetime.now().date()
+    today = datetime(2026, 8, 14).date()  # Fixed weekday (Friday)
 
-    # 1. 15:19:59 IST
-    dt_151959 = datetime.combine(today, dtime(15, 19, 59))
-    assert orchestrator._compute_state_for_time(dt_151959.time()) == MarketSessionState.POWER_HOUR
-    assert orchestrator.is_entry_allowed(dt_151959) is True
-    assert orchestrator.should_force_exit(dt_151959) is False
+    with patch("core.session_guard.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 8, 14, 12, 0, 0)
+        
+        # 1. 15:19:59 IST
+        dt_151959 = datetime.combine(today, dtime(15, 19, 59))
+        assert orchestrator._compute_state_for_time(dt_151959.time()) == MarketSessionState.POWER_HOUR
+        assert orchestrator.is_entry_allowed(dt_151959) is True
+        assert orchestrator.should_force_exit(dt_151959) is False
 
-    # 2. 15:20:00 IST (Entry Cutoff)
-    dt_152000 = datetime.combine(today, dtime(15, 20, 0))
-    assert orchestrator._compute_state_for_time(dt_152000.time()) == MarketSessionState.EXIT_WINDOW
-    assert orchestrator.is_entry_allowed(dt_152000) is False
-    assert orchestrator.should_force_exit(dt_152000) is False
+        # 2. 15:20:00 IST (Entry Cutoff)
+        dt_152000 = datetime.combine(today, dtime(15, 20, 0))
+        assert orchestrator._compute_state_for_time(dt_152000.time()) == MarketSessionState.EXIT_WINDOW
+        assert orchestrator.is_entry_allowed(dt_152000) is False
+        assert orchestrator.should_force_exit(dt_152000) is False
 
-    # 3. 15:23:59 IST (Before Force Exit Buffer)
-    dt_152359 = datetime.combine(today, dtime(15, 23, 59))
-    assert orchestrator._compute_state_for_time(dt_152359.time()) == MarketSessionState.EXIT_WINDOW
-    assert orchestrator.is_entry_allowed(dt_152359) is False
-    assert orchestrator.should_force_exit(dt_152359) is False
+        # 3. 15:23:59 IST (Before Force Exit Buffer)
+        dt_152359 = datetime.combine(today, dtime(15, 23, 59))
+        assert orchestrator._compute_state_for_time(dt_152359.time()) == MarketSessionState.EXIT_WINDOW
+        assert orchestrator.is_entry_allowed(dt_152359) is False
+        assert orchestrator.should_force_exit(dt_152359) is False
 
-    # 4. 15:24:00 IST (Force Exit Active)
-    dt_152400 = datetime.combine(today, dtime(15, 24, 0))
-    assert orchestrator._compute_state_for_time(dt_152400.time()) == MarketSessionState.EXIT_WINDOW
-    assert orchestrator.is_entry_allowed(dt_152400) is False
-    assert orchestrator.should_force_exit(dt_152400) is True
+        # 4. 15:24:00 IST (Force Exit Active)
+        dt_152400 = datetime.combine(today, dtime(15, 24, 0))
+        assert orchestrator._compute_state_for_time(dt_152400.time()) == MarketSessionState.EXIT_WINDOW
+        assert orchestrator.is_entry_allowed(dt_152400) is False
+        assert orchestrator.should_force_exit(dt_152400) is True
 
-    # 5. 15:39:59 IST (Last second of EXIT_WINDOW / Market Monitoring)
-    dt_153959 = datetime.combine(today, dtime(15, 39, 59))
-    assert orchestrator._compute_state_for_time(dt_153959.time()) == MarketSessionState.EXIT_WINDOW
-    assert orchestrator.is_entry_allowed(dt_153959) is False
-    assert orchestrator.is_post_market(dt_153959) is False
+        # 5. 15:39:59 IST (Last second of EXIT_WINDOW / Market Monitoring)
+        dt_153959 = datetime.combine(today, dtime(15, 39, 59))
+        assert orchestrator._compute_state_for_time(dt_153959.time()) == MarketSessionState.EXIT_WINDOW
+        assert orchestrator.is_entry_allowed(dt_153959) is False
+        assert orchestrator.is_post_market(dt_153959) is False
 
-    # 6. 15:40:00 IST (F&O Option Close -> POST_MARKET)
-    dt_154000 = datetime.combine(today, dtime(15, 40, 0))
-    assert orchestrator._compute_state_for_time(dt_154000.time()) == MarketSessionState.POST_MARKET
-    assert orchestrator.is_post_market(dt_154000) is True
+        # 6. 15:40:00 IST (F&O Option Close -> POST_MARKET)
+        dt_154000 = datetime.combine(today, dtime(15, 40, 0))
+        assert orchestrator._compute_state_for_time(dt_154000.time()) == MarketSessionState.POST_MARKET
+        assert orchestrator.is_post_market(dt_154000) is True
 
-    # 7. 16:00:00 IST (POST_MARKET End -> CLOSED)
-    dt_160000 = datetime.combine(today, dtime(16, 0, 0))
-    assert orchestrator._compute_state_for_time(dt_160000.time()) == MarketSessionState.CLOSED
+        # 7. 16:00:00 IST (POST_MARKET End -> CLOSED)
+        dt_160000 = datetime.combine(today, dtime(16, 0, 0))
+        assert orchestrator._compute_state_for_time(dt_160000.time()) == MarketSessionState.CLOSED
 
-    # 8. Test SessionCapabilities matrix
-    caps_power = orchestrator.get_capabilities(dt_151959)
-    assert caps_power.can_open_positions is True
-    assert caps_power.can_exit_positions is True
-    assert caps_power.can_collect_market_data is True
+        # 8. Test SessionCapabilities matrix
+        caps_power = orchestrator.get_capabilities(dt_151959)
+        assert caps_power.can_open_positions is True
+        assert caps_power.can_exit_positions is True
+        assert caps_power.can_collect_market_data is True
 
-    caps_exit = orchestrator.get_capabilities(dt_152400)
-    assert caps_exit.can_open_positions is False
-    assert caps_exit.can_exit_positions is True
+        caps_exit = orchestrator.get_capabilities(dt_152400)
+        assert caps_exit.can_open_positions is False
+        assert caps_exit.can_exit_positions is True
     assert caps_exit.can_collect_market_data is True
 
 

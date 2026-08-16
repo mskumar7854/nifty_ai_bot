@@ -78,6 +78,7 @@ class DecisionSnapshotV2:
     expected_value: Dict[str, Any]
     structure: Dict[str, Any]
     risk: Dict[str, Any]
+    amd: Dict[str, Any]
     gate_results: Dict[str, GateResult]
     decision: Dict[str, Any]
     execution: Dict[str, Any]

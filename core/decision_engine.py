@@ -81,7 +81,7 @@ from core.memory_manager import MemoryManager
 from core.gap_penalty_manager import GapPenaltyManager
 from utils.logger import AgentLogger
 from config.settings import Settings
-from models import MarketRegime
+from models import MarketRegime, RegimeContext
 from models.decision_trace import DecisionTrace, TraceStage, StageAction
 from config.signal_weights import AGENT_WEIGHTS, MIN_CONFIDENCE, MIN_DIRECTION_GAP
 from core.threshold_tuner import ThresholdTuner
@@ -688,14 +688,14 @@ class DecisionEngine:
                     f"| Decay: {gap_status['minutes_since_open']:.0f}min elapsed"
                 )
 
-            # Map string to enum
+            # Map string to canonical enum
             regime_map = {
-                "STRONG_TREND_UP": MarketRegime.TRENDING_UP,
-                "WEAK_TREND_UP": MarketRegime.TRENDING_UP,
-                "STRONG_TREND_DOWN": MarketRegime.TRENDING_DOWN,
-                "WEAK_TREND_DOWN": MarketRegime.TRENDING_DOWN,
+                "STRONG_TREND_UP": MarketRegime.STRONG_TREND_UP,
+                "WEAK_TREND_UP": MarketRegime.WEAK_TREND_UP,
+                "STRONG_TREND_DOWN": MarketRegime.STRONG_TREND_DOWN,
+                "WEAK_TREND_DOWN": MarketRegime.WEAK_TREND_DOWN,
                 "RANGING": MarketRegime.RANGING,
-                "VOLATILE_CHOPPY": MarketRegime.VOLATILE,
+                "VOLATILE_CHOPPY": MarketRegime.VOLATILE_CHOPPY,
                 "SQUEEZE": MarketRegime.SQUEEZE,
                 "BREAKOUT": MarketRegime.BREAKOUT,
             }
@@ -1377,6 +1377,14 @@ class DecisionEngine:
             "suppression_reason": "REGIME_UNCERTAINTY" if _final_regime_penalty < 0.85 else ("RISK/VOLATILITY" if _final_regime_penalty < 0.95 else "AGENT_DIVERGENCE"),
             # ── S/R Engine Context (Shadow Mode — informational only) ──
             "sr_state": _sr_state.to_dict() if _sr_state else None,
+            # ── Canonical Regime Context & Strike Policy ──
+            "regime_context": RegimeContext(
+                raw_regime=(outputs_dict.get("regime").details.get("regime", "") if outputs_dict.get("regime") else "") or (self._classify_market(snapshot, outputs_dict).value),
+                normalized_regime=self._classify_market(snapshot, outputs_dict),
+                trend_strength="STRONG" if self._classify_market(snapshot, outputs_dict) in (MarketRegime.STRONG_TREND_UP, MarketRegime.STRONG_TREND_DOWN, MarketRegime.BREAKOUT) else ("WEAK" if self._classify_market(snapshot, outputs_dict) in (MarketRegime.WEAK_TREND_UP, MarketRegime.WEAK_TREND_DOWN) else ("NEUTRAL" if self._classify_market(snapshot, outputs_dict) in (MarketRegime.RANGING, MarketRegime.SQUEEZE) else "CHOP")),
+                strike_policy="ITM_1_STEP" if self._classify_market(snapshot, outputs_dict) in (MarketRegime.STRONG_TREND_UP, MarketRegime.STRONG_TREND_DOWN, MarketRegime.BREAKOUT) else ("ATM" if self._classify_market(snapshot, outputs_dict) in (MarketRegime.WEAK_TREND_UP, MarketRegime.WEAK_TREND_DOWN, MarketRegime.RANGING, MarketRegime.SQUEEZE) else "NO_TRADE"),
+                details=outputs_dict.get("regime").details if outputs_dict.get("regime") else {}
+            ).to_dict(),
         }
 
         signal = Signal(
@@ -2317,7 +2325,7 @@ class DecisionEngine:
     def _classify_market(self, snapshot: MarketSnapshot, outputs: Dict[str, AgentOutput]) -> MarketRegime:
         """
         🧠 Market State Classifier
-        Converts raw indicators into human-readable market archetypes.
+        Converts raw indicators into human-readable canonical market archetypes.
         """
         if hasattr(snapshot, 'bb_width') and snapshot.bb_width > 0 and snapshot.bb_width < self.settings.thresholds.squeeze_threshold:
             return MarketRegime.SQUEEZE
@@ -2325,13 +2333,29 @@ class DecisionEngine:
         bulls = sum(1 for o in outputs.values() if o.direction == Direction.BULLISH)
         bears = sum(1 for o in outputs.values() if o.direction == Direction.BEARISH)
         if bulls > 2 and bears > 2:
-            return MarketRegime.VOLATILE
+            return MarketRegime.VOLATILE_CHOPPY
             
         regime_agent = outputs.get("regime")
         if regime_agent:
             reg_val = regime_agent.details.get("regime", "")
-            if "TREND" in reg_val:
-                return MarketRegime.TRENDING_UP if "UP" in reg_val else MarketRegime.TRENDING_DOWN
+            if reg_val == "STRONG_TREND_UP":
+                return MarketRegime.STRONG_TREND_UP
+            elif reg_val == "WEAK_TREND_UP":
+                return MarketRegime.WEAK_TREND_UP
+            elif reg_val == "STRONG_TREND_DOWN":
+                return MarketRegime.STRONG_TREND_DOWN
+            elif reg_val == "WEAK_TREND_DOWN":
+                return MarketRegime.WEAK_TREND_DOWN
+            elif reg_val == "VOLATILE_CHOPPY":
+                return MarketRegime.VOLATILE_CHOPPY
+            elif reg_val == "SQUEEZE":
+                return MarketRegime.SQUEEZE
+            elif reg_val == "BREAKOUT":
+                return MarketRegime.BREAKOUT
+            elif reg_val == "RANGING":
+                return MarketRegime.RANGING
+            elif "TREND" in reg_val:
+                return MarketRegime.STRONG_TREND_UP if "UP" in reg_val else MarketRegime.STRONG_TREND_DOWN
                 
         if hasattr(snapshot, 'bb_upper') and (snapshot.price > snapshot.bb_upper or snapshot.price < snapshot.bb_lower):
             return MarketRegime.BREAKOUT

@@ -67,6 +67,7 @@ def build_snapshot(
     options_context: dict = None,
     gap_context: dict = None,      # NEW (P1): gap penalty state at decision time
     approval_context: dict = None, # NEW (P1): effective confidence threshold from master gate
+    amd_state=None,                # NEW: AMD (Accumulation-Manipulation-Expansion) state
 ) -> dict:
     """
     Construct a self-contained, immutable decision snapshot.
@@ -159,6 +160,7 @@ def build_snapshot(
         "gap_points": gap_points,
         "system_version": SYSTEM_VERSION,
         "strategy_version": STRATEGY_VERSION,
+        "amd_state_json": amd_state.to_dict() if amd_state else {},
     }
 
     snapshot_hash = compute_snapshot_hash(body)
@@ -185,6 +187,7 @@ def persist_snapshot(snap: dict, db_path: str = None) -> bool:
                 ("gap_penalty_multiplier",          "REAL DEFAULT 1.0"),
                 ("gap_severity",                    "TEXT DEFAULT 'NONE'"),
                 ("gap_points",                      "REAL DEFAULT 0.0"),
+                ("amd_state_json",                  "TEXT DEFAULT '{}'"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE decision_snapshots ADD COLUMN {col} {col_type}")
@@ -204,7 +207,7 @@ def persist_snapshot(snap: dict, db_path: str = None) -> bool:
                     final_decision, rejection_reason,
                     effective_confidence_threshold, gap_penalty_active,
                     gap_penalty_multiplier, gap_severity, gap_points,
-                    system_version, strategy_version
+                    system_version, strategy_version, amd_state_json
                 ) VALUES (
                     ?, ?, ?,
                     ?, ?,
@@ -215,7 +218,7 @@ def persist_snapshot(snap: dict, db_path: str = None) -> bool:
                     ?, ?,
                     ?, ?,
                     ?, ?, ?, ?, ?,
-                    ?, ?
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -238,6 +241,7 @@ def persist_snapshot(snap: dict, db_path: str = None) -> bool:
                     snap.get("gap_severity", "NONE"),
                     snap.get("gap_points", 0.0),
                     snap["system_version"], snap["strategy_version"],
+                    json.dumps(snap.get("amd_state_json", {}), default=str),
                 ),
             )
         conn.close()

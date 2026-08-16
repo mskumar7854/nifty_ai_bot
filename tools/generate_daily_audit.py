@@ -132,11 +132,12 @@ def _get_market_summary(target_date: str) -> dict:
 
 def _get_signal_breakdown(df_snaps: pd.DataFrame) -> dict:
     if df_snaps.empty:
-        return {"total": 0, "buy_ce": 0, "buy_pe": 0, "executed": 0, "rejected": 0, "rejection_reasons": {}}
+        return {"total": 0, "buy_ce": 0, "buy_pe": 0, "executed": 0, "rejected": 0, "capacity_rejected": 0, "predictive_rejected": 0, "predictive_reasons": {}, "capacity_reasons": {}}
     buy_ce = 0
     buy_pe = 0
     executed = 0
-    rejection_reasons = Counter()
+    predictive_rejections = Counter()
+    capacity_rejections = Counter()
     for _, row in df_snaps.iterrows():
         d = json.loads(row["decision_json"]) if row["decision_json"] else {}
         c = json.loads(row["confidence_json"]) if row["confidence_json"] else {}
@@ -154,7 +155,10 @@ def _get_signal_breakdown(df_snaps: pd.DataFrame) -> dict:
             executed += 1
         else:
             reason = d.get("reason", "UNKNOWN")
-            rejection_reasons[reason] += 1
+            if "Max Open Positions" in reason or "Capacity" in reason or "Portfolio Heat" in reason:
+                capacity_rejections[reason] += 1
+            else:
+                predictive_rejections[reason] += 1
 
     total = len(df_snaps)
     return {
@@ -163,7 +167,10 @@ def _get_signal_breakdown(df_snaps: pd.DataFrame) -> dict:
         "buy_pe": buy_pe,
         "executed": executed,
         "rejected": total - executed,
-        "rejection_reasons": dict(rejection_reasons.most_common(5))
+        "capacity_rejected": sum(capacity_rejections.values()),
+        "predictive_rejected": sum(predictive_rejections.values()),
+        "predictive_reasons": dict(predictive_rejections.most_common(5)),
+        "capacity_reasons": dict(capacity_rejections.most_common(5))
     }
 
 
@@ -327,8 +334,8 @@ def generate_daily_audit(target_date: str = None):
     lines.append(f"# Daily Trading Session Audit")
     lines.append("")
     lines.append(f"**Date**: {target_date}  ")
-    lines.append(f"**Campaign**: 2026-08-SHADOW-V1  ")
-    lines.append(f"**Engine**: v5.0.0-REF  ")
+    lines.append(f"**Campaign**: 2026-08-SHADOW-V2  ")
+    lines.append(f"**Engine**: v5.0.2-REF  ")
     lines.append(f"**Mode**: SIMULATION  ")
     lines.append(f"**Git Commit**: {git_hash}  ")
     lines.append(f"**Market**: NIFTY 50  ")
@@ -384,14 +391,26 @@ def generate_daily_audit(target_date: str = None):
     lines.append(f"| BUY_CE | {signals['buy_ce']} |")
     lines.append(f"| BUY_PE | {signals['buy_pe']} |")
     lines.append(f"| Trades Executed | {signals['executed']} |")
-    lines.append(f"| Rejected | {signals['rejected']} |")
+    lines.append(f"| Total Rejected | {signals.get('rejected', 0)} |")
+    lines.append(f"| Predictive Rejections | {signals.get('predictive_rejected', 0)} |")
+    lines.append(f"| Capacity Rejections | {signals.get('capacity_rejected', 0)} |")
     lines.append("")
-    if signals["rejection_reasons"]:
-        lines.append("**Top Rejection Reasons**:")
+    
+    if signals.get("predictive_reasons"):
+        lines.append("**Top Predictive Rejection Reasons**:")
         lines.append("")
         lines.append(f"| Reason | Count |")
         lines.append(f"| :--- | ---: |")
-        for reason, count in signals["rejection_reasons"].items():
+        for reason, count in signals["predictive_reasons"].items():
+            lines.append(f"| {reason} | {count} |")
+        lines.append("")
+
+    if signals.get("capacity_reasons"):
+        lines.append("**Top Capacity Rejection Reasons**:")
+        lines.append("")
+        lines.append(f"| Reason | Count |")
+        lines.append(f"| :--- | ---: |")
+        for reason, count in signals["capacity_reasons"].items():
             lines.append(f"| {reason} | {count} |")
         lines.append("")
 
@@ -462,8 +481,8 @@ def generate_daily_audit(target_date: str = None):
     lines.append("## 9. Validation Manifest Snapshot")
     lines.append("")
     lines.append("```yaml")
-    lines.append(f"campaign_id: 2026-08-SHADOW-V1")
-    lines.append(f"candidate_engine: v5.0.0-REF")
+    lines.append(f"campaign_id: 2026-08-SHADOW-V2")
+    lines.append(f"candidate_engine: v5.0.2-REF")
     lines.append(f"git_commit: {git_hash}")
     lines.append(f"overall_status: NOT_READY")
     lines.append("```")

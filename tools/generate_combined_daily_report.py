@@ -222,7 +222,7 @@ def generate_markdown_report(aggregated: dict) -> str:
 **Overall Campaign Status**: ✅ {aggregated['overall_status']}  
 **Sessions Analyzed**: {aggregated['total_sessions']} Days (`2026-08-04` to `2026-08-11`)  
 **Campaign Progress**: {cmp['completed']} / {cmp['required']} sessions completed ({cmp['remaining']} remaining)  
-**Target Engine**: v5.0.0-REF  
+**Target Engine**: v5.0.2-REF  
 **Operating Mode**: SIMULATION / SHADOW  
 
 | Metric | Multi-Session Total / Mean |

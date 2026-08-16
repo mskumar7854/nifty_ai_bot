@@ -20,7 +20,7 @@ MANIFEST_PATH = os.path.join(WORKSPACE_DIR, "data", "validation_manifest.yaml")
 from tools.multi_session_counterfactual_replay import MultiSessionCounterfactualReplay
 from tools.generate_readiness_scorecard import generate_scorecard, get_git_commit_hash
 
-def generate_campaign_report(campaign_id: str = "2026-08-SHADOW-V1") -> dict:
+def generate_campaign_report(campaign_id: str = "2026-08-SHADOW-V2") -> dict:
     """
     Generates a formal Campaign Completion Report and outputs validation_manifest.yaml
     when a validation campaign completes.
@@ -41,7 +41,7 @@ def generate_campaign_report(campaign_id: str = "2026-08-SHADOW-V1") -> dict:
         "commit_hash": git_hash,
         "database_sha256": db_hash,
         "engine": {
-            "candidate_version": "v5.0.0-REF",
+            "candidate_version": "v5.0.2-REF",
             "baseline_version": "v5.0.0",
             "governance_policy": "stage-gate-v1"
         },
