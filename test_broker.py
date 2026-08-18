@@ -1,6 +1,6 @@
-"""
+﻿"""
 ============================================
-🧪 DHAN API BRIDGING TEST
+ðŸ§ª DHAN API BRIDGING TEST
 Verify that your API credentials are valid
 and that the VPS has network access to Dhan.
 ============================================
@@ -12,7 +12,7 @@ from dhanhq import dhanhq
 
 def test_connection():
     print("\n" + "="*50)
-    print("🏦 DHAN BROKER API TEST - VPS READINESS")
+    print("ðŸ¦ DHAN BROKER API TEST - VPS READINESS")
     print("="*50)
 
     # 1. Load Credentials
@@ -21,11 +21,11 @@ def test_connection():
     access_token = os.getenv("DHAN_ACCESS_TOKEN")
 
     if not client_id or not access_token or "your_" in client_id:
-        print("❌ ERROR: Credentials not found in .env file.")
+        print("âŒ ERROR: Credentials not found in .env file.")
         print("   Please set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN.")
         return
 
-    print(f"📡 Connecting for Client ID: {client_id[:4]}...{client_id[-4:]}")
+    print(f"ðŸ“¡ Connecting for Client ID: {client_id[:4]}...{client_id[-4:]}")
 
     try:
         # 2. Initialize Client
@@ -36,16 +36,16 @@ def test_connection():
         
         if response.get("status") == "success":
             data = response.get("data", {})
-            print("✅ CONNECTION SUCCESSFUL!")
-            print(f"💰 Available Funds: ₹{data.get('availabelBalance', 0):,.2f}")
-            print(f"📊 Margin Used: ₹{data.get('utilisedAmount', 0):,.2f}")
+            print("âœ… CONNECTION SUCCESSFUL!")
+            print(f"ðŸ’° Available Funds: â‚¹{data.get('availabelBalance', 0):,.2f}")
+            print(f"ðŸ“Š Margin Used: â‚¹{data.get('utilisedAmount', 0):,.2f}")
         else:
-            print("❌ API REJECTED:")
+            print("âŒ API REJECTED:")
             print(f"   Reason: {response.get('remarks', 'Unknown error')}")
             print(f"   Note: Dhan tokens expire every 24 hours.")
             
     except Exception as e:
-        print(f"❌ NETWORK/API ERROR: {e}")
+        print(f"âŒ NETWORK/API ERROR: {e}")
 
     print("="*50 + "\n")
 

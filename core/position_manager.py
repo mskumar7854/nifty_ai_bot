@@ -148,6 +148,7 @@ class OpenPosition:
     underlying_price_at_entry: float = 0.0
     consecutive_iv_drops: int = 0
     consecutive_critical_cycles: int = 0
+    is_reconstructed: bool = False
 
     def update_pnl(self, current_price: float):
         """Update unrealized P&L"""
@@ -167,21 +168,33 @@ class OpenPosition:
         )
 
     def to_dict(self) -> dict:
+        sig_type_str = self.signal_type.value if hasattr(self.signal_type, "value") else str(self.signal_type)
+        dir_str = self.direction.value if hasattr(self.direction, "value") else str(self.direction)
         return {
             "id": self.position_id,
-            "type": self.signal_type.value,
-            "direction": self.direction.value,
+            "trade_id": self.position_id,
+            "snapshot_id": self.position_id,
+            "signal_type": sig_type_str,
+            "type": sig_type_str,
+            "direction": dir_str,
+            "entry_price": self.entry_price,
             "entry": self.entry_price,
+            "current_price": self.current_price,
             "current": self.current_price,
+            "stop_loss": self.stop_loss,
             "sl": self.stop_loss,
+            "target_1": self.target_1,
             "target1": self.target_1,
             "lots": self.lots,
             "qty": self.qty,
             "unrealized_pnl": f"₹{self.unrealized_pnl:,.0f}",
+            "net_pnl": self.unrealized_pnl,
             "max_profit_seen": f"₹{self.max_favorable:,.0f}",
             "max_loss_seen": f"₹{self.max_adverse:,.0f}",
             "active": self.is_active,
             "partial_booked": self.partial_booked,
+            "is_reconstructed": self.is_reconstructed,
+            "opened_at": self.entry_time.isoformat() if hasattr(self.entry_time, "isoformat") else str(self.entry_time),
             # ── TSL telemetry ──
             "tsl_phase": self.tsl_phase,
             "tsl_active": self.tsl_active,
@@ -261,10 +274,11 @@ class PositionManager:
     5. Position monitoring (trailing, partial)
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, broker=None):
         self.settings = settings
         self.config = settings.position
         self.logger = get_logger("position_manager")
+        self.broker = broker
 
         # ── Capital State ──
         self.total_capital = self.config.total_capital
@@ -366,20 +380,59 @@ class PositionManager:
 
     def _recover_live_state(self):
         """
-        P3: Hydrate open positions from OMS to survive mid-day crashes.
+        P3: Hydrate open and closed positions from OMS to survive mid-day crashes.
         """
         try:
             open_orders = self.oms.get_open_orders()
             count = 0
             for order in open_orders:
                 state = order.get("state")
-                if state in ("ENTRY_SUBMITTED", "PARTIAL_FILLED", "FILLED_ACTIVE"):
-                    # We have a live order, we should theoretically re-build it into self.open_positions.
-                    # For full recovery, we would query the broker or rely on the OMS payload to reconstruct `OpenPosition`.
-                    # Right now, we at least log it. A robust version fetches broker state and builds the object.
-                    count += 1
+                if state in ("ENTRY_FILLED", "FILLED_ACTIVE", "PARTIAL_FILLED"):
+                    pos_id = order.get("signal_id") or order.get("intent_id")
+                    if pos_id and pos_id not in self.open_positions:
+                        symbol = order.get("symbol", "NIFTY")
+                        side = (order.get("side") or "BUY").upper()
+                        is_ce = "CE" in symbol or side == "BUY"
+                        sig_type = SignalType.BUY_CE if is_ce else SignalType.BUY_PE
+                        direction = Direction.BULLISH if is_ce else Direction.BEARISH
+                        fill_p = order.get("avg_fill_price") or order.get("requested_price") or 0.0
+                        sl_p = order.get("stop_loss_price") or 0.0
+                        qty_val = order.get("filled_qty") or order.get("qty") or 50
+
+                        created_str = order.get("created_at")
+                        try:
+                            entry_dt = datetime.fromisoformat(created_str) if created_str else datetime.now()
+                        except Exception:
+                            entry_dt = datetime.now()
+
+                        recovered_pos = OpenPosition(
+                            position_id=pos_id,
+                            intent_id=order.get("intent_id", ""),
+                            entry_time=entry_dt,
+                            signal_type=sig_type,
+                            direction=direction,
+                            symbol=symbol,
+                            security_id="",
+                            entry_price=fill_p,
+                            entry_bid=fill_p,
+                            entry_ask=fill_p,
+                            current_price=fill_p,
+                            stop_loss=sl_p,
+                            original_stop_loss=sl_p,
+                            target_1=fill_p + (abs(fill_p - sl_p) * 1.5) if sl_p > 0 else 0.0,
+                            target_2=fill_p + (abs(fill_p - sl_p) * 2.5) if sl_p > 0 else 0.0,
+                            trailing_stop=sl_p,
+                            lots=max(1, qty_val // 50),
+                            qty=qty_val,
+                            entry_premium=fill_p,
+                            is_reconstructed=True
+                        )
+                        self.open_positions[pos_id] = recovered_pos
+                        count += 1
+                elif state == "ENTRY_SUBMITTED":
+                    self.logger.warning(f"⚠️ Recovered in-flight pending order (unfilled): {order.get('intent_id')}")
             if count > 0:
-                self.logger.warning(f"🔄 Recovered {count} live intents from OMS. (Full Position reconstruction requires broker sync)")
+                self.logger.warning(f"🔄 Reconstructed {count} active positions from OMS.")
         except Exception as e:
             self.logger.error(f"Failed to recover live state from OMS: {e}")
 
@@ -733,7 +786,9 @@ class PositionManager:
 
     @property
     def dhan(self):
-        """Lazy load Dhan client to prevent circular imports."""
+        """Lazy load Dhan client or use injected broker (e.g. for simulation)."""
+        if self.broker:
+            return self.broker
         from dhan_client import get_dhan_client
         return get_dhan_client()
 
@@ -959,6 +1014,7 @@ class PositionManager:
             )
         except Exception as e:
             self.logger.error("Entry order failed — no position opened: %s", e)
+            self.oms.update_order_state(intent_id, "FAILED", "BROKER_REJECTION")
             return None
 
 
@@ -987,9 +1043,7 @@ class PositionManager:
             poll_start = time.time()
             while time.time() - poll_start < 15.0:
                 try:
-                    from dhan_client import get_dhan_client
-                    dhan = get_dhan_client()
-                    order_status_resp = dhan.get_order_status(order_id)
+                    order_status_resp = self.dhan.get_order_status(order_id)
                     if order_status_resp and order_status_resp.get("status") == "success":
                         order_data = order_status_resp.get("data", {})
                         order_status = order_data.get("orderStatus", "")
@@ -1069,6 +1123,8 @@ class PositionManager:
         position = self.open_position(signal, size_params, fill_price, premium)
         if not position:
             return None
+
+        self.oms.update_order_state(intent_id, "ENTRY_FILLED", "ORDER_FILL")
 
         # ── Step 3: Place SL with retry loop & verification ──
         sl_placed = await self._place_sl_with_retry(fill, stop_loss_price, sl_transaction_type)
@@ -1244,7 +1300,7 @@ class PositionManager:
             from core.pipelines.position_pipeline import PositionPipeline
             from core.context import RuntimeContext
             ctx = RuntimeContext(
-                settings=self.config,
+                settings=self.settings,
                 mode=self.mode,
                 is_simulation=self.mode == "SIMULATION",
                 telegram_enabled=False,
@@ -1252,8 +1308,7 @@ class PositionManager:
                 data_manager=None,
                 burnin_tracker=None,
                 readiness_scorer=None,
-                simulation=None,
-                system=None
+                simulation=None
             )
             self._position_pipeline = PositionPipeline(ctx)
             
@@ -1289,10 +1344,7 @@ class PositionManager:
                     if self.mode != "SIMULATION":
                         if pos.intent_id and hasattr(self, "oms") and self.oms:
                             try:
-                                import asyncio
-                                from dhan_client import get_dhan_client
-                                dhan = get_dhan_client()
-                                # Update broker SL
+                                self.dhan.modify_order(...)
                                 # In real system, ExecutionPipeline should handle this. 
                                 # For now, we update state.
                                 pass
@@ -1390,7 +1442,7 @@ class PositionManager:
                     entry_price=pos.entry_price,
                     exit_price=exit_price,
                     qty=pos.qty,
-                    direction=pos.direction.value.upper()
+                    direction="BUY"
                 )
                 
                 exec_metrics = {
@@ -1665,20 +1717,16 @@ class PositionManager:
         total_positions = len(self.open_positions)
         
         # ── Step 1: Connect to Broker ──
-        try:
-            from dhan_client import get_dhan_client
-            dhan = get_dhan_client()
-        except Exception as e:
-            self.logger.error(f"FATAL: Could not connect to broker for square-off: {e}")
+        if not self.dhan:
+            self.logger.error("FATAL: Could not connect to broker for square-off (no dhan client available)")
             return False
-            
         # ── Step 2: Iterate and Sell ──
         for position_id, position in list(self.open_positions.items()):
             try:
                 self.logger.critical(f"Nuclear Sell: {position.symbol} (Qty: {position.qty})")
                 
                 # Place Market Sell Order
-                response = dhan.place_order(
+                response = self.dhan.place_order(
                     security_id=position.security_id or "0", # Should be set
                     exchange_segment="NSE_FNO",
                     transaction_type="SELL",

@@ -134,7 +134,13 @@ class LegacySystem:
         from core.burnin_tracker import BurninTracker
         
         self.risk_manager = RiskManager(settings, db_manager)
-        self.position_manager = PositionManager(settings)
+        
+        broker = None
+        if settings.system_mode.mode == "SIMULATION":
+            from core.simulation_broker import SimulationBroker
+            broker = SimulationBroker()
+            
+        self.position_manager = PositionManager(settings, broker=broker)
         self.entry_engine = EntryEngine(settings)
         self.exit_engine = ExitEngine(settings)
         self.burnin_tracker = BurninTracker()

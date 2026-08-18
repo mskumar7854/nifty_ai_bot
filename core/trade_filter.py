@@ -706,10 +706,15 @@ class TradeFilter:
             total_score += (100 if struct_pass else 0) * 0.05
             max_score += 5.0
             
-            telemetry_gates["StructureTracker"] = {
+            telemetry_gates["Structure Reset"] = {
                 "passed": struct_pass,
-                "reason": struct_reason,
-                "details": struct_details
+                "actual": "SAME_STRUCTURAL_TREND" if not struct_pass else "OK",
+                "detail": struct_reason,
+                "requirement": "NEW_STRUCTURAL_STATE_REQUIRED",
+                "pending_reset_event": struct_details.get("pending_reset_event"),
+                "reset_event": struct_details.get("reset_event"),
+                "leg_id": struct_details.get("leg_id"),
+                "entries_in_leg": struct_details.get("entries_in_leg")
             }
             
             if not struct_pass:

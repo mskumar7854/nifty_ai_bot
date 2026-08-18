@@ -1,6 +1,6 @@
-"""
+﻿"""
 ============================================
-🧪 CHAOS MONKEY BRIDGE TEST - TEST 01
+ðŸ§ª CHAOS MONKEY BRIDGE TEST - TEST 01
 Simulates the Happy Path: Signal -> Confirm -> Execute
 ============================================
 """
@@ -9,7 +9,7 @@ import asyncio
 import uuid
 import time
 from datetime import datetime
-from models.signals import Signal, SignalType, Direction, Strength
+from models.signal import Signal, SignalType, Direction, Strength
 from core.db_manager import DBManager
 from core.telegram_controller import TelegramController
 from config.settings import Settings
@@ -26,7 +26,7 @@ async def run_test():
     # Mock Engines (we just want to see the state machine work)
     class MockEngine:
         def create_pending_entry(self, signal, snap, df):
-            print(f"🔥 EXECUTION: Entry created for signal {signal.id}")
+            print(f"ðŸ”¥ EXECUTION: Entry created for signal {signal.id}")
 
     class MockDM:
         def __init__(self):
@@ -59,7 +59,7 @@ async def run_test():
             self.master = MockMaster()
 
         async def execute_signal(self, signal, mode="new"):
-            print(f"🔥 Unified EXECUTION: {signal.id} mode={mode}")
+            print(f"ðŸ”¥ Unified EXECUTION: {signal.id} mode={mode}")
 
     mock_engine = MockEngine()
     mock_dm = MockDM()
@@ -93,18 +93,18 @@ async def run_test():
     )
     signal.symbol = "NIFTY"
     
-    print(f"📡 STEP 1: Processing new signal {sig_id}...")
+    print(f"ðŸ“¡ STEP 1: Processing new signal {sig_id}...")
     await bot.process_signal(signal)
     
     # Check DB
-    print("🔍 Checking DB after queuing...")
+    print("ðŸ” Checking DB after queuing...")
     import sqlite3
     conn = sqlite3.connect(db.db_path)
     res = conn.execute("SELECT status FROM signals WHERE id=?", (sig_id,)).fetchone()
     print(f"   DB Status: {res[0]}")
     
     # 3. Simulate User Confirm (Test 01 Happy Path)
-    print("\n✅ STEP 2: Simulating User CONFIRM click...")
+    print("\nâœ… STEP 2: Simulating User CONFIRM click...")
     
     # Mock the Telegram update object
     class MockUser:
@@ -124,7 +124,7 @@ async def run_test():
     
     # Check Final DB State
     res = conn.execute("SELECT status FROM signals WHERE id=?", (sig_id,)).fetchone()
-    print(f"\n🏁 FINAL DB Status: {res[0]}")
+    print(f"\nðŸ FINAL DB Status: {res[0]}")
     conn.close()
 
 if __name__ == "__main__":

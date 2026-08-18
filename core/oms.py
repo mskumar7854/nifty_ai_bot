@@ -171,3 +171,32 @@ class OrderManagementSystem:
         except Exception as e:
             logger.error(f"Failed to fetch open orders: {e}")
             return []
+
+    def get_execution_stats_today(self) -> Dict[str, int]:
+        """Returns execution reconciliation metrics for today."""
+        today_str = datetime.now().date().isoformat()
+        stats = {
+            "orders_routed": 0,
+            "orders_filled": 0,
+            "failed": 0,
+            "cancelled": 0
+        }
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "SELECT state FROM orders WHERE created_at LIKE ?",
+                    (f"{today_str}%",)
+                )
+                rows = cursor.fetchall()
+                for row in rows:
+                    state = row["state"]
+                    stats["orders_routed"] += 1
+                    if state in ("ENTRY_FILLED", "POSITION_CLOSED"):
+                        stats["orders_filled"] += 1
+                    elif state == "FAILED":
+                        stats["failed"] += 1
+                    elif state == "CANCELLED":
+                        stats["cancelled"] += 1
+        except Exception as e:
+            logger.error(f"Failed to fetch execution stats: {e}")
+        return stats

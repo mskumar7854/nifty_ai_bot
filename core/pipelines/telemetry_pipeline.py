@@ -67,6 +67,11 @@ class TelemetryPipeline:
                     )
                 if self.ctx.simulation:
                     self.dashboard.set_simulation_engine(self.ctx.simulation)
+                if hasattr(self.ctx, "system") and self.ctx.system:
+                    if hasattr(self.ctx.system, "position_manager") and self.ctx.system.position_manager:
+                        self.dashboard.set_position_manager(self.ctx.system.position_manager)
+                    if hasattr(self.ctx.system, "oms") and self.ctx.system.oms:
+                        self.dashboard.set_oms(self.ctx.system.oms)
             except Exception as e:
                 logger.warning(f"Dashboard not available: {e}")
                 

@@ -21,14 +21,18 @@ class TradingStateManager:
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
-            cls._instance = super(TradingStateManager, cls).__new__(cls, *args, **kwargs)
+            cls._instance = super(TradingStateManager, cls).__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, state_file: Optional[str] = None):
         if self._initialized:
+            if state_file and state_file != self.state_file:
+                self.state_file = state_file
+                self.load_state()
             return
-        self.state_file = os.path.join("data", "system_state.json")
+        env_state_file = os.environ.get("NIFTY_SYSTEM_STATE_FILE")
+        self.state_file = state_file or env_state_file or os.path.join("data", "system_state.json")
         self.state = "ACTIVE"
         self.reason = "Initial startup state"
         self.alert_callback: Optional[Callable[[str], None]] = None
@@ -37,6 +41,12 @@ class TradingStateManager:
 
         # Log initial startup transition
         self.log_transition("NONE", self.state, f"Startup loaded: {self.reason}")
+
+    @classmethod
+    def reset_instance(cls, state_file: Optional[str] = None):
+        """Helper to safely isolate test instances without contaminating production state."""
+        cls._instance = None
+        return cls(state_file=state_file)
 
     def load_state(self):
         if os.path.exists(self.state_file):
@@ -50,9 +60,12 @@ class TradingStateManager:
                         self.state = saved_state
                         self.reason = saved_reason
                         logger.warning(f"🔒 Persistent state loaded from storage: {self.state} | Reason: {self.reason}")
+                    elif saved_state == "ACTIVE":
+                        self.state = "ACTIVE"
+                        self.reason = saved_reason or "System ACTIVE"
                     else:
                         self.state = "ACTIVE"
-                        self.reason = "Cleared temporary states on startup"
+                        self.reason = f"Cleared temporary state ({saved_state}) on startup"
                         self.save_state()
             except Exception as e:
                 logger.error(f"Failed to load system state: {e}. Defaulting to ACTIVE.")
@@ -124,7 +137,13 @@ class TradingStateManager:
             "ts": time.time(),
             "datetime": datetime.now().isoformat()
         }
-        audit_file = os.path.join("data", "state_transitions.jsonl")
+        env_audit_file = os.environ.get("NIFTY_AUDIT_FILE")
+        if env_audit_file:
+            audit_file = env_audit_file
+        elif "system_state_test" in self.state_file:
+            audit_file = os.path.join("data", "state_transitions_test.jsonl")
+        else:
+            audit_file = os.path.join("data", "state_transitions.jsonl")
         os.makedirs(os.path.dirname(audit_file), exist_ok=True)
         try:
             with open(audit_file, "a") as f:

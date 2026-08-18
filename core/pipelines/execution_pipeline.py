@@ -38,8 +38,6 @@ class ExecutionPipeline:
         t0 = time.perf_counter()
 
         if mode == "confirmed":
-            if is_simulation:
-                return self._build_failed_result("Cannot run confirmed mode in simulation")
             return await self._execute_live_phase_b(signal, snapshot)
 
         # ── PHASE A ──
@@ -107,27 +105,20 @@ class ExecutionPipeline:
         signal.metadata["delta_source"] = levels.get("delta_source", "HEURISTIC")
         signal.metadata["delta_used"] = levels.get("delta_used", 0.50)
 
-        # 4. Route to Simulation or Queue
-        if is_simulation:
-            # For sim, size is base_qty
-            qty = self.settings.position.base_qty if hasattr(self.settings.position, "base_qty") else 50
-            signal.position_size = qty
-            return await self._execute_simulated(signal, snapshot, instrument_info, premium, qty)
-        else:
-            # For live mode="new", we park in queue
-            if hasattr(self.ctx.system, "entry_engine"):
-                self.ctx.system.entry_engine.create_pending_entry(signal, snapshot, None)
-            return ExecutionResult(
-                status="queued",
-                broker_order_id="",
-                filled_price=0.0,
-                fill_time=None,
-                latency_ms=int((time.perf_counter() - t0) * 1000),
-                slippage=0.0,
-                execution_quality="UNKNOWN",
-                errors=[],
-                position_id=""
-            )
+        # 4. Route to Queue
+        if hasattr(self.ctx.system, "entry_engine"):
+            self.ctx.system.entry_engine.create_pending_entry(signal, snapshot, None)
+        return ExecutionResult(
+            status="queued",
+            broker_order_id="",
+            filled_price=0.0,
+            fill_time=None,
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            slippage=0.0,
+            execution_quality="UNKNOWN",
+            errors=[],
+            position_id=""
+        )
 
     async def _execute_simulated(self, signal: Signal, snapshot: MarketSnapshot, instrument_info: dict, premium: float, qty: int) -> ExecutionResult:
         """Handles execution fidelity and simulation logic."""
@@ -268,6 +259,10 @@ class ExecutionPipeline:
         pos = None
         if pos_manager:
             try:
+                if hasattr(pos_manager, "broker") and pos_manager.broker and hasattr(pos_manager.broker, "set_context"):
+                    instrument_info = getattr(signal, "metadata", {}).get("instrument", {})
+                    pos_manager.broker.set_context(signal, snapshot, instrument_info)
+                    
                 t_exec = time.perf_counter()
                 pos = await pos_manager.open_position_with_sl_guarantee(signal, size_info, premium)
                 latency = int((time.perf_counter() - t_exec) * 1000)
@@ -334,7 +329,7 @@ class ExecutionPipeline:
             errors=[reason]
         )
 
-    async def apply_position_actions(self, actions: list) -> None:
+    async def apply_position_actions(self, actions: list, snapshot=None) -> None:
         """
         Executes position actions returned by the PositionPipeline.
         This is the only place that should talk to the broker for position management.
@@ -344,33 +339,32 @@ class ExecutionPipeline:
         if not pos_manager:
             return
 
+        if snapshot and hasattr(pos_manager, "broker") and pos_manager.broker and hasattr(pos_manager.broker, "set_context"):
+            pos_manager.broker.set_context(None, snapshot, {})
+
         for action in actions:
             action_type = getattr(action, "action_type", "")
             pid = getattr(action, "position_id", "")
             
             try:
                 if action_type == "FULL_EXIT":
-                    if self.settings.system_mode.mode != "SIMULATION":
-                        close_res = await __import__('asyncio').to_thread(
-                            pos_manager.close_position, 
-                            pid, 
-                            0.0,  # Price usually fetched inside or passed if available
-                            getattr(action, "reason", "FULL_EXIT")
-                        )
-                        if close_res and hasattr(self.ctx, "telemetry") and self.ctx.telemetry:
-                            try:
-                                await self.ctx.telemetry.dispatch_trade_close(
-                                    trade_id=pid,
-                                    pnl=close_res.get("net_pnl", close_res.get("pnl", 0.0)),
-                                    outcome=close_res.get("reason", "FULL_EXIT"),
-                                    symbol=getattr(self.settings, "symbol", "NIFTY"),
-                                    hold_mins=close_res.get("hold_minutes", 0.0)
-                                )
-                            except Exception as alert_err:
-                                logger.error(f"Live exit alert failed safely: {alert_err}")
-                    else:
-                        if hasattr(system, "simulation"):
-                            system.simulation._close_trade(pid, 0.0, getattr(action, "reason", "FULL_EXIT"))
+                    close_res = await __import__('asyncio').to_thread(
+                        pos_manager.close_position, 
+                        pid, 
+                        0.0,  # Price usually fetched inside or passed if available
+                        getattr(action, "reason", "FULL_EXIT")
+                    )
+                    if close_res and hasattr(self.ctx, "telemetry") and self.ctx.telemetry:
+                        try:
+                            await self.ctx.telemetry.dispatch_trade_close(
+                                trade_id=pid,
+                                pnl=close_res.get("net_pnl", close_res.get("pnl", 0.0)),
+                                outcome=close_res.get("reason", "FULL_EXIT"),
+                                symbol=getattr(self.settings, "symbol", "NIFTY"),
+                                hold_mins=close_res.get("hold_minutes", 0.0)
+                            )
+                        except Exception as alert_err:
+                            logger.error(f"Live exit alert failed safely: {alert_err}")
                 
                 elif action_type == "PARTIAL_EXIT":
                     # Currently not implemented heavily in existing PositionManager, but we can call it if it exists

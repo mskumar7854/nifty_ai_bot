@@ -58,24 +58,24 @@ class PositionPipeline:
                 if quote and quote.bid > 0:
                     eval_price = quote.bid
             
-            # Tier 2: ATM proxy
-            if eval_price == snapshot.price and hasattr(pos, "signal_type"):
-                is_ce = "CE" in str(pos.signal_type)
-                atm_premium = snapshot.atm_ce_premium if is_ce else snapshot.atm_pe_premium
-                if atm_premium and atm_premium > 0:
-                    eval_price = atm_premium
-                    
-            # Tier 3: Delta approx
-            if eval_price == snapshot.price:
-                spot_move = snapshot.price - pos.spot_entry if hasattr(pos, "spot_entry") else 0
-                is_ce = "CE" in str(getattr(pos, "signal_type", ""))
-                delta = 0.5 if is_ce else -0.5
-                eval_price = max(0.05, pos.entry_price + (spot_move * delta))
+        # Tier 2: ATM proxy
+        if eval_price == snapshot.price and hasattr(pos, "signal_type"):
+            is_ce = "CE" in str(pos.signal_type)
+            atm_premium = snapshot.atm_ce_premium if is_ce else snapshot.atm_pe_premium
+            if atm_premium and atm_premium > 0:
+                eval_price = atm_premium
+                
+        # Tier 3: Delta approx
+        if eval_price == snapshot.price and (not getattr(snapshot, 'atm_ce_premium', 0) or getattr(snapshot, 'atm_ce_premium', 0) <= 0):
+            spot_move = snapshot.price - pos.spot_entry if hasattr(pos, "spot_entry") else 0
+            is_ce = "CE" in str(getattr(pos, "signal_type", ""))
+            delta = 0.5 if is_ce else -0.5
+            eval_price = max(0.05, pos.entry_price + (spot_move * delta))
         
         pos.current_price = round(eval_price, 2)
         
         direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
-        direction_mult = 1.0 if direction_str == "BUY" else -1.0
+        direction_mult = 1.0 if direction_str in ["BUY", "BULLISH"] else -1.0
         pos.unrealized_pnl = (pos.current_price - pos.entry_price) * pos.qty * direction_mult
         
         if pos.unrealized_pnl > pos.max_favorable:
@@ -128,13 +128,13 @@ class PositionPipeline:
         direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
         
         # 1. Hard Stop Loss Trigger
-        if direction_str == "BUY" and pos.current_price <= pos.stop_loss:
+        if direction_str in ["BUY", "BULLISH"] and pos.current_price <= pos.stop_loss:
             return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
-        elif direction_str == "SELL" and pos.current_price >= pos.stop_loss:
+        elif direction_str in ["SELL", "BEARISH"] and pos.current_price >= pos.stop_loss:
             return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
 
         # 2. Hard Target Trigger
-        if direction_str == "BUY" and pos.current_price >= pos.target_2:
+        if direction_str in ["BUY", "BULLISH"] and pos.current_price >= pos.target_2:
             return ExitDecision(ExitDecisionType.FULL_EXIT, "Target 2 Hit", urgency_level="NORMAL")
             
         # 3. Health Based Exit (Critical deterioration)
@@ -151,7 +151,7 @@ class PositionPipeline:
         return ExitDecision(ExitDecisionType.CONTINUE, "Trade Healthy")
 
     def _compute_tsl(self, pos: PositionState, snapshot: MarketSnapshot) -> Optional[float]:
-        cfg = self.settings.position
+        cfg = self.settings.position if hasattr(self.settings, "position") else self.settings
         entry = pos.entry_premium if pos.entry_premium > 0 else pos.entry_price
         
         if pos.current_price > pos.tsl_highest_premium:
@@ -186,7 +186,7 @@ class PositionPipeline:
         base_trail_dist = max(5.0, entry * 0.05)
         
         direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
-        if direction_str == "BUY":
+        if direction_str in ["BUY", "BULLISH"]:
             candidate_sl = pos.tsl_highest_premium - base_trail_dist
             if candidate_sl > pos.stop_loss:
                 new_sl = candidate_sl

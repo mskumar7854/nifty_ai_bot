@@ -1,6 +1,6 @@
-"""
+﻿"""
 ============================================
-🧪 CHAOS MONKEY BRIDGE TEST - TESTS 03 & 04
+ðŸ§ª CHAOS MONKEY BRIDGE TEST - TESTS 03 & 04
 Simulates Crash Recovery: Soft (<30s) vs Hard (>30s)
 ============================================
 """
@@ -9,7 +9,7 @@ import asyncio
 import uuid
 import time
 from datetime import datetime
-from models.signals import Signal, SignalType, Direction, Strength
+from models.signal import Signal, SignalType, Direction, Strength
 from core.db_manager import DBManager
 from core.telegram_controller import TelegramController
 from config.settings import Settings
@@ -43,7 +43,7 @@ async def run_test():
             self.master = MockMaster()
 
         async def execute_signal(self, signal, mode="new"):
-            print(f"🔥 Unified EXECUTION: {signal.id} mode={mode}")
+            print(f"ðŸ”¥ Unified EXECUTION: {signal.id} mode={mode}")
     
     class MockApp:
         class Bot:
@@ -54,10 +54,10 @@ async def run_test():
                 return MockMsg()
         bot = Bot()
 
-    # ┌────────────────────────────────────────────────────────┐
-    # │ TEST 03: SOFT CRASH (Recovery < 30s)                   │
-    # └────────────────────────────────────────────────────────┘
-    print("\n🌪️ --- TEST 03: SOFT CRASH RECOVERY (< 30s) ---")
+    # â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+    # â”‚ TEST 03: SOFT CRASH (Recovery < 30s)                   â”‚
+    # â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+    print("\nðŸŒªï¸ --- TEST 03: SOFT CRASH RECOVERY (< 30s) ---")
     
     # 1. Simulate Signal in DB (as if killed while pending)
     sig_id_soft = "SOFT_" + str(uuid.uuid4())[:4]
@@ -78,24 +78,24 @@ async def run_test():
     )
     # Save manually to simulate DB state before recovery
     await db.save_signal(soft_signal)
-    print(f"📡 Mocked 'pending' signal {sig_id_soft} (10s old) in DB.")
+    print(f"ðŸ“¡ Mocked 'pending' signal {sig_id_soft} (10s old) in DB.")
 
     # 2. Start new Bot Controller (Simulate Restart)
     bot_v2 = TelegramController(settings, MockSystem(), db)
     bot_v2.app = MockApp()
     
-    print("🔄 Bot booting... Running recovery...")
+    print("ðŸ”„ Bot booting... Running recovery...")
     await bot_v2.boot_recovery()
     
     # Verify RAM state
-    print(f"🔍 Checking RAM State:")
+    print(f"ðŸ” Checking RAM State:")
     print(f"   Active Signal ID: {bot_v2.active_signal.id if bot_v2.active_signal else 'None'}")
     print(f"   Status in RAM: {bot_v2.active_signal.status if bot_v2.active_signal else 'None'}")
 
-    # ┌────────────────────────────────────────────────────────┐
-    # │ TEST 04: HARD CRASH (Zombie Pruning > 30s)             │
-    # └────────────────────────────────────────────────────────┘
-    print("\n🌪️ --- TEST 04: HARD CRASH / ZOMBIE PRUNING (> 30s) ---")
+    # â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+    # â”‚ TEST 04: HARD CRASH (Zombie Pruning > 30s)             â”‚
+    # â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+    print("\nðŸŒªï¸ --- TEST 04: HARD CRASH / ZOMBIE PRUNING (> 30s) ---")
     
     sig_id_hard = "HARD_" + str(uuid.uuid4())[:4]
     
@@ -113,20 +113,20 @@ async def run_test():
         created_at=now - 45 
     )
     await db.save_signal(hard_signal)
-    print(f"📡 Mocked 'pending' signal {sig_id_hard} (45s old) in DB.")
+    print(f"ðŸ“¡ Mocked 'pending' signal {sig_id_hard} (45s old) in DB.")
 
     # 2. Restart Bot again
     bot_v3 = TelegramController(settings, MockSystem(), db)
     bot_v3.app = MockApp()
     
-    print("🔄 Bot booting... Running recovery...")
+    print("ðŸ”„ Bot booting... Running recovery...")
     await bot_v3.boot_recovery()
     
     # Verify DB State
     import sqlite3
     conn = sqlite3.connect(db.db_path)
     res = conn.execute("SELECT status FROM signals WHERE id=?", (sig_id_hard,)).fetchone()
-    print(f"\n🏁 FINAL DB Status for {sig_id_hard}: {res[0]}")
+    print(f"\nðŸ FINAL DB Status for {sig_id_hard}: {res[0]}")
     conn.close()
 
 if __name__ == "__main__":

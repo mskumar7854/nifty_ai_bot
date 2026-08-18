@@ -9,9 +9,10 @@ from core.structural_breaker import StructuralBreaker
 
 class TestSystemBreakers(unittest.TestCase):
     def setUp(self):
-        # Set up a clean state for testing
-        self.state_file = os.path.join("data", "system_state.json")
-        self.audit_file = os.path.join("data", "state_transitions.jsonl")
+        # Set up a clean test-specific state
+        self.state_file = os.path.join("data", "system_state_test.json")
+        self.audit_file = os.path.join("data", "state_transitions_test.jsonl")
+        os.environ["NIFTY_SYSTEM_STATE_FILE"] = self.state_file
         for fpath in [self.state_file, self.audit_file]:
             if os.path.exists(fpath):
                 try:
@@ -19,12 +20,8 @@ class TestSystemBreakers(unittest.TestCase):
                 except Exception:
                     pass
         
-        # Clear the singleton instance reference to guarantee complete test isolation
-        TradingStateManager._instance = None
-        
-        # Initialize state manager
-        self.state_mgr = TradingStateManager()
-        # Reset to ACTIVE for start of each test
+        # Reset instance with isolated test state file
+        self.state_mgr = TradingStateManager.reset_instance(state_file=self.state_file)
         self.state_mgr.set_state("ACTIVE", "Test Setup")
         self.alerts_sent = []
         self.state_mgr.register_alert_callback(self.record_alert)
@@ -33,13 +30,15 @@ class TestSystemBreakers(unittest.TestCase):
         self.alerts_sent.append(msg)
 
     def tearDown(self):
-        # Clean up
+        # Clean up test files
         for fpath in [self.state_file, self.audit_file]:
             if os.path.exists(fpath):
                 try:
                     os.remove(fpath)
                 except Exception:
                     pass
+        os.environ.pop("NIFTY_SYSTEM_STATE_FILE", None)
+        TradingStateManager.reset_instance()
 
     def test_state_persistence(self):
         # Transition to structural halt
@@ -76,7 +75,7 @@ class TestSystemBreakers(unittest.TestCase):
         self.assertEqual(temp_mgr.get_state(), "ACTIVE")
 
         # Verify transition logs have the correct schema version and enriched fields (backward compatibility checks)
-        audit_file = os.path.join("data", "state_transitions.jsonl")
+        audit_file = self.audit_file
         self.assertTrue(os.path.exists(audit_file))
         with open(audit_file, "r") as f:
             for line in f:

@@ -127,8 +127,15 @@ class AlertManager:
         table.add_row("Strength", signal.strength.value)
         table.add_row("", "")
         
-        if "premium_levels" in signal.metadata:
-            p_levels = signal.metadata["premium_levels"]
+        # Check both flattened and nested metadata
+        has_premium = "premium_entry" in signal.metadata or "premium_levels" in signal.metadata
+        is_option_trade = signal.signal_type in (SignalType.BUY_CE, SignalType.BUY_PE)
+        
+        if is_option_trade and not has_premium:
+            table.add_row("❌ ERROR", "[red]TELEGRAM_SIGNAL_INVALID[/]")
+            table.add_row("Reason", "Canonical premium levels missing. Spot fallback disabled.")
+        elif has_premium:
+            p_levels = signal.metadata.get("premium_levels", signal.metadata)
             table.add_row("Premium Entry", f"₹{p_levels.get('premium_entry', 0):,.1f}")
             table.add_row("Premium SL", f"₹{p_levels.get('premium_sl', 0):,.1f}")
             table.add_row("Premium T1", f"₹{p_levels.get('premium_t1', 0):,.1f}")

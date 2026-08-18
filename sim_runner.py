@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.WARNING, format='%(message)s', stream=sys.stdo
 
 from core.trade_filter import TradeFilter
 from config.settings import Settings
-from models.signals import Signal, SignalType, Direction, Strength
+from models.signal import Signal, SignalType, Direction, Strength
 
 settings = Settings()
 # Force log explicitly for demo

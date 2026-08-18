@@ -61,13 +61,23 @@ def format_signal_message(signal, snapshot_summary: Optional[dict] = None) -> st
     expiry_str = _format_expiry(expiry_raw) if expiry_raw else "—"
 
     # ── Premium Levels (option premium) ──
-    premium = signal.metadata.get("premium_levels", {})
-    has_premium = bool(premium)
-    p_entry = premium.get("premium_entry", 0)
-    p_sl = premium.get("premium_sl", 0)
-    p_t1 = premium.get("premium_t1", 0)
-    p_t2 = premium.get("premium_t2", 0)
-    p_t3 = premium.get("premium_t3", 0)
+    # ExecutionPipeline flattens these into metadata, but older simulation code might nest them
+    premium_dict = signal.metadata.get("premium_levels", signal.metadata)
+    
+    p_entry = premium_dict.get("premium_entry", 0)
+    p_sl = premium_dict.get("premium_sl", 0)
+    p_t1 = premium_dict.get("premium_t1", 0)
+    p_t2 = premium_dict.get("premium_t2", 0)
+    p_t3 = premium_dict.get("premium_t3", 0)
+    has_premium = bool(p_entry > 0 and p_sl > 0)
+    
+    # Fail loudly if option trade is missing premium levels (prevent dangerous spot fallback)
+    if option_type and not has_premium:
+        return (
+            f"❌ <b>TELEGRAM_SIGNAL_INVALID</b>\n\n"
+            f"Signal {signal.id} is an Option Trade ({sig_type}) but canonical premium levels are missing.\n"
+            f"<i>To prevent dangerous source-of-truth splits, NIFTY spot fallback is disabled.</i>"
+        )
 
     # ── Nifty Spot Levels ──
     spot_entry = signal.entry_price

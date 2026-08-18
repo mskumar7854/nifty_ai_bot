@@ -44,7 +44,10 @@ class MultiSessionCounterfactualReplay:
         if date_filter:
             query += f" WHERE timestamp LIKE '{date_filter}%'"
         
-        df_snaps = pd.read_sql_query(query, conn)
+        try:
+            df_snaps = pd.read_sql_query(query, conn)
+        except Exception:
+            df_snaps = pd.DataFrame()
         conn.close()
 
         if df_snaps.empty:

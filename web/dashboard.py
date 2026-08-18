@@ -1298,7 +1298,26 @@ DASHBOARD_HTML = """
     </section>
 
     <!-- ════════════════════════════════════════════════════════════════ -->
-    <!-- TIER 5: 💼 EXECUTION / POSITIONS / P&L (OPERATIONAL OUTCOMES)   -->
+    <section class="panel" aria-label="Execution Reconciliation">
+        <div class="panel-header" style="background:var(--blue-soft);">
+            <span style="color:var(--blue);">EXECUTION RECONCILIATION</span>
+            <span id="recon-status-badge" class="badge-text" style="font-family:var(--font-mono);">—</span>
+        </div>
+        <div class="panel-body" style="padding:14px 18px;">
+            <div class="context-grid" id="recon-grid">
+                <div class="context-card"><span class="ck">OMS Routed Intents</span><span class="cv" id="recon-routed">—</span></div>
+                <div class="context-card"><span class="ck">Orders Filled</span><span class="cv" id="recon-filled">—</span></div>
+                <div class="context-card"><span class="ck">Open Positions</span><span class="cv" id="recon-open">—</span></div>
+                <div class="context-card"><span class="ck">Closed Outcomes</span><span class="cv" id="recon-closed">—</span></div>
+                <div class="context-card"><span class="ck">Failed / Cancelled</span><span class="cv" id="recon-failed">—</span></div>
+            </div>
+            <div id="recon-mismatches" style="margin-top:12px; font-size:11px; color:var(--red); font-family:var(--font-mono); display:none;">
+            </div>
+        </div>
+    </section>
+
+    <!-- ════════════════════════════════════════════════════════════════ -->
+    <!-- TIER 6: 💼 EXECUTION / POSITIONS / P&L (OPERATIONAL OUTCOMES)   -->
     <!-- ════════════════════════════════════════════════════════════════ -->
     <section class="panel" aria-label="Execution & Outcomes Summary">
         <div class="panel-header">
@@ -1386,7 +1405,7 @@ DASHBOARD_HTML = """
     <section class="panel" aria-label="Executed Trades">
         <div class="panel-header">
             <span>Executed Trades Ledger</span>
-            <span style="font-size:9px; color:var(--text-tertiary); font-weight:500;">source: simulation_engine · P&L from closed outcomes only</span>
+            <span style="font-size:9px; color:var(--text-tertiary); font-weight:500;">source: execution_ledger · all filled orders · P&L realized on close</span>
         </div>
         <div class="panel-body" style="padding:0; overflow-x:auto;">
             <table class="trade-table" id="trade-ledger-table">
@@ -1538,15 +1557,56 @@ DASHBOARD_HTML = """
             document.getElementById('rc-vix').textContent = data.market.india_vix ? Number(data.market.india_vix).toFixed(2) : '—';
             document.getElementById('rc-vwap').textContent = data.market.vwap ? Number(data.market.vwap).toFixed(2) : '—';
             document.getElementById('rc-pcr').textContent = data.market.pcr ? Number(data.market.pcr).toFixed(2) : '—';
-        }
-        if (data.price) {
+            
             const liveSpotEl = document.getElementById('rc-live-spot');
-            if (liveSpotEl) liveSpotEl.textContent = '₹' + Number(data.price).toFixed(2);
+            if (liveSpotEl) liveSpotEl.textContent = '₹' + Number(data.market.live_nifty || data.price || 0).toFixed(2);
+
+            if (data.market.oi_health || data.oi_health) {
+                const health = data.market.oi_health || data.oi_health;
+                const oiEl = document.getElementById('rc-oi');
+                if (oiEl) {
+                    oiEl.textContent = (health.status || 'LIVE') + ' ' + (health.rate || '');
+                    oiEl.style.color = health.status === 'FALLBACK' ? 'var(--amber)' : 'var(--green)';
+                }
+            }
+        } else {
+            if (data.price) {
+                const liveSpotEl = document.getElementById('rc-live-spot');
+                if (liveSpotEl) liveSpotEl.textContent = '₹' + Number(data.price).toFixed(2);
+            }
+            if (data.oi_health) {
+                const oiEl = document.getElementById('rc-oi');
+                if (oiEl) {
+                    oiEl.textContent = (data.oi_health.status || 'LIVE') + ' ' + (data.oi_health.rate || '');
+                    oiEl.style.color = data.oi_health.status === 'FALLBACK' ? 'var(--amber)' : 'var(--green)';
+                }
+            }
         }
-        if (data.oi_health) {
-            const oiEl = document.getElementById('rc-oi');
-            oiEl.textContent = (data.oi_health.status || 'LIVE') + ' ' + (data.oi_health.rate || '');
-            oiEl.style.color = data.oi_health.status === 'FALLBACK' ? 'var(--amber)' : 'var(--green)';
+
+        // Execution Reconciliation
+        if (data.execution) {
+            const ex = data.execution;
+            document.getElementById('recon-routed').textContent = ex.orders_routed;
+            document.getElementById('recon-filled').textContent = ex.orders_filled;
+            document.getElementById('recon-open').textContent = ex.open_positions;
+            document.getElementById('recon-closed').textContent = ex.closed_outcomes;
+            document.getElementById('recon-failed').textContent = ex.failed + ' / ' + ex.cancelled;
+        }
+
+        if (data.reconciliation) {
+            const rc = data.reconciliation;
+            const badge = document.getElementById('recon-status-badge');
+            if (rc.status === 'CONSISTENT') {
+                badge.textContent = '✓ CONSISTENT';
+                badge.className = 'badge-text badge-executed';
+                document.getElementById('recon-mismatches').style.display = 'none';
+            } else {
+                badge.textContent = '⚠ MISMATCH';
+                badge.className = 'badge-text badge-rejected';
+                const mmEl = document.getElementById('recon-mismatches');
+                mmEl.innerHTML = (rc.mismatches || []).map(m => `<div>${m}</div>`).join('');
+                mmEl.style.display = 'block';
+            }
         }
 
         renderActivePositions(data.positions || []);
@@ -2001,7 +2061,7 @@ DASHBOARD_HTML = """
         // 1. Today's Session
         html += `<tr style="border-bottom:1px solid var(--border);"><td colspan="13" style="padding:10px 14px; font-weight:700; color:var(--blue); background:rgba(56,189,248,0.06); letter-spacing:0.8px; font-size:11px; text-transform:uppercase;">● TODAY'S SESSION · ${todayStr}</td></tr>`;
         if (todayTrades.length === 0) {
-            html += `<tr><td colspan="13" style="padding:16px; color:var(--text-tertiary); text-align:center; font-style:italic; border-bottom:1px solid var(--border);">No closed trades in today's session (${todayStr})</td></tr>`;
+            html += `<tr><td colspan="13" style="padding:16px; color:var(--text-tertiary); text-align:center; font-style:italic; border-bottom:1px solid var(--border);">No executed trades in today's session (${todayStr})</td></tr>`;
         } else {
             todayTrades.forEach(t => { html += renderTradeRow(t); });
         }
@@ -2081,6 +2141,8 @@ class Dashboard:
 
         # ── Priority 1: Trade Replay Viewer ──
         self._simulation_engine = None
+        self._position_manager = None
+        self._oms = None
 
         self._setup_routes()
         self._setup_error_handlers()
@@ -2364,6 +2426,8 @@ class Dashboard:
                             stage = "Cost/Breakeven (PEV)"
                         elif "LOW_EV" in reason_up or "EXPECTED_VALUE" in reason_up:
                             stage = "Expected Value (EV)"
+                        elif "SAME_STRUCTURAL_TREND" in reason_up:
+                            stage = "Structure Reset Guard"
                         elif "GRADE" in reason_up or "SQUEEZE" in reason_up or "STRUCTURE" in reason_up or "CHOP" in reason_up or "REGIME" in reason_up:
                             stage = "Grade / Structure"
                         elif "CAPACITY" in reason_up or "MAX OPEN POSITIONS" in reason_up:
@@ -2387,6 +2451,7 @@ class Dashboard:
                             ("Expected Value (EV)",    "EV"),
                             ("Regime-Aware Grade",     "Grade / Structure"),
                             ("Structure",              "Structure"),
+                            ("Structure Reset",        "Structure Reset Guard"),
                             ("Decay/Theta",            "Decay/Theta"),
                         ]
                         gate_rows = []
@@ -2410,6 +2475,36 @@ class Dashboard:
                                     detail = f"≥ {effective_conf:.1f}% (Relaxed from {base_adapt:.1f}% · Grade {conf_j.get('grade', '—')})"
                                 else:
                                     detail = f"≥ {effective_conf:.1f}%"
+                            elif db_key == "Cost/Breakeven (PEV)":
+                                import re as _re
+                                m_pev = _re.search(r'PEV:\s*([\d\.]+)', detail)
+                                m_req = _re.search(r'Req:\s*([\d\.]+)', detail)
+                                if m_pev:
+                                    val_str = m_pev.group(1)
+                                if m_req:
+                                    detail = f"PEV ≥ {m_req.group(1)}"
+                            elif db_key == "Expected Value (EV)":
+                                ev_r = ev_j.get("ev_r")
+                                if ev_r is not None:
+                                    val_str = f"{ev_r:.2f}R"
+                                    detail = "EV ≥ 0.50R threshold"
+                            elif db_key == "Regime-Aware Grade":
+                                import re as _re
+                                m_grade = _re.search(r'Grade:\s*([A-Z\+]+)', detail)
+                                if m_grade:
+                                    val_str = m_grade.group(1)
+                                    m_regime = _re.search(r'Regime:\s*([A-Z_]+)', detail)
+                                    m_req = _re.search(r'Required:\s*([A-Z\+_]+)', detail)
+                                    if m_regime and m_req:
+                                        detail = f"Grade {m_req.group(1)} required in {m_regime.group(1)}"
+                            elif db_key == "Structure Reset":
+                                if passed:
+                                    val_str = "OK"
+                                else:
+                                    import re as _re
+                                    m_count = _re.search(r'Already entered (\d+) times', detail)
+                                    if m_count:
+                                        val_str = f"{m_count.group(1)} prior entries"
 
                             gate_rows.append({"gate": display, "result": result, "value": val_str, "requirement": detail})
 
@@ -2536,45 +2631,193 @@ class Dashboard:
 
         @self.app.route("/api/trades")
         def api_trades():
-            """Trade Ledger & Replay endpoint for dashboard panel."""
+            """
+            Trade Ledger & Replay endpoint for dashboard panel.
+            Authority model:
+              Today's executions: Canonical live memory (PositionManager & OMS orders today)
+              Historical recovery: SQLite trade_outcomes table
+            """
             try:
-                db_path = "data/trading_v4_sim.db"
-                if not os.path.exists(db_path):
-                    return _safe_jsonify({"status": "no_data", "message": "Database not found"})
-
-                with sqlite3.connect(db_path) as conn:
-                    conn.row_factory = sqlite3.Row
-                    cur = conn.cursor()
-                    cur.execute("SELECT * FROM trade_outcomes ORDER BY signal_timestamp DESC LIMIT 100")
-                    rows = cur.fetchall()
-
+                today_str = datetime.now().date().isoformat()
                 trades = []
-                for r in rows:
-                    t = dict(r)
+                seen_ids = set()
+
+                # 1. Canonical Live Open Positions
+                open_pos_list = []
+                if self._position_manager and hasattr(self._position_manager, "open_positions"):
+                    open_pos_list = list(self._position_manager.open_positions.values())
+                elif self._status_data and "positions" in self._status_data:
+                    open_pos_list = self._status_data.get("positions", [])
+
+                for pos in open_pos_list:
+                    pos_dict = pos.to_dict() if hasattr(pos, "to_dict") else dict(pos)
+                    trade_id = pos_dict.get("id") or pos_dict.get("trade_id") or pos_dict.get("snapshot_id")
+                    if trade_id:
+                        seen_ids.add(trade_id)
+
+                    entry_p = float(pos_dict.get("entry_price") or pos_dict.get("entry") or 0.0)
+                    sl_p = float(pos_dict.get("stop_loss") or pos_dict.get("sl") or 0.0)
+                    t1_p = float(pos_dict.get("target_1") or pos_dict.get("target1") or 0.0)
+                    qty_val = int(pos_dict.get("qty") or 50)
+                    unrealized_pnl = pos_dict.get("net_pnl")
+                    if unrealized_pnl is None:
+                        raw_pnl = pos_dict.get("unrealized_pnl", 0.0)
+                        if isinstance(raw_pnl, str):
+                            try:
+                                unrealized_pnl = float(raw_pnl.replace("₹", "").replace(",", "").strip())
+                            except Exception:
+                                unrealized_pnl = 0.0
+                        else:
+                            unrealized_pnl = float(raw_pnl or 0.0)
+
+                    r_mult = None
+                    if sl_p > 0 and entry_p > 0 and qty_val > 0 and abs(entry_p - sl_p) > 0:
+                        r_mult = unrealized_pnl / (abs(entry_p - sl_p) * qty_val)
+
+                    opened_time = pos_dict.get("opened_at") or pos_dict.get("time") or datetime.now().isoformat()
                     trades.append({
-                        "time": t.get("signal_timestamp"),
-                        "signal": t.get("contract"),
-                        "strike": t.get("strike"),
+                        "trade_id": trade_id,
+                        "time": opened_time,
+                        "signal": pos_dict.get("signal_type") or pos_dict.get("type") or "UNKNOWN",
+                        "strike": pos_dict.get("strike"),
                         "expiry": None,
-                        "entry": t.get("entry"),
-                        "exit_price": t.get("exit_price"),
-                        "sl": t.get("sl"),
-                        "target1": t.get("target"),
-                        "qty": t.get("qty"),
-                        "net_pnl": t.get("net_pnl"),
-                        "result": t.get("result"),
-                        "opened_at": t.get("opened_at"),
-                        "closed_at": t.get("closed_at"),
-                        "confidence": t.get("confidence"),
-                        "grade": t.get("grade"),
-                        "is_reconstructed": t.get("source") == "historical_recovery",
-                        "r_multiple": t.get("r_multiple")
+                        "entry": entry_p,
+                        "exit_price": None,
+                        "sl": sl_p,
+                        "target1": t1_p,
+                        "qty": qty_val,
+                        "net_pnl": unrealized_pnl,
+                        "result": "OPEN",
+                        "opened_at": opened_time,
+                        "closed_at": None,
+                        "confidence": pos_dict.get("calibrated_confidence") or pos_dict.get("weighted_score") or 0.0,
+                        "grade": pos_dict.get("tsl_grade") or pos_dict.get("grade") or "—",
+                        "is_reconstructed": bool(pos_dict.get("is_reconstructed", False)),
+                        "r_multiple": r_mult
                     })
 
-                return _safe_jsonify({"status": "ok", "trades": trades, "source": "trade_outcomes_ledger"})
+                # 2. Canonical Live Closed Positions Today
+                closed_pos_list = []
+                if self._position_manager and hasattr(self._position_manager, "closed_positions_today"):
+                    closed_pos_list = list(self._position_manager.closed_positions_today)
+                elif self._status_data and "closed_positions_today" in self._status_data:
+                    closed_pos_list = self._status_data.get("closed_positions_today", [])
+
+                for c_pos in closed_pos_list:
+                    c_dict = c_pos.to_dict() if hasattr(c_pos, "to_dict") else dict(c_pos)
+                    trade_id = c_dict.get("trade_id") or c_dict.get("id")
+                    if trade_id:
+                        seen_ids.add(trade_id)
+
+                    trades.append({
+                        "trade_id": trade_id,
+                        "time": c_dict.get("timestamp") or c_dict.get("time") or datetime.now().isoformat(),
+                        "signal": c_dict.get("signal") or c_dict.get("signal_type") or "",
+                        "strike": c_dict.get("strike"),
+                        "expiry": None,
+                        "entry": float(c_dict.get("entry_price") or c_dict.get("entry") or 0.0),
+                        "exit_price": float(c_dict.get("exit_price") or c_dict.get("exit") or 0.0),
+                        "sl": float(c_dict.get("stop_loss") or c_dict.get("sl") or 0.0),
+                        "target1": float(c_dict.get("target_1") or c_dict.get("target1") or 0.0),
+                        "qty": int(c_dict.get("quantity") or c_dict.get("qty") or 50),
+                        "net_pnl": float(c_dict.get("pnl") or c_dict.get("net_pnl") or 0.0),
+                        "result": c_dict.get("outcome") or "CLOSED",
+                        "opened_at": c_dict.get("timestamp") or c_dict.get("opened_at"),
+                        "closed_at": c_dict.get("closed_at") or datetime.now().isoformat(),
+                        "confidence": c_dict.get("weighted_score") or c_dict.get("confidence") or 0.0,
+                        "grade": c_dict.get("grade") or "—",
+                        "is_reconstructed": bool(c_dict.get("is_reconstructed", False)),
+                        "r_multiple": c_dict.get("r_multiple")
+                    })
+
+                # 3. Check OMS Orders Table for Today
+                if self._oms:
+                    try:
+                        open_orders = self._oms.get_open_orders()
+                        for order in open_orders:
+                            o_id = order.get("signal_id") or order.get("intent_id")
+                            if o_id and o_id not in seen_ids:
+                                state = order.get("state")
+                                if state in ("ENTRY_SUBMITTED", "PARTIAL_FILLED", "FILLED_ACTIVE", "ENTRY_FILLED"):
+                                    seen_ids.add(o_id)
+                                    fill_p = float(order.get("avg_fill_price") or order.get("requested_price") or 0.0)
+                                    sl_p = float(order.get("stop_loss_price") or 0.0)
+                                    qty_v = int(order.get("qty") or 50)
+                                    trades.append({
+                                        "trade_id": o_id,
+                                        "time": order.get("created_at") or datetime.now().isoformat(),
+                                        "signal": order.get("symbol") or "NIFTY",
+                                        "strike": None,
+                                        "expiry": None,
+                                        "entry": fill_p,
+                                        "exit_price": None,
+                                        "sl": sl_p,
+                                        "target1": fill_p + (abs(fill_p - sl_p) * 1.5) if sl_p > 0 else 0.0,
+                                        "qty": qty_v,
+                                        "net_pnl": 0.0,
+                                        "result": "OPEN",
+                                        "opened_at": order.get("created_at"),
+                                        "closed_at": None,
+                                        "confidence": 0.0,
+                                        "grade": "—",
+                                        "is_reconstructed": True,
+                                        "r_multiple": 0.0
+                                    })
+                    except Exception as oms_e:
+                        logger.warning(f"OMS order check in /api/trades failed: {oms_e}")
+
+                # 4. Fetch Historical Recovery State (SQLite DB)
+                db_paths = ["data/trading_v4_sim.db", "data/trading_v4_live.db"]
+                for db_path in db_paths:
+                    if os.path.exists(db_path):
+                        try:
+                            with sqlite3.connect(db_path) as conn:
+                                conn.row_factory = sqlite3.Row
+                                cur = conn.cursor()
+                                cur.execute("SELECT * FROM trade_outcomes ORDER BY signal_timestamp DESC LIMIT 100")
+                                rows = cur.fetchall()
+                                for r in rows:
+                                    t = dict(r)
+                                    t_id = t.get("trade_id")
+                                    if t_id and t_id in seen_ids:
+                                        continue
+                                    if t_id:
+                                        seen_ids.add(t_id)
+
+                                    sig_ts = t.get("signal_timestamp") or ""
+                                    is_today = sig_ts.startswith(today_str)
+                                    is_recon = t.get("source") == "historical_recovery" or not is_today
+
+                                    trades.append({
+                                        "trade_id": t_id,
+                                        "time": sig_ts,
+                                        "signal": t.get("contract"),
+                                        "strike": t.get("strike"),
+                                        "expiry": None,
+                                        "entry": t.get("entry"),
+                                        "exit_price": t.get("exit_price"),
+                                        "sl": t.get("sl"),
+                                        "target1": t.get("target"),
+                                        "qty": t.get("qty"),
+                                        "net_pnl": t.get("net_pnl"),
+                                        "result": t.get("result"),
+                                        "opened_at": t.get("opened_at"),
+                                        "closed_at": t.get("closed_at"),
+                                        "confidence": t.get("confidence"),
+                                        "grade": t.get("grade"),
+                                        "is_reconstructed": is_recon,
+                                        "r_multiple": t.get("r_multiple")
+                                    })
+                        except Exception as dbe:
+                            logger.warning(f"Failed to query {db_path} in /api/trades: {dbe}")
+
+                # 5. Sort completely chronologically (newest first)
+                trades.sort(key=lambda x: str(x.get("time") or ""), reverse=True)
+
+                return _safe_jsonify({"status": "ok", "trades": trades, "source": "execution_ledger"})
 
             except Exception as e:
-                logger.error(f"TRADES ENDPOINT ERROR: {e}")
+                logger.error(f"TRADES ENDPOINT ERROR: {e}", exc_info=True)
                 return _safe_jsonify({"status": "error", "message": str(e)}), 500
 
         @self.app.route("/health")
@@ -2658,6 +2901,12 @@ class Dashboard:
 
     def set_simulation_engine(self, sim_engine):
         self._simulation_engine = sim_engine
+
+    def set_position_manager(self, pos_manager):
+        self._position_manager = pos_manager
+
+    def set_oms(self, oms):
+        self._oms = oms
 
     def update_status(self, data: dict):
         self._status_data = data

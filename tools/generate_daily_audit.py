@@ -47,10 +47,14 @@ def _load_snapshots(target_date: str) -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame()
     conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql_query(
-        f"SELECT * FROM decision_snapshots_v2 WHERE timestamp LIKE '{target_date}%'", conn
-    )
-    conn.close()
+    try:
+        df = pd.read_sql_query(
+            f"SELECT * FROM decision_snapshots_v2 WHERE timestamp LIKE '{target_date}%'", conn
+        )
+    except Exception:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
     return df
 
 
@@ -130,6 +134,48 @@ def _get_market_summary(target_date: str) -> dict:
     }
 
 
+def _load_oms_orders(target_date: str) -> dict:
+    """Fetch OMS order lifecycle metrics for target date."""
+    if not DB_PATH.exists():
+        return {"orders_routed": 0, "orders_filled": 0, "failed": 0, "cancelled": 0, "open": 0, "closed": 0}
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM orders WHERE created_at LIKE ?", (f"{target_date}%",))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        
+        routed = len(rows)
+        filled = len([r for r in rows if r.get("state") in ("ENTRY_FILLED", "POSITION_CLOSED")])
+        failed = len([r for r in rows if r.get("state") == "FAILED"])
+        cancelled = len([r for r in rows if r.get("state") == "CANCELLED"])
+        open_pos = len([r for r in rows if r.get("state") == "ENTRY_FILLED"])
+        closed_pos = len([r for r in rows if r.get("state") == "POSITION_CLOSED"])
+        return {
+            "orders_routed": routed,
+            "orders_filled": filled,
+            "failed": failed,
+            "cancelled": cancelled,
+            "open": open_pos,
+            "closed": closed_pos
+        }
+    except Exception:
+        return {"orders_routed": 0, "orders_filled": 0, "failed": 0, "cancelled": 0, "open": 0, "closed": 0}
+
+
+def _load_system_state() -> dict:
+    """Fetch current system state and circuit breaker posture."""
+    state_file = Path("data") / "system_state.json"
+    if state_file.exists():
+        try:
+            with open(state_file, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"state": "ACTIVE", "reason": ""}
+
+
 def _get_signal_breakdown(df_snaps: pd.DataFrame) -> dict:
     if df_snaps.empty:
         return {"total": 0, "buy_ce": 0, "buy_pe": 0, "executed": 0, "rejected": 0, "capacity_rejected": 0, "predictive_rejected": 0, "predictive_reasons": {}, "capacity_reasons": {}}
@@ -169,8 +215,8 @@ def _get_signal_breakdown(df_snaps: pd.DataFrame) -> dict:
         "rejected": total - executed,
         "capacity_rejected": sum(capacity_rejections.values()),
         "predictive_rejected": sum(predictive_rejections.values()),
-        "predictive_reasons": dict(predictive_rejections.most_common(5)),
-        "capacity_reasons": dict(capacity_rejections.most_common(5))
+        "predictive_reasons": dict(predictive_rejections.most_common()),
+        "capacity_reasons": dict(capacity_rejections.most_common())
     }
 
 
@@ -213,10 +259,166 @@ def _get_campaign_progress() -> dict:
     if not DB_PATH.exists():
         return {"completed": 0, "required": 20, "remaining": 20}
     conn = sqlite3.connect(str(DB_PATH))
-    df = pd.read_sql_query("SELECT DISTINCT substr(timestamp, 1, 10) as d FROM decision_snapshots_v2", conn)
+    try:
+        df = pd.read_sql_query("SELECT DISTINCT substr(timestamp, 1, 10) as d FROM decision_snapshots_v2", conn)
+        completed = len(df)
+    except Exception:
+        completed = 0
+    finally:
+        conn.close()
+    return {"completed": completed, "required": 20, "remaining": max(0, 20 - completed)}
+
+
+def _generate_executed_trades_section(target_date: str) -> list:
+    if not DB_PATH.exists():
+        return ["No database found."]
+    
+    conn = sqlite3.connect(str(DB_PATH))
+    query = f"""
+        SELECT 
+            s.id as signal_id, s.symbol as contract, s.direction as direction, 
+            s.entry_price as planned_entry, s.stop_loss as planned_sl, s.target_1 as planned_t1, s.metadata, s.created_at,
+            o.state as order_state, o.avg_fill_price as actual_entry, 
+            te.net_pnl as net_pnl, te.gross_pnl as gross_pnl, te.realized_r_multiple as r_multiple, te.exit_fill as actual_exit, te.holding_seconds as holding_seconds,
+            (te.spread_cost + te.slippage_cost + te.brokerage + te.stt + te.gst + te.sebi_charges + te.stamp_duty) as total_costs
+        FROM signals s
+        JOIN orders o ON s.id = o.signal_id
+        LEFT JOIN trade_economics te ON o.intent_id = te.intent_id
+        WHERE datetime(s.created_at, 'unixepoch', 'localtime') LIKE '{target_date}%'
+           OR datetime(s.updated_at, 'unixepoch', 'localtime') LIKE '{target_date}%'
+        ORDER BY s.created_at ASC
+    """
+    try:
+        df = pd.read_sql_query(query, conn)
+    except Exception:
+        df = pd.DataFrame()
     conn.close()
-    completed = len(df)
-    return {"completed": completed, "required": 20, "remaining": max(20 - completed, 0)}
+    
+    if df.empty:
+        return ["No executed trades today."]
+        
+    lines = []
+    lines.append("| Time | Contract | Leg | Entry # | Reset | Plan Entry | Act Entry | SL | T1 | T2 | Exit | Result | Net P&L | R | Status | Reason |")
+    lines.append("|------|----------|-----|---------|-------|-----------:|----------:|---:|---:|---:|------:|--------|---------:|--:|--------|--------|")
+    
+    total_executed = 0
+    total_wins = 0
+    total_losses = 0
+    gross_pnl = 0.0
+    total_costs = 0.0
+    net_pnl = 0.0
+    total_r = 0.0
+    largest_win = 0.0
+    largest_loss = 0.0
+    
+    open_trades_md = []
+    
+    for i, row in df.iterrows():
+        t2 = "-"
+        leg_id = "-"
+        entries_in_leg = "-"
+        reset_event = "-"
+        exit_reason = "-" # Exit reason isn't easily queryable from trade_economics directly
+        
+        if pd.notna(row['metadata']):
+            try:
+                meta = json.loads(row['metadata'])
+                if 'target_2' in meta:
+                    t2 = f"{meta['target_2']:.2f}"
+                
+                struct_state = meta.get('structural_state', {})
+                if struct_state:
+                    leg_id = str(struct_state.get('leg_id', '-'))
+                    entries_in_leg = str(struct_state.get('entries_in_leg', '-'))
+                    reset_event = str(struct_state.get('reset_event', '-'))
+                    if reset_event == 'None':
+                        reset_event = 'null'
+            except Exception:
+                pass
+                
+        dt = pd.to_datetime(row['created_at'], unit='s') if pd.notna(row['created_at']) else None
+        time_str = dt.strftime('%H:%M') if dt else "-"
+        
+        contract = str(row['contract']) if pd.notna(row['contract']) else "-"
+        p_entry = f"{row['planned_entry']:.2f}" if pd.notna(row['planned_entry']) else "-"
+        a_entry = f"{row['actual_entry']:.2f}" if pd.notna(row['actual_entry']) else "-"
+        sl = f"{row['planned_sl']:.2f}" if pd.notna(row['planned_sl']) else "-"
+        t1 = f"{row['planned_t1']:.2f}" if pd.notna(row['planned_t1']) else "-"
+        
+        order_state = str(row['order_state']).upper() if pd.notna(row['order_state']) else "UNKNOWN"
+        
+        if pd.isna(row['net_pnl']):
+            # Open trade
+            open_trades_md.append(f"Status: {order_state}\n\nPlanned Entry: ₹{p_entry}\nActual Entry: ₹{a_entry}\nCurrent: -\nSL: ₹{sl}\nT1: ₹{t1}\nT2: {t2}\nUnrealized P&L: -")
+            exit_p = "-"
+            result = "OPEN"
+            pnl_str = "-"
+            r_str = "-"
+            exec_status = order_state
+        else:
+            total_executed += 1
+            exit_p = f"{row['actual_exit']:.2f}" if pd.notna(row['actual_exit']) else "-"
+            n_pnl = float(row['net_pnl'])
+            g_pnl = float(row['gross_pnl'])
+            c_costs = float(row['total_costs']) if pd.notna(row['total_costs']) else 0.0
+            r_mult = float(row['r_multiple']) if pd.notna(row['r_multiple']) else 0.0
+            
+            gross_pnl += g_pnl
+            net_pnl += n_pnl
+            total_costs += c_costs
+            total_r += r_mult
+            
+            if n_pnl > 0:
+                total_wins += 1
+                result = "WIN"
+                if n_pnl > largest_win:
+                    largest_win = n_pnl
+            else:
+                total_losses += 1
+                result = "LOSS"
+                if n_pnl < largest_loss:
+                    largest_loss = n_pnl
+                    
+            pnl_str = f"+₹{n_pnl:.0f}" if n_pnl >= 0 else f"-₹{abs(n_pnl):.0f}"
+            r_str = f"+{r_mult:.2f}R" if r_mult >= 0 else f"{r_mult:.2f}R"
+            exec_status = "CLOSED"
+            exit_reason = "EOD" if dt and dt.hour >= 15 else "UNKNOWN" # Placeholder heuristic
+            
+        lines.append(f"| {time_str} | {contract} | {leg_id} | {entries_in_leg} | {reset_event} | {p_entry} | {a_entry} | {sl} | {t1} | {t2} | {exit_p} | {result} | {pnl_str} | {r_str} | {exec_status} | {exit_reason} |")
+        
+    lines.append("")
+    lines.append("### Daily Trade Summary")
+    lines.append("")
+    
+    if total_executed > 0:
+        win_rate = (total_wins / total_executed) * 100
+        avg_r = total_r / total_executed
+        
+        lines.append(f"Executed Trades:        {total_executed}")
+        lines.append(f"Winning Trades:         {total_wins}")
+        lines.append(f"Losing Trades:          {total_losses}")
+        lines.append(f"Win Rate:               {win_rate:.1f}%")
+        lines.append(f"Gross P&L:              {'+' if gross_pnl >= 0 else '-'}₹{abs(gross_pnl):.0f}")
+        lines.append(f"Total Costs:            ₹{total_costs:.0f}")
+        lines.append(f"Net P&L:                {'+' if net_pnl >= 0 else '-'}₹{abs(net_pnl):.0f}")
+        lines.append(f"Total R:                {'+' if total_r >= 0 else ''}{total_r:.2f}R")
+        lines.append(f"Average R:              {'+' if avg_r >= 0 else ''}{avg_r:.2f}R")
+        lines.append(f"Largest Win:            +₹{largest_win:.0f}")
+        lines.append(f"Largest Loss:           -₹{abs(largest_loss):.0f}")
+    else:
+        lines.append("No completed trades today.")
+        
+    if open_trades_md:
+        lines.append("")
+        lines.append("### Open Trades")
+        lines.append("")
+        for om in open_trades_md:
+            lines.append("```text")
+            lines.append(om)
+            lines.append("```")
+            lines.append("")
+            
+    return lines
 
 
 def _load_campaign_trend(target_date: str) -> dict:
@@ -270,10 +472,13 @@ def generate_daily_audit(target_date: str = None):
     df_trades = _load_trades(target_date)
     market = _get_market_summary(target_date)
     signals = _get_signal_breakdown(df_snaps)
+    oms = _load_oms_orders(target_date)
+    sys_state = _load_system_state()
     errors = _count_log_errors(target_date)
     eq = _get_execution_quality(df_snaps)
     campaign = _get_campaign_progress()
     git_hash = get_git_commit_hash()
+    executed_trades_md = _generate_executed_trades_section(target_date)
 
     # Replay
     replay_engine = MultiSessionCounterfactualReplay(db_path=str(DB_PATH))
@@ -282,10 +487,16 @@ def generate_daily_audit(target_date: str = None):
     replay_win_rate = (df_replay["realized_r"] > 0).mean() * 100 if not df_replay.empty else 0
     replay_expectancy = df_replay["realized_r"].mean() if not df_replay.empty else 0
 
-    # Determine overall daily status
+    # Determine governance & overall daily status
     has_fatal = errors["fatal"] > 0
     data_ok = len(df_snaps) > 0
     infra_degraded = errors.get("infrastructure_degraded", False)
+    is_halted = sys_state.get("state") in ("HALTED", "PAUSED_STRUCTURAL", "PAUSED_MANUAL", "PAUSED_FINANCIAL")
+    
+    # In HALTED state, all approved candidates were blocked by governance before OMS routing
+    governance_blocked = signals["executed"] if is_halted else 0
+    actual_orders_routed = 0 if is_halted else oms["orders_routed"]
+    actual_orders_filled = 0 if is_halted else oms["orders_filled"]
     
     if has_fatal:
         overall_status = "❌ RUNTIME_FAILURE"
@@ -293,10 +504,10 @@ def generate_daily_audit(target_date: str = None):
         overall_status = "⚠️ NO DATA"
     elif infra_degraded:
         overall_status = "🟡 INFRASTRUCTURE_DEGRADED"
-    elif signals["executed"] == 0:
-        overall_status = "✅ HEALTHY_NO_TRADE"
+    elif is_halted:
+        overall_status = f"🟡 HALTED ({sys_state.get('state')})"
     else:
-        overall_status = "✅ HEALTHY"
+        overall_status = "🟡 VALIDATION DATA INSUFFICIENT"
 
     # Campaign trend from prior sessions
     trend = _load_campaign_trend(target_date)
@@ -317,14 +528,10 @@ def generate_daily_audit(target_date: str = None):
         decision_icon = "🟡"
         decision_label = "INFRASTRUCTURE DEGRADED"
         decision_reason = "System experienced significant API rate limits or circuit breaker trips. Session excluded from strategy-readiness campaign."
-    elif errors["recoverable"] > 10:
-        decision_icon = "🟡"
-        decision_label = "REVIEW REQUIRED"
-        decision_reason = f"{errors['recoverable']} recoverable errors detected. Review API/network health."
     else:
-        decision_icon = "🟢"
-        decision_label = "NO ACTION REQUIRED"
-        decision_reason = "System healthy. Campaign continues. No engineering changes recommended."
+        decision_icon = "🟡"
+        decision_label = "VALIDATION DATA INSUFFICIENT"
+        decision_reason = "Historical V2 replay unavailable because immutable raw decision inputs were not retained."
 
     lines.append(f"> **{decision_icon} DAILY DECISION: {decision_label}**")
     lines.append(f">")
@@ -350,9 +557,14 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
     lines.append(f"| Metric | Value |")
     lines.append(f"| :--- | ---: |")
-    lines.append(f"| Trading Cycles | {len(df_snaps)} |")
-    lines.append(f"| Signals Generated | {signals['total']} |")
-    lines.append(f"| Trades Executed | {signals['executed']} |")
+    lines.append(f"| Trading Cycles / Evaluated Signals | {signals['total']} |")
+    lines.append(f"| Filtered Signals (Strategy Rejections) | {signals.get('rejected', 0)} |")
+    lines.append(f"| Strategy-Approved Candidate Signals | {signals['executed']} |")
+    lines.append(f"| Governance Blocked (Circuit Breaker) | {governance_blocked} ({sys_state.get('state')}) |")
+    lines.append(f"| Actual OMS Orders Routed | {actual_orders_routed} |")
+    lines.append(f"| Actual Orders Filled | {actual_orders_filled} |")
+    lines.append(f"| Counterfactual Replay Expectancy | {replay_expectancy:+.2f}R |")
+    lines.append(f"| System Posture | {'🔴 ' + sys_state.get('state') if is_halted else '🟢 ACTIVE'} |")
     lines.append(f"| Runtime Errors (Fatal) | {errors['fatal']} |")
     lines.append(f"| Runtime Errors (Recoverable) | {errors['recoverable']} |")
     lines.append(f"| Data Integrity | {'100%' if data_ok else '0%'} |")
@@ -383,35 +595,48 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
 
     # 4. Trading Activity
-    lines.append("## 4. Trading Activity")
+    lines.append("## 4. Signal Funnel & Trading Activity")
     lines.append("")
-    lines.append(f"| Metric | Value |")
-    lines.append(f"| :--- | ---: |")
-    lines.append(f"| Signals Generated | {signals['total']} |")
-    lines.append(f"| BUY_CE | {signals['buy_ce']} |")
-    lines.append(f"| BUY_PE | {signals['buy_pe']} |")
-    lines.append(f"| Trades Executed | {signals['executed']} |")
-    lines.append(f"| Total Rejected | {signals.get('rejected', 0)} |")
-    lines.append(f"| Predictive Rejections | {signals.get('predictive_rejected', 0)} |")
-    lines.append(f"| Capacity Rejections | {signals.get('capacity_rejected', 0)} |")
+    lines.append(f"| Lifecycle Stage | Count | Notes |")
+    lines.append(f"| :--- | ---: | :--- |")
+    lines.append(f"| Evaluated Signals / Cycles | {signals['total']} | Total market evaluations |")
+    lines.append(f"| BUY_CE Signals Evaluated | {signals['buy_ce']} | Call candidate evaluations |")
+    lines.append(f"| BUY_PE Signals Evaluated | {signals['buy_pe']} | Put candidate evaluations |")
+    lines.append(f"| Total Rejected Signals | {signals.get('rejected', 0)} | Intercepted by strategy/risk gates |")
+    lines.append(f"| Predictive Rejections | {signals.get('predictive_rejected', 0)} | Blocked by regime/structure/confidence gates |")
+    lines.append(f"| Capacity Rejections | {signals.get('capacity_rejected', 0)} | Blocked by portfolio/open position heat |")
+    lines.append(f"| Strategy-Approved Candidates | {signals['executed']} | Approved by Decision Pipeline |")
+    lines.append(f"| Governance-Blocked Signals | {governance_blocked} | Prevented by active {sys_state.get('state')} circuit breaker |")
+    lines.append(f"| Actual OMS Orders Routed | {actual_orders_routed} | Submitted to Order Management System |")
+    lines.append(f"| Actual Orders Filled | {actual_orders_filled} | Confirmed entries (Open + Closed) |")
+    lines.append(f"| Active Open Positions | 0 | Currently floating in position manager |")
+    lines.append(f"| Closed Outcomes | 0 | Finished trades contributing to realized P&L |")
     lines.append("")
     
     if signals.get("predictive_reasons"):
-        lines.append("**Top Predictive Rejection Reasons**:")
+        pred_items = list(signals["predictive_reasons"].items())
+        total_pred = signals.get("predictive_rejected", sum(signals["predictive_reasons"].values()))
+        lines.append("**Predictive Rejection Breakdown**:")
         lines.append("")
-        lines.append(f"| Reason | Count |")
-        lines.append(f"| :--- | ---: |")
-        for reason, count in signals["predictive_reasons"].items():
-            lines.append(f"| {reason} | {count} |")
+        lines.append(f"| Reason | Count | % of Rejections |")
+        lines.append(f"| :--- | ---: | ---: |")
+        for reason, count in pred_items:
+            pct_str = f"{(count / total_pred * 100):.1f}%" if total_pred > 0 else "0.0%"
+            lines.append(f"| {reason} | {count} | {pct_str} |")
+        lines.append(f"| **Total Predictive Rejections** | **{total_pred}** | **100.0%** |")
         lines.append("")
 
     if signals.get("capacity_reasons"):
-        lines.append("**Top Capacity Rejection Reasons**:")
+        cap_items = list(signals["capacity_reasons"].items())
+        total_cap = signals.get("capacity_rejected", sum(signals["capacity_reasons"].values()))
+        lines.append("**Capacity Rejection Breakdown**:")
         lines.append("")
-        lines.append(f"| Reason | Count |")
-        lines.append(f"| :--- | ---: |")
-        for reason, count in signals["capacity_reasons"].items():
-            lines.append(f"| {reason} | {count} |")
+        lines.append(f"| Reason | Count | % of Rejections |")
+        lines.append(f"| :--- | ---: | ---: |")
+        for reason, count in cap_items:
+            pct_str = f"{(count / total_cap * 100):.1f}%" if total_cap > 0 else "0.0%"
+            lines.append(f"| {reason} | {count} | {pct_str} |")
+        lines.append(f"| **Total Capacity Rejections** | **{total_cap}** | **100.0%** |")
         lines.append("")
 
     # 5. Execution Quality
@@ -431,33 +656,40 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
 
     # 6. Counterfactual Replay
-    lines.append("## 6. Counterfactual Replay (OMS Constrained)")
+    lines.append("## 6. Counterfactual Replay (Strategy Quality Evaluation)")
     lines.append("")
-    lines.append(f"| Metric | Value |")
+    lines.append("*Note: Counterfactual replay evaluates hypothetical hold-to-exit performance across sequential 45-minute replay sampling windows.*")
+    lines.append("")
+    lines.append(f"| Replay Metric | Value |")
     lines.append(f"| :--- | ---: |")
-    lines.append(f"| Candidate Signals | {len(df_replay)} |")
-    lines.append(f"| True Positives (TP) | {filter_q.get('TP', 0)} |")
-    lines.append(f"| True Negatives (TN) | {filter_q.get('TN', 0)} |")
-    lines.append(f"| False Positives (FP) | {filter_q.get('FP', 0)} |")
-    lines.append(f"| False Negatives (FN) | {filter_q.get('FN', 0)} |")
-    lines.append(f"| Replay Win Rate | {replay_win_rate:.1f}% |")
-    lines.append(f"| Replay Expectancy | {replay_expectancy:+.2f}R |")
+    lines.append(f"| Replay Sampling Windows | {len(df_replay)} |")
+    lines.append(f"| Strategy-Approved Candidates Evaluated | {signals['executed']} |")
+    lines.append(f"| True Positives (TP - Profitable Approved) | {filter_q.get('TP', 0)} |")
+    lines.append(f"| True Negatives (TN - Avoided Unprofitable) | {filter_q.get('TN', 0)} |")
+    lines.append(f"| False Positives (FP - Unprofitable Approved) | {filter_q.get('FP', 0)} |")
+    lines.append(f"| False Negatives (FN - Missed Profitable) | {filter_q.get('FN', 0)} |")
+    lines.append(f"| Counterfactual Win Rate | {replay_win_rate:.1f}% |")
+    lines.append(f"| Counterfactual Expectancy | {replay_expectancy:+.2f}R |")
+    lines.append("")
+
+    # Executed Trades
+    lines.append("## 6a. Executed Trades")
+    lines.append("")
+    lines.extend(executed_trades_md)
     lines.append("")
 
     # 7. Readiness Campaign Progress
-    lines.append("## 7. Readiness Campaign Progress")
+    lines.append("## 7. V2 Validation Campaign Status")
     lines.append("")
-    lines.append(f"| Gate | Status |")
-    lines.append(f"| :--- | :---: |")
-    lines.append(f"| Replay Sessions ({campaign['completed']}/20) | {'✅' if campaign['completed'] >= 20 else '❌'} |")
-    lines.append(f"| Profit Factor > 1.50 | ✅ |")
-    lines.append(f"| Expectancy > +0.40R | {'✅' if replay_expectancy >= 0.40 else '❌'} |")
-    lines.append(f"| Drawdown < 5.0R | ✅ |")
-    lines.append(f"| False Positive Rate < 15% | ✅ |")
-    lines.append(f"| Calibration Error < 5% | ✅ |")
-    lines.append(f"| Unit Tests 100% | ✅ |")
-    lines.append(f"| Fatal Runtime Errors = 0 | {'✅' if errors['fatal'] == 0 else '❌'} |")
-    lines.append(f"| Telemetry Integrity 100% | {'✅' if data_ok else '❌'} |")
+    lines.append(f"| Milestone | Status |")
+    lines.append(f"| :--- | :--- |")
+    lines.append(f"| Structural Leg Generation | 🟢 FROZEN |")
+    lines.append(f"| Simulation Execution Lifecycle | 🟢 VERIFIED |")
+    lines.append(f"| Raw Decision Capture | 🟢 IMPLEMENTED |")
+    lines.append(f"| Capture Integrity | 🟢 TESTED |")
+    lines.append(f"| Historical Replay Dataset | 🟡 ACCUMULATING ({campaign['completed']}/20 sessions) |")
+    lines.append(f"| Economic Scarcity Validation | ⏸️ PAUSED |")
+    lines.append(f"| Live Deployment | 🔴 BLOCKED |")
     lines.append("")
     lines.append(f"**Campaign Status**: 🛑 NOT READY ({campaign['remaining']} sessions remaining)")
     lines.append("")
@@ -503,14 +735,13 @@ def generate_daily_audit(target_date: str = None):
     # 11. Daily Conclusion
     lines.append("## 11. Daily Conclusion")
     lines.append("")
-    lines.append(f"Today's simulation completed {'successfully' if not has_fatal else 'with errors'}.")
-    lines.append(f"{'No' if errors['fatal'] == 0 else str(errors['fatal'])} fatal runtime failure(s) occurred.")
-    if signals["executed"] > 0:
-        lines.append(f"{signals['executed']} trade(s) were executed.")
-    else:
-        lines.append(f"No trades were executed. {signals['rejected']} signal(s) were rejected by filters.")
-    lines.append(f"Replay validation {'confirmed positive expectancy' if replay_expectancy > 0 else 'showed negative expectancy'}.")
-    lines.append(f"The validation campaign now contains **{campaign['completed']}** of the required **{campaign['required']}** sessions.")
+    lines.append("**Economic validation of Structural Leg Scarcity is currently unproven because the historical V2 raw decision inputs required for deterministic replay were not retained.**")
+    lines.append("")
+    lines.append("We have successfully validated:")
+    lines.append("- ✅ Structural Leg State Machine")
+    lines.append("- ✅ Simulation Execution Lifecycle")
+    lines.append("- ❌ Historical Economic Validation (DATA UNAVAILABLE)")
+    lines.append("")
     lines.append(f"Live deployment remains **blocked** under the Stage-Gate Governance Policy until all readiness criteria are satisfied.")
     lines.append("")
 

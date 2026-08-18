@@ -553,7 +553,7 @@ def cmd_simulate(args) -> None:
     """
     conn = _get_conn(args.db)
     row = conn.execute(
-        "SELECT * FROM decision_snapshots WHERE snapshot_id = ?", (args.snapshot_id,)
+        "SELECT * FROM decision_snapshots_v2 WHERE snapshot_id = ?", (args.snapshot_id,)
     ).fetchone()
     conn.close()
 

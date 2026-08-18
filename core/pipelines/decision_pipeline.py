@@ -31,6 +31,7 @@ from core.opportunity_ranker import OpportunityRanker
 from core.trend_structure_tracker import TrendStructureTracker
 from options_analyzer import OptionsAnalyzer
 from utils.logger import get_logger
+from core.raw_capture import RawDecisionLogger
 
 logger = get_logger("decision_pipeline")
 
@@ -77,6 +78,8 @@ class DecisionPipeline:
         
         self.trade_sequence = 0
         self.no_trade_streak = 0
+        
+        self.raw_logger = RawDecisionLogger()
 
         
     def _fetch_options_sentiment(self, price_trend: str) -> Dict[str, Any]:
@@ -270,6 +273,29 @@ class DecisionPipeline:
         Runs the decision flow.
         Returns a structured DecisionPipelineResult containing all gate decisions.
         """
+        import pytz
+        from datetime import datetime
+        
+        # Ensure IST timezone for session boundary
+        ist = pytz.timezone("Asia/Kolkata")
+        
+        if hasattr(snapshot, "timestamp") and snapshot.timestamp:
+            try:
+                # Convert snapshot timestamp to IST
+                if getattr(snapshot.timestamp, "tzinfo", None) is None:
+                    dt_ist = pytz.utc.localize(snapshot.timestamp).astimezone(ist)
+                else:
+                    dt_ist = snapshot.timestamp.astimezone(ist)
+                current_date = dt_ist.date()
+            except Exception:
+                current_date = datetime.now(ist).date()
+        else:
+            current_date = datetime.now(ist).date()
+            
+        if not hasattr(self, "_current_date") or self._current_date != current_date:
+            self.trend_tracker.reset_session()
+            self._current_date = current_date
+            
         t_decision = time.perf_counter()
         gate_results = []
         
@@ -482,6 +508,8 @@ class DecisionPipeline:
             _structure_info["structure"] = _structure_info["structure"].get("type", "OK")
         else:
             _structure_info["structure"] = _structure_info.get("structure", "OK")
+        
+        signal.metadata["structural_state"] = _structure_info
             
         _learning_info = {
             "confidence": outputs["learning"].confidence if "learning" in outputs else 50,
@@ -493,6 +521,45 @@ class DecisionPipeline:
         _est_brokerage = 40
         _total_costs = _est_brokerage + (_est_slippage * max(getattr(signal, 'position_size', 50), 50))
         _cost_info = {"total_costs": _total_costs, "break_even_points": _est_slippage + 1.0}
+        
+        # --- RAW DECISION CAPTURE LAYER ---
+        try:
+            raw_record = {
+                "schema_version": 1,
+                "correlation_id": signal.id,
+                "signal_id": signal.id,
+                "timestamp": snapshot.timestamp.isoformat() if hasattr(snapshot.timestamp, 'isoformat') else str(snapshot.timestamp),
+                "market_context": {
+                    "spot": getattr(snapshot, "spot", 0.0),
+                    "atr": getattr(snapshot, "atr", 0.0),
+                    "vwap": getattr(snapshot, "vwap", 0.0),
+                    "regime": signal.regime.value if hasattr(signal.regime, "value") else str(signal.regime),
+                    "vix": getattr(snapshot, "vix", 0.0)
+                },
+                "agent_payloads": {name: getattr(a, 'last_output', None).__dict__ if hasattr(getattr(a, 'last_output', None), '__dict__') else str(getattr(a, 'last_output', None)) for name, a in self.decision_engine.agents.items()},
+                "option_context": {}, # Future options analyzer integration
+                "derived_pre_gate": {
+                    "confidence": signal.confidence,
+                    "grade": "N/A", # Computed by filter but we capture input state
+                    "pev": "N/A", 
+                    "ev": getattr(signal, "ev_info", {}).get("ev_r", "N/A"),
+                    "agreement": getattr(signal.confluence, "confluence_ratio", 0.0) if getattr(signal, "confluence", None) else 0.0
+                },
+                "structural_state": _structure_info,
+                "provenance": {
+                    "engine_version": "v5.0.2-REF",
+                    "git_commit": getattr(self.ctx, "git_commit", "unknown"),
+                    "config_hash": "N/A",
+                    "captured_at": datetime.now().isoformat(),
+                    "source": "decision_pipeline"
+                }
+            }
+            self.raw_logger.capture(raw_record)
+        except Exception as e:
+            logger.error(f"Failed to capture raw record: {e}")
+            # Ensure failure never alters trading decisions
+            pass
+        # ----------------------------------
         
         filter_result = self.trade_filter.evaluate(
             signal=signal, snapshot=snapshot, agent_outputs=outputs,
@@ -650,7 +717,18 @@ class DecisionPipeline:
 
         # Record trade entry in TrendStructureTracker (v2.1)
         sig_dir_str = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
-        self.trend_tracker.record_trade_execution(sig_dir_str, snapshot.price)
+        
+        pending_reset_event = None
+        if filter_result.telemetry and "Structure Reset" in filter_result.telemetry:
+            pending_reset_event = filter_result.telemetry["Structure Reset"].get("pending_reset_event")
+            
+        exec_ts = snapshot.timestamp.timestamp() if hasattr(snapshot.timestamp, 'timestamp') else time.time()
+        self.trend_tracker.record_trade_execution(
+            sig_dir_str, 
+            snapshot.price, 
+            timestamp=exec_ts, 
+            reset_event=pending_reset_event
+        )
         
         timeline["OMS Intent Generated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self._record_v2_snapshot(signal, snapshot, outputs, filter_result, "EXECUTE", "Passed all gates", timeline)

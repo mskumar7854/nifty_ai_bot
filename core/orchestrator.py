@@ -5,6 +5,7 @@ import traceback
 
 from models import SignalType
 from typing import Optional
+from datetime import datetime
 
 from core.context import RuntimeContext
 from models.events import SessionChanged, MarketSnapshotCreated, EndOfDayTriggered
@@ -135,14 +136,13 @@ class TradingOrchestrator:
             actions_to_execute = []
             if self.position_pipeline and pos_manager:
                 # For each open position, run position pipeline evaluate
-                open_positions = pos_manager.open_positions if not self.ctx.is_simulation else getattr(self.ctx.simulation, "open_trades", {})
-                for pid, pos in open_positions.items():
+                for pid, pos in pos_manager.open_positions.items():
                     actions = self.position_pipeline.evaluate(pos, snapshot, df)
                     actions_to_execute.extend(actions)
 
             # 3. Execution Pipeline (Apply Exit Actions)
             if actions_to_execute and self.execution_pipeline:
-                await self.execution_pipeline.apply_position_actions(actions_to_execute)
+                await self.execution_pipeline.apply_position_actions(actions_to_execute, snapshot=snapshot)
 
             # 3b. Simulation Exit Monitoring
             if self.ctx.is_simulation and self.ctx.simulation:
@@ -260,11 +260,65 @@ class TradingOrchestrator:
                             pos.to_dict() for pos in pos_manager.open_positions.values() if pos.is_active
                         ]
 
+                    # Fetch execution metrics
+                    exec_stats = {"orders_routed": 0, "orders_filled": 0, "failed": 0, "cancelled": 0}
+                    if getattr(self.ctx.system, "oms", None):
+                        exec_stats = self.ctx.system.oms.get_execution_stats_today()
+                        
+                    open_pos_count = len(positions)
+                    closed_pos_count = len(pos_manager.closed_positions_today) if pos_manager else 0
+                    
+                    recon_status = "CONSISTENT"
+                    recon_mismatches = []
+                    
+                    if exec_stats["orders_filled"] != (open_pos_count + closed_pos_count):
+                        recon_status = "MISMATCH"
+                        recon_mismatches.append(f"Filled orders ({exec_stats['orders_filled']}) != Open ({open_pos_count}) + Closed ({closed_pos_count})")
+                    
+                    live_ts = datetime.now().isoformat()
+                    snap_ts = getattr(snapshot, "timestamp", None)
+                    if hasattr(snap_ts, "timestamp"):
+                        snap_ts_float = snap_ts.timestamp()
+                    elif isinstance(snap_ts, (int, float)):
+                        snap_ts_float = snap_ts
+                    else:
+                        snap_ts_float = time.time()
+                    age_ms = int((time.time() - snap_ts_float) * 1000) if snapshot else 0
+
                     status_data = {
                         "orchestrator": {
                             "session_state": dash_fields.get("session_state", "---"),
                             "runtime_posture": f"SUSPENDED ({infra_state.reason})" if (infra_state and infra_state.suspended) else dash_fields.get("runtime_posture", "---"),
                             "data_health": dash_fields.get("data_health", "---"),
+                        },
+                        "session": {
+                            "session_date": datetime.now().date().isoformat(),
+                            "market_state": dash_fields.get("session_state", "---"),
+                            "engine_mode": getattr(self.ctx.system, "campaign_id", "SHADOW-V2"),
+                            "execution_mode": "SIMULATION" if getattr(self.ctx, "is_simulation", True) else "LIVE",
+                            "broker_orders_enabled": getattr(self.ctx.system, "trading_enabled", True)
+                        },
+                        "market": {
+                            "live_nifty": snapshot.price if snapshot else 0,
+                            "live_timestamp": live_ts,
+                            "data_age_ms": age_ms,
+                            "oi_health": oi_health,
+                            "atr": getattr(snapshot, "atr", 0) if snapshot else 0,
+                            "india_vix": getattr(snapshot, "india_vix", 0) if snapshot else 0,
+                            "vwap": getattr(snapshot, "vwap", 0) if snapshot else 0,
+                            "pcr": getattr(snapshot, "pcr", 0) if snapshot else 0
+                        },
+                        "execution": {
+                            "orders_routed": exec_stats.get("orders_routed", 0),
+                            "orders_filled": exec_stats.get("orders_filled", 0),
+                            "open_positions": open_pos_count,
+                            "closed_outcomes": closed_pos_count,
+                            "failed": exec_stats.get("failed", 0),
+                            "cancelled": exec_stats.get("cancelled", 0)
+                        },
+                        "reconciliation": {
+                            "status": recon_status,
+                            "mismatches": recon_mismatches
                         },
                         "latency_ms": latency_ms,
                         "latency_status": "CRITICAL" if latency_ms > 2000 else ("WARNING" if latency_ms > 500 else "OK"),

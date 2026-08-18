@@ -1,6 +1,6 @@
-"""
+﻿"""
 ============================================
-🧪 CHAOS MONKEY BRIDGE TEST - TEST 02
+ðŸ§ª CHAOS MONKEY BRIDGE TEST - TEST 02
 Simulates the Expiry Path: Signal -> Wait -> Expire
 ============================================
 """
@@ -9,7 +9,7 @@ import asyncio
 import uuid
 import time
 from datetime import datetime
-from models.signals import Signal, SignalType, Direction, Strength
+from models.signal import Signal, SignalType, Direction, Strength
 from core.db_manager import DBManager
 from core.telegram_controller import TelegramController
 from config.settings import Settings
@@ -56,7 +56,7 @@ async def run_test():
             self.master = MockMaster()
 
         async def execute_signal(self, signal, mode="new"):
-            print(f"🔥 Unified EXECUTION: {signal.id} mode={mode}")
+            print(f"ðŸ”¥ Unified EXECUTION: {signal.id} mode={mode}")
 
     mock_engine = MockEngine()
     mock_dm = MockDM()
@@ -88,10 +88,10 @@ async def run_test():
     )
     signal.symbol = "NIFTY"
     
-    print(f"📡 STEP 1: Processing new signal {sig_id} (Expiry set to 2s)...")
+    print(f"ðŸ“¡ STEP 1: Processing new signal {sig_id} (Expiry set to 2s)...")
     await bot.process_signal(signal)
     
-    print("⏳ STEP 2: Waiting for expiry task to fire...")
+    print("â³ STEP 2: Waiting for expiry task to fire...")
     # The controller starts a background task: bot.expiry_task
     # We wait long enough for it to finish
     await asyncio.sleep(4) 
@@ -100,7 +100,7 @@ async def run_test():
     import sqlite3
     conn = sqlite3.connect(db.db_path)
     res = conn.execute("SELECT status FROM signals WHERE id=?", (sig_id,)).fetchone()
-    print(f"\n🏁 FINAL DB Status: {res[0]}")
+    print(f"\nðŸ FINAL DB Status: {res[0]}")
     conn.close()
 
 if __name__ == "__main__":

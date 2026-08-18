@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import sqlite3
 from core.db_manager import DBManager
 
