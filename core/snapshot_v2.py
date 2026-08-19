@@ -65,3 +65,24 @@ def persist_snapshot_v2(snap: DecisionSnapshotV2, db_path: Optional[str] = None)
     except Exception as e:
         logger.error(f"[SNAPSHOT_V2] Failed to persist {snap.metadata.snapshot_id}: {e}")
         return False
+
+def reject_snapshot_execution(snapshot_id: str, reason: str, db_path: Optional[str] = None) -> bool:
+    """Updates an existing snapshot to reflect an execution-stage rejection."""
+    if not snapshot_id:
+        return False
+    db_path = db_path or _DB_PATH
+    try:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            cur = conn.execute("SELECT decision_json FROM decision_snapshots_v2 WHERE snapshot_id = ?", (snapshot_id,))
+            row = cur.fetchone()
+            if row:
+                dj = json.loads(row[0] or "{}")
+                dj["action"] = "REJECTED"
+                dj["reason"] = f"Execution Blocked: {reason}"
+                conn.execute("UPDATE decision_snapshots_v2 SET decision_json = ? WHERE snapshot_id = ?", (json.dumps(dj), snapshot_id))
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"[SNAPSHOT_V2] Failed to reject snapshot {snapshot_id}: {e}")
+        return False

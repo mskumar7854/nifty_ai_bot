@@ -181,6 +181,13 @@ def main():
 
         from core.db_manager import DBManager
         db_mgr = DBManager()
+        asyncio.run(db_mgr.initialize())
+        
+        # Also migrate the secondary database if it exists so dashboard queries don't fail
+        other_path = "data/trading_v4_live.db" if db_mgr.db_path == "data/trading_v4_sim.db" else "data/trading_v4_sim.db"
+        if os.path.exists(other_path):
+            other_mgr = DBManager(db_path=other_path)
+            asyncio.run(other_mgr.initialize())
 
         # Bridge legacy references and managers onto context
         ctx.system = LegacySystem(settings, db_mgr, event_manager=event_manager)

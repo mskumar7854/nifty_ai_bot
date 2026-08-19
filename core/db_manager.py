@@ -270,9 +270,6 @@ class DBManager:
                 experiment_id TEXT,
                 replay_run_id TEXT,
                 market_json TEXT,
-                pipeline_version TEXT,
-                strategy_version TEXT,
-                git_commit TEXT,
                 snapshot_hash TEXT NOT NULL,
                 
                 agents_json TEXT,

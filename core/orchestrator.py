@@ -220,10 +220,18 @@ class TradingOrchestrator:
                 if not is_suspended:
                     if result.approved and self.execution_pipeline:
                         self.ctx.system._last_decision_ts = time.time()
-                        await self.execution_pipeline.execute(result.signal, snapshot, self.ctx.is_simulation, mode="new")
+                        exec_result = await self.execution_pipeline.execute(result.signal, snapshot, self.ctx.is_simulation, mode="new")
                         
+                        if exec_result.status == "failed":
+                            try:
+                                from core.snapshot_v2 import reject_snapshot_execution
+                                err_msg = exec_result.errors[0] if getattr(exec_result, "errors", None) else "Execution setup failed"
+                                reject_snapshot_execution(getattr(result.signal, "id", ""), err_msg)
+                            except Exception as e:
+                                logger.error(f"Failed to reject snapshot execution: {e}")
+                                
                         # Dispatched asynchronously outside critical execution path
-                        if self.telemetry and hasattr(self.telemetry, "dispatch_signal"):
+                        if exec_result.status != "failed" and self.telemetry and hasattr(self.telemetry, "dispatch_signal"):
                             asyncio.create_task(self.telemetry.dispatch_signal(result.signal))
 
             # 6. Telemetry Pipeline — push full status to dashboard
