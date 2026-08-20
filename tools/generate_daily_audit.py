@@ -706,7 +706,9 @@ def generate_daily_audit(target_date: str = None):
         lines.append(f"> {errors['recoverable']} recoverable error(s) logged (API retries, cache misses).")
         lines.append("")
     else:
-        lines.append("No issues detected.")
+        lines.append("**Issues:** None operational")
+        lines.append("**Validation limitation:** Historical V2 replay data unavailable")
+        lines.append("**Risk:** Economic scarcity validation incomplete")
         lines.append("")
 
     # 9. Validation Manifest Snapshot
