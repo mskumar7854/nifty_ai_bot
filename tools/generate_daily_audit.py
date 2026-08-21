@@ -87,6 +87,8 @@ def _count_log_errors(target_date: str) -> dict:
     """Parse nifty_ai.log for fatal/recoverable error counts on target_date."""
     fatal = 0
     recoverable = 0
+    rate_limits = 0
+    circuit_breakers = 0
     infra_degraded = False
     log_path = LOG_DIR / "nifty_ai.log"
     if log_path.exists():
@@ -100,10 +102,21 @@ def _count_log_errors(target_date: str) -> dict:
                 elif "ERROR" in upper or "EXCEPTION" in upper:
                     recoverable += 1
                     
-                if "RATE_LIMIT" in upper or " 805" in upper or "CIRCUIT OPEN" in upper or "CIRCUIT TRIPPED" in upper:
+                if "RATE_LIMIT" in upper or " 805" in upper:
+                    rate_limits += 1
+                    infra_degraded = True
+                
+                if "CIRCUIT OPEN" in upper or "CIRCUIT TRIPPED" in upper:
+                    circuit_breakers += 1
                     infra_degraded = True
                     
-    return {"fatal": fatal, "recoverable": recoverable, "infrastructure_degraded": infra_degraded}
+    return {
+        "fatal": fatal, 
+        "recoverable": recoverable, 
+        "rate_limits": rate_limits,
+        "circuit_breakers": circuit_breakers,
+        "infrastructure_degraded": infra_degraded
+    }
 
 
 def _get_market_summary(target_date: str) -> dict:
@@ -255,18 +268,56 @@ def _get_execution_quality(df_snaps: pd.DataFrame) -> dict:
     }
 
 
-def _get_campaign_progress() -> dict:
+def _get_campaign_progress(target_date: str, current_overall_status: str) -> dict:
     if not DB_PATH.exists():
-        return {"completed": 0, "required": 20, "remaining": 20}
+        return {"valid": 0, "excluded": 0, "invalid": 0, "observed": 0, "required": 20, "remaining": 20}
     conn = sqlite3.connect(str(DB_PATH))
     try:
         df = pd.read_sql_query("SELECT DISTINCT substr(timestamp, 1, 10) as d FROM decision_snapshots_v2", conn)
-        completed = len(df)
+        db_dates = set(df['d'].tolist())
     except Exception:
-        completed = 0
+        db_dates = set()
     finally:
         conn.close()
-    return {"completed": completed, "required": 20, "remaining": max(0, 20 - completed)}
+
+    db_dates.add(target_date)
+    
+    valid_count = 0
+    excluded_count = 0
+    invalid_count = 0
+    
+    for d in sorted(db_dates):
+        if d == target_date:
+            status = current_overall_status
+        else:
+            sc_path = REPORT_DIR / f"{d}_scorecard.json"
+            if sc_path.exists():
+                try:
+                    with open(sc_path, "r", encoding="utf-8") as f:
+                        sc = json.load(f)
+                    status = sc.get("overall_status", "")
+                except Exception:
+                    status = "UNKNOWN"
+            else:
+                status = ""
+                
+        if "INVALID" in status:
+            invalid_count += 1
+        elif "EXCLUDED" in status:
+            excluded_count += 1
+        else:
+            valid_count += 1
+            
+    observed = valid_count + excluded_count + invalid_count
+    
+    return {
+        "valid": valid_count,
+        "excluded": excluded_count,
+        "invalid": invalid_count,
+        "observed": observed,
+        "required": 20,
+        "remaining": max(0, 20 - valid_count)
+    }
 
 
 def _generate_executed_trades_section(target_date: str) -> list:
@@ -476,7 +527,6 @@ def generate_daily_audit(target_date: str = None):
     sys_state = _load_system_state()
     errors = _count_log_errors(target_date)
     eq = _get_execution_quality(df_snaps)
-    campaign = _get_campaign_progress()
     git_hash = get_git_commit_hash()
     executed_trades_md = _generate_executed_trades_section(target_date)
 
@@ -499,15 +549,20 @@ def generate_daily_audit(target_date: str = None):
     actual_orders_filled = 0 if is_halted else oms["orders_filled"]
     
     if has_fatal:
-        overall_status = "❌ RUNTIME_FAILURE"
+        overall_status = "❌ RUNTIME_FAILURE (INVALID)"
     elif not data_ok:
-        overall_status = "⚠️ NO DATA"
+        overall_status = "⚠️ NO DATA (INVALID)"
+    elif infra_degraded and is_halted:
+        overall_status = "🟡 DEGRADED + HALTED + EXCLUDED"
     elif infra_degraded:
-        overall_status = "🟡 INFRASTRUCTURE_DEGRADED"
+        overall_status = "🟡 DEGRADED (EXCLUDED)"
     elif is_halted:
         overall_status = f"🟡 HALTED ({sys_state.get('state')})"
     else:
         overall_status = "🟡 VALIDATION DATA INSUFFICIENT"
+
+    # Now calculate campaign progress
+    campaign = _get_campaign_progress(target_date, overall_status)
 
     # Campaign trend from prior sessions
     trend = _load_campaign_trend(target_date)
@@ -524,9 +579,13 @@ def generate_daily_audit(target_date: str = None):
         decision_icon = "🟡"
         decision_label = "REVIEW REQUIRED"
         decision_reason = "No trading data recorded. Check bot connectivity and data feed."
+    elif infra_degraded and is_halted:
+        decision_icon = "🟡"
+        decision_label = "OBSERVED — EXCLUDED FROM ECONOMIC VALIDATION"
+        decision_reason = "System experienced significant API rate limits or circuit breaker trips and ended in HALTED state. Session excluded from strategy-readiness campaign."
     elif infra_degraded:
         decision_icon = "🟡"
-        decision_label = "INFRASTRUCTURE DEGRADED"
+        decision_label = "OBSERVED — EXCLUDED FROM ECONOMIC VALIDATION"
         decision_reason = "System experienced significant API rate limits or circuit breaker trips. Session excluded from strategy-readiness campaign."
     else:
         decision_icon = "🟡"
@@ -568,7 +627,7 @@ def generate_daily_audit(target_date: str = None):
     lines.append(f"| Runtime Errors (Fatal) | {errors['fatal']} |")
     lines.append(f"| Runtime Errors (Recoverable) | {errors['recoverable']} |")
     lines.append(f"| Data Integrity | {'100%' if data_ok else '0%'} |")
-    lines.append(f"| Campaign Progress | {campaign['completed']} / {campaign['required']} sessions |")
+    lines.append(f"| Campaign Progress | {campaign['valid']} / {campaign['required']} valid ({campaign['observed']} observed, {campaign['excluded']} excluded) |")
     lines.append("")
 
     # 2. Market Summary
@@ -587,11 +646,14 @@ def generate_daily_audit(target_date: str = None):
     # 3. System Health
     lines.append("## 3. System Health")
     lines.append("")
-    lines.append(f"| Metric | Value |")
+    lines.append(f"| Operational metric | Today |")
     lines.append(f"| :--- | ---: |")
-    lines.append(f"| Fatal Errors | {errors['fatal']} |")
-    lines.append(f"| Recoverable Errors | {errors['recoverable']} |")
-    lines.append(f"| Data Completeness | {'100%' if data_ok else '0%'} |")
+    lines.append(f"| API rate-limit events | {errors['rate_limits']} |")
+    lines.append(f"| Circuit-breaker trips | {errors['circuit_breakers']} |")
+    lines.append(f"| Session degradation | {'YES' if infra_degraded else 'NO'} |")
+    lines.append(f"| Fatal application errors | {errors['fatal']} |")
+    lines.append(f"| Recoverable application errors | {errors['recoverable']} |")
+    lines.append(f"| Data integrity | {'100%' if data_ok else '0%'} |")
     lines.append("")
 
     # 4. Trading Activity
@@ -599,18 +661,17 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
     lines.append(f"| Lifecycle Stage | Count | Notes |")
     lines.append(f"| :--- | ---: | :--- |")
-    lines.append(f"| Evaluated Signals / Cycles | {signals['total']} | Total market evaluations |")
-    lines.append(f"| BUY_CE Signals Evaluated | {signals['buy_ce']} | Call candidate evaluations |")
-    lines.append(f"| BUY_PE Signals Evaluated | {signals['buy_pe']} | Put candidate evaluations |")
-    lines.append(f"| Total Rejected Signals | {signals.get('rejected', 0)} | Intercepted by strategy/risk gates |")
-    lines.append(f"| Predictive Rejections | {signals.get('predictive_rejected', 0)} | Blocked by regime/structure/confidence gates |")
-    lines.append(f"| Capacity Rejections | {signals.get('capacity_rejected', 0)} | Blocked by portfolio/open position heat |")
-    lines.append(f"| Strategy-Approved Candidates | {signals['executed']} | Approved by Decision Pipeline |")
-    lines.append(f"| Governance-Blocked Signals | {governance_blocked} | Prevented by active {sys_state.get('state')} circuit breaker |")
-    lines.append(f"| Actual OMS Orders Routed | {actual_orders_routed} | Submitted to Order Management System |")
-    lines.append(f"| Actual Orders Filled | {actual_orders_filled} | Confirmed entries (Open + Closed) |")
-    lines.append(f"| Active Open Positions | 0 | Currently floating in position manager |")
-    lines.append(f"| Closed Outcomes | 0 | Finished trades contributing to realized P&L |")
+    lines.append(f"| 1. Evaluated Signals (Cycles) | {signals['total']} | Total market evaluations |")
+    lines.append(f"| ├── BUY_CE Candidates | {signals['buy_ce']} | Call candidate evaluations |")
+    lines.append(f"| └── BUY_PE Candidates | {signals['buy_pe']} | Put candidate evaluations |")
+    lines.append(f"| 2. Predictive Rejections | {signals.get('predictive_rejected', 0)} | Intercepted by strategy/risk gates |")
+    lines.append(f"| 3. Capacity Rejections | {signals.get('capacity_rejected', 0)} | Blocked by portfolio/open position heat |")
+    lines.append(f"| 4. Strategy-Approved (Governance Eligible) | {signals['executed']} | Approved by predictive gates |")
+    lines.append(f"| 5. Governance-Blocked Signals | {governance_blocked} | Prevented by active {sys_state.get('state')} circuit breaker |")
+    lines.append(f"| 6. Actual OMS Orders Routed | {actual_orders_routed} | Submitted to Order Management System |")
+    lines.append(f"| 7. Actual Orders Filled | {actual_orders_filled} | Confirmed entries (Open + Closed) |")
+    lines.append(f"| ├── Active Open Positions | 0 | Currently floating in position manager |")
+    lines.append(f"| └── Closed Outcomes | 0 | Finished trades contributing to realized P&L |")
     lines.append("")
     
     if signals.get("predictive_reasons"):
@@ -687,7 +748,7 @@ def generate_daily_audit(target_date: str = None):
     lines.append(f"| Simulation Execution Lifecycle | 🟢 VERIFIED |")
     lines.append(f"| Raw Decision Capture | 🟢 IMPLEMENTED |")
     lines.append(f"| Capture Integrity | 🟢 TESTED |")
-    lines.append(f"| Historical Replay Dataset | 🟡 ACCUMULATING ({campaign['completed']}/20 sessions) |")
+    lines.append(f"| Historical Replay Dataset | 🟡 ACCUMULATING ({campaign['valid']}/{campaign['required']} sessions) |")
     lines.append(f"| Economic Scarcity Validation | ⏸️ PAUSED |")
     lines.append(f"| Live Deployment | 🔴 BLOCKED |")
     lines.append("")
@@ -727,7 +788,7 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
     lines.append(f"| Metric | Value |")
     lines.append(f"| :--- | ---: |")
-    lines.append(f"| Replay Sessions | {campaign['completed']} / {campaign['required']} |")
+    lines.append(f"| Replay Sessions | {campaign['valid']} / {campaign['required']} |")
     is_session_healthy = not has_fatal and not infra_degraded
     lines.append(f"| Replay Expectancy (Today) | {replay_expectancy:+.2f}R |")
     lines.append(f"| Runtime Errors (Today) | {errors['fatal']} fatal, {errors['recoverable']} recoverable |")
@@ -777,7 +838,7 @@ def generate_daily_audit(target_date: str = None):
         lines.append("")
     lines.append(f"**No engineering changes scheduled.**  ")
     lines.append(f"**Code Freeze**: ACTIVE  ")
-    lines.append(f"**Campaign Progress**: {campaign['completed']} / {campaign['required']}")
+    lines.append(f"**Campaign Progress**: {campaign['valid']} / {campaign['required']}")
     lines.append("")
     lines.append("---")
     lines.append(f"*Report generated automatically at {datetime.now().isoformat()} by `tools/generate_daily_audit.py`*")
