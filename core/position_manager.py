@@ -948,25 +948,28 @@ class PositionManager:
 
             # ── P1: Idempotent Intent Locking ──
             intent_id = getattr(signal, "intent_id", None)
+            existing_order = None
             if intent_id:
                 existing_order = self.oms.get_order(intent_id)
-                if existing_order and existing_order.get("state") not in ("FAILED", "HALTED", "UNKNOWN"):
+                # ALLOW adoption of "PENDING" or "ENTRY_SUBMITTED" orders created by the execution pipeline
+                if existing_order and existing_order.get("state") not in ("PENDING", "ENTRY_SUBMITTED", "FAILED", "HALTED", "UNKNOWN"):
                     self.logger.warning(f"🚫 [IDEMPOTENCY GUARD] Duplicate execution attempt blocked for intent: {intent_id}")
                     return None
             else:
                 intent_id = str(uuid.uuid4())
                 signal.intent_id = intent_id
                 
-
-            self.oms.create_intent(
-                signal_id=getattr(signal, "id", "UNKNOWN"),
-                intent_id=intent_id,
-                symbol=signal.symbol,
-                side=signal.direction.value.upper(),
-                qty=size_params["qty"],
-                requested_price=fill_price,
-                stop_loss_price=size_params["sl_price"]
-            )
+            # Prevent sqlite UNIQUE constraint failures by only creating intent if it doesn't already exist
+            if not existing_order:
+                self.oms.create_intent(
+                    signal_id=getattr(signal, "id", "UNKNOWN"),
+                    intent_id=intent_id,
+                    symbol=signal.symbol,
+                    side=signal.direction.value.upper(),
+                    qty=size_params["qty"],
+                    requested_price=fill_price,
+                    stop_loss_price=size_params["sl_price"]
+                )
             
             # ── P4: Shadow Execution Telemetry (Fire & Forget) ──
             try:

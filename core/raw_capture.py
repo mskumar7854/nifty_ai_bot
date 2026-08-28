@@ -59,14 +59,21 @@ class RawDecisionLogger:
             self.sequence_counter += 1
             record["capture_sequence"] = self.sequence_counter
             
+            def json_default(obj):
+                if hasattr(obj, 'value'):
+                    return obj.value
+                if hasattr(obj, 'name'):
+                    return obj.name
+                return str(obj)
+            
             # Serialize for hashing
             # Remove record_hash if it exists just to be safe
             record.pop("record_hash", None)
-            canonical_json = json.dumps(record, sort_keys=True, separators=(',', ':'))
+            canonical_json = json.dumps(record, sort_keys=True, separators=(',', ':'), default=json_default)
             record_hash = hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
             record["record_hash"] = record_hash
             
-            final_json = json.dumps(record)
+            final_json = json.dumps(record, default=json_default)
             
             file_path = self._get_file_path(date_str)
             with open(file_path, "a", encoding="utf-8") as f:

@@ -303,22 +303,46 @@ class _SimulationGuardedClient:
         """Returns a wrapper that checks SYSTEM_MODE before calling the real method."""
         def _wrapper(*args, **kwargs):
             mode = os.getenv("SYSTEM_MODE", "SIMULATION").upper()
+            allow_live = os.getenv("ALLOW_LIVE_TRADES", "")
+            campaign = os.getenv("CAMPAIGN_ID", "").upper()
+            
+            is_allow_live_true = allow_live.lower() == "true"
+            is_shadow_campaign = "SHADOW" in campaign or "SIMULATION" in campaign
+            is_campaign_missing = campaign == ""
 
+            blocking_reasons = []
+            
             if mode == "SIMULATION":
-                # Log full call stack so you know exactly where the call came from
-                logger.critical("=" * 60)
-                logger.critical(
-                    "🚨 HARD BLOCK: Real order attempted in SIMULATION mode "
-                    "via %s()", method_name
+                blocking_reasons.append("SYSTEM_MODE=SIMULATION")
+            
+            if not is_allow_live_true:
+                blocking_reasons.append(f"ALLOW_LIVE_TRADES is not 'true' (got '{allow_live}')")
+            
+            if is_campaign_missing:
+                blocking_reasons.append("CAMPAIGN_ID is missing")
+            elif is_shadow_campaign:
+                blocking_reasons.append(f"CAMPAIGN_ID '{campaign}' identifies a SHADOW/SIMULATION campaign")
+
+            if blocking_reasons:
+                reasons_str = "\n- ".join(blocking_reasons)
+                error_msg = (
+                    "LIVE ORDER BLOCKED\n\n"
+                    "Blocking reason(s):\n"
+                    f"- {reasons_str}\n\n"
+                    "Execution state:\n"
+                    f"SYSTEM_MODE={os.getenv('SYSTEM_MODE', 'SIMULATION')}\n"
+                    f"ALLOW_LIVE_TRADES={allow_live}\n"
+                    f"CAMPAIGN_ID={os.getenv('CAMPAIGN_ID', '<missing>')}"
                 )
+                
+                logger.critical("=" * 60)
+                logger.critical(f"🚨 HARD BLOCK: Real order attempted via {method_name}()")
+                logger.critical(error_msg)
                 logger.critical("Call stack:\n%s", "".join(traceback.format_stack()))
                 logger.critical("=" * 60)
-                raise SimulationModeError(
-                    f"HARD BLOCK: {method_name}() called in SIMULATION mode. "
-                    f"Call stack logged. Check logs immediately."
-                )
+                raise SimulationModeError(error_msg)
 
-            # LIVE / SMALL_CAPITAL — allow the real call
+            # LIVE / SMALL_CAPITAL + allow_live=True + non-shadow campaign — allow the real call
             return getattr(self._real_client, method_name)(*args, **kwargs)
 
         return _wrapper
@@ -407,6 +431,24 @@ def get_dhan_client() -> dhanhq:
         # Increased read timeout to 5.0s to ensure option chain/large data fetches succeed under load
         real_client.timeout = (0.5, 5.0)
         logger.info(f"Dhan API client initialized ✓ (token valid ~{hours_left}h)")
+
+        mode = os.getenv("SYSTEM_MODE", "SIMULATION").upper()
+        allow_live = os.getenv("ALLOW_LIVE_TRADES", "")
+        campaign = os.getenv("CAMPAIGN_ID", "").upper()
+        is_allow_live_true = allow_live.lower() == "true"
+        is_shadow_campaign = "SHADOW" in campaign or "SIMULATION" in campaign
+        is_campaign_missing = campaign == ""
+
+        will_allow_live = mode != "SIMULATION" and is_allow_live_true and not is_shadow_campaign and not is_campaign_missing
+
+        logger.info(
+            "🛡️ Broker Adapter Security Init: SYSTEM_MODE=%s, ALLOW_LIVE_TRADES=%s, CAMPAIGN_ID=%s", 
+            mode, allow_live, os.getenv("CAMPAIGN_ID", "<missing>")
+        )
+        if will_allow_live:
+            logger.warning("🛡️ EXECUTION STATE: LIVE (DANGER) - Real orders will be sent to the broker!")
+        else:
+            logger.info("🛡️ EXECUTION STATE: SAFE - Broker adapter is locked in simulation mode.")
 
         # ── P0-A: Wrap with simulation guard ──
         _client = _SimulationGuardedClient(real_client)

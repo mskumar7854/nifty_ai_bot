@@ -1,0 +1,67 @@
+{
+  "date": "2026-08-28",
+  "signals": {
+    "total": 44,
+    "buy_ce": 19,
+    "buy_pe": 25,
+    "executed": 0,
+    "rejected": 44,
+    "capacity_rejected": 0,
+    "predictive_rejected": 44,
+    "predictive_reasons": {
+      "PEV_TOO_LOW": 12,
+      "BAD_STRUCTURE_EXPANDING": 10,
+      "CHOP_ZONE_ACTIVE": 6,
+      "Execution Blocked: Strike Policy Blocked: Unknown market regime; fail closed": 5,
+      "REJECTED_REGIME_GRADE_B+_IN_SQUEEZE": 4,
+      "REJECTED_SAME_STRUCTURAL_TREND": 2,
+      "LOW_CONFIDENCE": 1,
+      "REJECTED_LOW_EV_+0.36R": 1,
+      "REJECTED_LOW_EV_+0.20R": 1,
+      "REJECTED_LOW_EV_+0.27R": 1,
+      "Weekend Buffer: no new trades after 15:10:00 on Friday": 1
+    },
+    "capacity_reasons": {}
+  },
+  "market": {
+    "open": 0,
+    "high": 0,
+    "low": 0,
+    "close": 0,
+    "gap_pct": 0,
+    "status": "INCOMPLETE_SESSION_DATA"
+  },
+  "errors": {
+    "fatal": 0,
+    "recoverable": 0,
+    "rate_limits": 0,
+    "circuit_breakers": 0,
+    "infrastructure_degraded": false
+  },
+  "execution_quality": {
+    "participation_pct": 41.3,
+    "abstention_pct": 58.7,
+    "avg_confidence": 47.2,
+    "avg_ev": 0.26
+  },
+  "filter_quality": {
+    "TP": 0.0,
+    "TN": 28.0,
+    "FP": 0.0,
+    "FN": 16.0,
+    "Precision": 0.0,
+    "Recall": 0.0,
+    "Specificity": 1.0,
+    "F1_Score": 0.0,
+    "MCC": 0.0
+  },
+  "campaign": {
+    "valid": 7,
+    "excluded": 1,
+    "invalid": 0,
+    "observed": 8,
+    "required": 20,
+    "remaining": 13
+  },
+  "overall_status": "\ud83d\udfe1 HALTED (HALTED)"
+}

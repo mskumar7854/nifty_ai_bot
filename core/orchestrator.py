@@ -35,6 +35,17 @@ class TradingOrchestrator:
         self.execution_pipeline = getattr(ctx, "execution", getattr(ctx.system, "execution_pipeline", None))
         self.position_pipeline = getattr(ctx, "position", None) # May need to initialize if not in ctx
 
+        # ── Initialize Liquidity Reaction Model (Research-Only Shadow Layer) ──
+        try:
+            from core.lrm_engine import LRMEngine
+            from core.lrm_analytics_logger import LRMAnalyticsLogger
+            self.lrm_engine = LRMEngine(ctx.settings)
+            self.lrm_logger = LRMAnalyticsLogger()
+        except Exception as e:
+            logger.error(f"Failed to initialize LRM Shadow Layer: {e}")
+            self.lrm_engine = None
+            self.lrm_logger = None
+
     async def start(self):
         """Starts the orchestrator and background tasks."""
         self.running = True
@@ -233,6 +244,49 @@ class TradingOrchestrator:
                         # Dispatched asynchronously outside critical execution path
                         if exec_result.status != "failed" and self.telemetry and hasattr(self.telemetry, "dispatch_signal"):
                             asyncio.create_task(self.telemetry.dispatch_signal(result.signal))
+
+            # 5. Shadow Layer: Liquidity Reaction Model (Research-Only)
+            if hasattr(self, "lrm_engine") and self.lrm_engine and hasattr(self, "lrm_logger") and self.lrm_logger:
+                try:
+                    # Extract state to feed LRM
+                    sr_state_lrm = None
+                    oi_analysis_lrm = None
+                    amd_state_lrm = None
+                    structure_state_lrm = None
+                    
+                    if self.decision_pipeline:
+                        if hasattr(self.decision_pipeline, "sr_engine"):
+                            sr_state_lrm = getattr(self.decision_pipeline.sr_engine, "state", None)
+                        if hasattr(self.decision_pipeline, "oi_engine"):
+                            oi_analysis_lrm = getattr(self.decision_pipeline.oi_engine, "latest_analysis", None)
+                        if hasattr(self.decision_pipeline, "amd_engine"):
+                            amd_state_lrm = getattr(self.decision_pipeline.amd_engine, "state", None)
+                        if hasattr(self.decision_pipeline, "structure_tracker"):
+                            structure_state_lrm = self.decision_pipeline.structure_tracker.get_state()
+                            
+                    # Determine what V2 actually did this cycle
+                    v2_decision = "NO_SIGNAL"
+                    v2_kill_reason = ""
+                    if 'result' in locals() and result:
+                        if getattr(result, "signal", None):
+                            v2_decision = result.signal.action.value if hasattr(result.signal.action, "value") else str(result.signal.action)
+                            if not result.approved and hasattr(result, "gate_results") and result.gate_results:
+                                v2_kill_reason = result.gate_results[-1].reason
+                        
+                    lrm_snapshot = self.lrm_engine.update(
+                        df=df,
+                        snapshot=snapshot,
+                        sr_state=sr_state_lrm,
+                        oi_analysis=oi_analysis_lrm,
+                        amd_state=amd_state_lrm,
+                        structure_tracker_state=structure_state_lrm,
+                        v2_decision=v2_decision,
+                        v2_kill_reason=v2_kill_reason,
+                    )
+                    self.lrm_logger.log_cycle(lrm_snapshot)
+                    self.lrm_logger.update_forward_metrics(lrm_snapshot)
+                except Exception as lrm_e:
+                    logger.error(f"LRM Shadow Layer error: {lrm_e}", exc_info=True)
 
             # 6. Telemetry Pipeline — push full status to dashboard
             if self.telemetry and hasattr(self.telemetry, "dashboard") and self.telemetry.dashboard:

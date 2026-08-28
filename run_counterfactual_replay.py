@@ -98,7 +98,7 @@ if __name__ == "__main__":
     res_off = run_replay(snaps, scarcity_on=False)
     
     print("\n### Counterfactual Replay Results\n")
-    print("| Metric | Scarcity ON | Scarcity OFF | Δ |")
+    print("| Metric | Scarcity ON | Scarcity OFF | Delta |")
     print("|---|---|---|---|")
     for k in res_on.keys():
         v_on = res_on[k]

@@ -81,6 +81,16 @@ class DecisionPipeline:
         
         self.raw_logger = RawDecisionLogger()
 
+        # Shadow Variant Runner — post-commit observer for policy experiments
+        # Failure here cannot affect V2 decisions (defensive initialization)
+        try:
+            from core.shadow_variant_runner import ShadowVariantRunner
+            self.variant_runner = ShadowVariantRunner()
+            logger.info(f"[VARIANT] Shadow variant runner initialized with {len(self.variant_runner.variants)} variants")
+        except Exception as e:
+            logger.error(f"[VARIANT] Failed to initialize shadow variant runner: {e}")
+            self.variant_runner = None
+
         
     def _fetch_options_sentiment(self, price_trend: str) -> Dict[str, Any]:
         """Wrapper for options analyzer fetch"""
@@ -145,6 +155,7 @@ class DecisionPipeline:
         try:
             from models.snapshot_v2 import DecisionSnapshotV2, SnapshotMetadata, AgentOpinion, GateResult, ReplayStatus
             from core.snapshot_v2 import persist_snapshot_v2
+            import datetime
             import uuid
             
             mode_str = self.settings.system_mode.mode if hasattr(self.settings.system_mode, "mode") else str(self.settings.system_mode)
@@ -157,24 +168,69 @@ class DecisionPipeline:
                 trade_id = signal.id
             
             # --- Shadow Candidate Policy ---
-            if final_decision == "REJECTED":
-                # Check eligibility
-                conf_valid = getattr(signal, "confidence", 0.0) >= 0.60
-                ev_valid = getattr(signal, "ev_info", {}).get("ev_r", 0.0) > 0
+            GATE_SEVERITY = {
+                "FAIL_CLOSED": "CRITICAL",
+                "UNKNOWN_MARKET_REGIME": "CRITICAL",
+                "Strike Policy Blocked": "CRITICAL",
+                "DATA_INTEGRITY": "CRITICAL",
                 
-                # Check gates failed
-                gates_failed = 0
-                if filter_result and hasattr(filter_result, "gate_details"):
-                    gates_failed = sum(1 for g in filter_result.gate_details if not g.get("pass", False))
-                elif filter_result is None and "Master Gate" in rejection_reason:
-                    gates_failed = 1
-                    
-                if conf_valid and ev_valid and gates_failed == 1:
+                "BAD_STRUCTURE_EXPANDING": "HARD",
+                "REJECTED_REGIME_GRADE_B+_IN_SQUEEZE": "HARD",
+                "STRUCTURAL_CONTRADICTION": "HARD",
+                "UNACCEPTABLE_RISK": "HARD",
+                
+                "PEV_TOO_LOW": "SOFT",
+                "REJECTED_LOW_EV": "SOFT",
+                "LOW_EV": "SOFT",
+                "MARGINAL_CONFIDENCE": "SOFT",
+                
+                "CHOP_ZONE_ACTIVE": "CONTEXTUAL",
+                "REJECTED_SAME_STRUCTURAL_TREND": "CONTEXTUAL",
+                "TIMING_RESTRICTION": "CONTEXTUAL"
+            }
+            
+            initial_rejection_class = None
+            if final_decision == "REJECTED":
+                # Check eligibility: Must have structural levels (entry, stop, target)
+                entry_p = getattr(signal, "entry_price", 0.0)
+                sl_p = getattr(signal, "stop_loss", 0.0)
+                tp_p = getattr(signal, "target_1", 0.0)
+                
+                has_levels = bool(entry_p and sl_p and tp_p)
+                
+                if has_levels:
                     shadow_trade_id = f"shadow-{signal.id}"
+                    
+                    # Determine highest severity
+                    failed_gate_names = []
+                    if filter_result and hasattr(filter_result, "gate_details"):
+                        for g in filter_result.gate_details:
+                            if not g.get("pass", False):
+                                failed_gate_names.append(g.get("gate", "Unknown"))
+                    if rejection_reason and not failed_gate_names:
+                        failed_gate_names.append(rejection_reason)
+                        
+                    highest_sev_level = 0
+                    severity_rank = {"CONTEXTUAL": 1, "SOFT": 2, "HARD": 3, "CRITICAL": 4}
+                    
+                    for gate_name in failed_gate_names:
+                        gate_sev = "CONTEXTUAL" # Default
+                        for key, sev in GATE_SEVERITY.items():
+                            if key.lower() in gate_name.lower():
+                                gate_sev = sev
+                                break
+                        rank = severity_rank.get(gate_sev, 1)
+                        if rank > highest_sev_level:
+                            highest_sev_level = rank
+                            
+                    if highest_sev_level >= 3: # HARD or CRITICAL
+                        initial_rejection_class = "GENUINELY_BAD"
+                    else:
+                        initial_rejection_class = "MARGINAL"
             
             metadata = SnapshotMetadata(
                 snapshot_id=signal.id,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.datetime.now().isoformat(),
                 symbol="NIFTY",
                 expiry="UNKNOWN",
                 mode=mode_str,
@@ -199,19 +255,9 @@ class DecisionPipeline:
                     elif hasattr(out, "direction"):
                         agents_json[name] = AgentOpinion(signal=out.direction, confidence=out.confidence, details=getattr(out, "details", {}))
             
-            # v5.0.1-FIX: Persist all grading-critical fields for replay fidelity.
-            # Without these, replay analysis cannot reproduce the runtime grade,
-            # and gate attribution produces phantom Grade D findings.
-            _sig_meta = getattr(signal, "metadata", {}) or {}
             conf_json = {
                 "raw": getattr(signal, "confidence", 0.0),
-                "calibrated": _sig_meta.get("calibrated_pwin", getattr(signal, "confidence", 0.0)),
-                "dominant_prob": _sig_meta.get("dominant_prob"),
-                "dominance_pct": _sig_meta.get("dominance_pct", 0),
-                "directional_alignment": _sig_meta.get("directional_alignment", False),
-                "adaptive_threshold": getattr(signal, "adaptive_threshold", None),
-                "grade": signal.grade.value if hasattr(signal.grade, 'value') else str(signal.grade),
-                "risk_reward_ratio": getattr(signal, "risk_reward_ratio", 0),
+                "calibrated": signal.metadata.get("calibrated_pwin", getattr(signal, "confidence", 0.0))
             }
             
             confluence_json = {}
@@ -236,11 +282,32 @@ class DecisionPipeline:
                     
             decision_json = {
                 "action": final_decision,
-                "reason": rejection_reason
+                "reason": rejection_reason,
+                "initial_rejection_class": initial_rejection_class
             }
             
-            execution_json = {}
+            # --- Structural Trade Specification (Decision-Time) ---
+            execution_json = {
+                "entry_price": getattr(signal, "entry_price", 0.0),
+                "stop_loss": getattr(signal, "stop_loss", 0.0),
+                "target_1": getattr(signal, "target_1", 0.0),
+                "direction": signal.direction.value if hasattr(signal, "direction") and hasattr(signal.direction, "value") else str(getattr(signal, "direction", "")),
+                "risk_distance": abs(getattr(signal, "entry_price", 0.0) - getattr(signal, "stop_loss", 0.0)) if getattr(signal, "entry_price", 0) and getattr(signal, "stop_loss", 0) else 0.0
+            }
             
+            amd_json = {}
+            if getattr(signal, "amd_state", None):
+                try:
+                    amd_json = {
+                        "status": getattr(signal.amd_state, "amd_status", "UNKNOWN"),
+                        "trend_context": getattr(signal.amd_state, "trend_context", "UNKNOWN"),
+                        "structure_context": getattr(signal.amd_state, "structure_context", "UNKNOWN"),
+                        "shadow_score": getattr(signal.amd_state, "shadow_score", 0.0),
+                        "shadow_grade": getattr(signal.amd_state, "shadow_grade", "N/A")
+                    }
+                except Exception:
+                    pass
+
             replay_status = ReplayStatus(
                 deterministic=True,
                 missing_fields=[],
@@ -254,17 +321,33 @@ class DecisionPipeline:
                 confidence=conf_json,
                 confluence=confluence_json,
                 expected_value=ev_json,
-                structure=getattr(signal, "structure_info", {}),
-                risk=getattr(signal, "risk_info", {}),
-                amd=getattr(signal, "amd_state", None).to_dict() if hasattr(signal, "amd_state") else {},
+                structure={},
+                risk={},
+                amd=amd_json,
                 gate_results=gate_results,
                 decision=decision_json,
                 execution=execution_json,
                 event_timeline=timeline or {},
                 replay=replay_status,
-                outcome=getattr(signal, "outcome", None)
+                outcome=None
             )
             persist_snapshot_v2(snap_v2)
+
+            # ── POST-COMMIT: Shadow Variant Observer ──
+            # V2 snapshot is now committed. The variant runner
+            # replays gate results under alternative policies.
+            # This is purely observational telemetry.
+            if self.variant_runner:
+                try:
+                    self.variant_runner.evaluate_variants(
+                        snapshot_id=signal.id,
+                        gate_results={k: {"passed": v.passed, "actual": v.actual, "required": v.required, "detail": v.detail} for k, v in snap_v2.gate_results.items()},
+                        v2_decision=final_decision,
+                        v2_reason=rejection_reason,
+                        timestamp=metadata.timestamp,
+                    )
+                except Exception as ve:
+                    logger.error(f"[VARIANT] Observer failed (V2 unaffected): {ve}")
         except Exception as e:
             logger.error(f"Failed to record V2 snapshot: {e}")
 

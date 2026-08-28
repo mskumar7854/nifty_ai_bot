@@ -532,10 +532,17 @@ def generate_daily_audit(target_date: str = None):
 
     # Replay
     replay_engine = MultiSessionCounterfactualReplay(db_path=str(DB_PATH))
-    df_replay = replay_engine.run_replay(date_filter=target_date, enforce_oms_concurrency=True)
-    filter_q = replay_engine.evaluate_filter_quality(df_replay)
-    replay_win_rate = (df_replay["realized_r"] > 0).mean() * 100 if not df_replay.empty else 0
-    replay_expectancy = df_replay["realized_r"].mean() if not df_replay.empty else 0
+    replay_res = replay_engine.run_replay(date_filter=target_date, enforce_oms_concurrency=True)
+    if replay_res:
+        df_replay = replay_res["df_res"]
+        filter_q = replay_engine.evaluate_filter_quality(df_replay)
+        replay_win_rate = (df_replay["realized_r"] > 0).mean() * 100 if not df_replay.empty else 0
+        replay_expectancy = df_replay["realized_r"].mean() if not df_replay.empty else 0
+    else:
+        df_replay = pd.DataFrame()
+        filter_q = {}
+        replay_win_rate = 0
+        replay_expectancy = 0
 
     # Determine governance & overall daily status
     has_fatal = errors["fatal"] > 0
@@ -661,15 +668,15 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
     lines.append(f"| Lifecycle Stage | Count | Notes |")
     lines.append(f"| :--- | ---: | :--- |")
-    lines.append(f"| 1. Evaluated Signals (Cycles) | {signals['total']} | Total market evaluations |")
+    lines.append(f"| 1. Market Evaluations (Cycles) | {signals['total']} | Total market evaluations |")
     lines.append(f"| ├── BUY_CE Candidates | {signals['buy_ce']} | Call candidate evaluations |")
     lines.append(f"| └── BUY_PE Candidates | {signals['buy_pe']} | Put candidate evaluations |")
-    lines.append(f"| 2. Predictive Rejections | {signals.get('predictive_rejected', 0)} | Intercepted by strategy/risk gates |")
-    lines.append(f"| 3. Capacity Rejections | {signals.get('capacity_rejected', 0)} | Blocked by portfolio/open position heat |")
-    lines.append(f"| 4. Strategy-Approved (Governance Eligible) | {signals['executed']} | Approved by predictive gates |")
-    lines.append(f"| 5. Governance-Blocked Signals | {governance_blocked} | Prevented by active {sys_state.get('state')} circuit breaker |")
-    lines.append(f"| 6. Actual OMS Orders Routed | {actual_orders_routed} | Submitted to Order Management System |")
-    lines.append(f"| 7. Actual Orders Filled | {actual_orders_filled} | Confirmed entries (Open + Closed) |")
+    lines.append(f"| 2. Predictive Candidates (Eligible for gates) | {replay_res.get('shadow_eligible', signals.get('predictive_rejected', 0) + signals['executed'])} | Shadow-eligible candidates |")
+    lines.append(f"| 3. Predictive Rejections | {signals.get('predictive_rejected', 0)} | Intercepted by strategy/risk gates |")
+    lines.append(f"| 4. Strategy-Approved | {signals['executed']} | Approved by predictive gates |")
+    lines.append(f"| 5. Governance-Blocked | {governance_blocked} | Prevented by active {sys_state.get('state')} circuit breaker |")
+    lines.append(f"| 6. OMS Orders Routed | {actual_orders_routed} | Submitted to Order Management System |")
+    lines.append(f"| 7. Orders Filled | {actual_orders_filled} | Confirmed entries (Open + Closed) |")
     lines.append(f"| ├── Active Open Positions | 0 | Currently floating in position manager |")
     lines.append(f"| └── Closed Outcomes | 0 | Finished trades contributing to realized P&L |")
     lines.append("")
@@ -717,20 +724,51 @@ def generate_daily_audit(target_date: str = None):
     lines.append("")
 
     # 6. Counterfactual Replay
-    lines.append("## 6. Counterfactual Replay (Strategy Quality Evaluation)")
+    lines.append("## 6. Shadow Opportunity Summary (Strategy Quality Evaluation)")
     lines.append("")
-    lines.append("*Note: Counterfactual replay evaluates hypothetical hold-to-exit performance across sequential 45-minute replay sampling windows.*")
+    lines.append("*Note: Shadow layer tracks counterfactual hold-to-exit performance using decision-time structural levels.*")
     lines.append("")
-    lines.append(f"| Replay Metric | Value |")
-    lines.append(f"| :--- | ---: |")
-    lines.append(f"| Replay Sampling Windows | {len(df_replay)} |")
-    lines.append(f"| Strategy-Approved Candidates Evaluated | {signals['executed']} |")
-    lines.append(f"| Window True Positives (TP - Profitable Window Approved) | {filter_q.get('TP', 0)} |")
-    lines.append(f"| Window True Negatives (TN - Unprofitable Window Avoided) | {filter_q.get('TN', 0)} |")
-    lines.append(f"| Window False Positives (FP - Unprofitable Window Approved) | {filter_q.get('FP', 0)} |")
-    lines.append(f"| Window False Negatives (FN - Profitable Window Missed) | {filter_q.get('FN', 0)} |")
-    lines.append(f"| Counterfactual Win Rate | {replay_win_rate:.1f}% |")
-    lines.append(f"| Counterfactual Expectancy | {replay_expectancy:+.2f}R |")
+    
+    if replay_res:
+        lines.append(f"Evaluated candidates: {replay_res['evaluated_candidates']}")
+        lines.append(f"Shadow-eligible opportunities: {replay_res['shadow_eligible']}")
+        lines.append(f"Rejected opportunities: {replay_res['rejected_opportunities']}")
+        lines.append("")
+        lines.append(f"Genuinely bad: {replay_res['genuinely_bad']}")
+        lines.append(f"Marginal: {replay_res['marginal']}")
+        lines.append("")
+        lines.append(f"Rejected opportunities that became profitable: {replay_res['rejected_profitable']}")
+        lines.append(f"Rejected opportunities that became unprofitable: {replay_res['rejected_unprofitable']}")
+        lines.append("")
+        lines.append(f"Positive R available: +{replay_res['pos_r_avail']:.2f}R")
+        lines.append(f"Positive R captured: +{replay_res['pos_r_captured']:.2f}R")
+        if replay_res['pos_r_cap_pct'] is not None:
+            lines.append(f"Positive expectancy captured: {replay_res['pos_r_cap_pct']:.1f}%")
+        else:
+            lines.append("Positive expectancy captured: N/A - no positive opportunity existed")
+        lines.append("")
+        lines.append(f"Negative R available: {replay_res['neg_r_avail']:.2f}R")
+        lines.append(f"Negative R eliminated: {replay_res['neg_r_eliminated']:.2f}R")
+        if replay_res['neg_r_elim_pct'] is not None:
+            lines.append(f"Negative expectancy eliminated: {replay_res['neg_r_elim_pct']:.1f}%")
+        else:
+            lines.append("Negative expectancy eliminated: N/A - no negative opportunity existed")
+        lines.append("")
+        lines.append(f"Opportunity cost: {replay_res['opp_cost']:+.2f}R")
+        lines.append("")
+        lines.append("### Gate Attribution Analysis")
+        lines.append("")
+        lines.append("| Gate | Rejected | Profitable | Unprofitable | Missed Profit | Saved Loss | Net Counterfactual R |")
+        lines.append("| :--- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        
+        gate_attribution = replay_res.get("gate_attribution", {})
+        if gate_attribution:
+            for gate, stats in gate_attribution.items():
+                lines.append(f"| {gate} | {stats['rejected']} | {stats['profitable']} | {stats['unprofitable']} | {stats['missed_profit']:+.2f}R | {stats['saved_loss']:+.2f}R | {stats['net_r']:+.2f}R |")
+        else:
+            lines.append("| No data | 0 | 0 | 0 | +0.00R | -0.00R | +0.00R |")
+    else:
+        lines.append("No shadow opportunities evaluated.")
     lines.append("")
 
     # Executed Trades
