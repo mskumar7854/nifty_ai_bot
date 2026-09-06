@@ -1,0 +1,58 @@
+{
+  "date": "2026-08-14",
+  "signals": {
+    "total": 42,
+    "buy_ce": 14,
+    "buy_pe": 28,
+    "executed": 1,
+    "rejected": 41,
+    "capacity_rejected": 4,
+    "predictive_rejected": 37,
+    "predictive_reasons": {
+      "BAD_STRUCTURE_EXPANDING": 9,
+      "LOW_CONFIDENCE": 8,
+      "REJECTED_LOW_EV_+0.43R": 7,
+      "PEV_TOO_LOW": 6,
+      "REJECTED_REGIME_GRADE_B+_IN_SQUEEZE": 4
+    },
+    "capacity_reasons": {
+      "Max Open Positions": 4
+    }
+  },
+  "market": {
+    "open": 0,
+    "high": 0,
+    "low": 0,
+    "close": 0,
+    "gap_pct": 0,
+    "status": "INCOMPLETE_SESSION_DATA"
+  },
+  "errors": {
+    "fatal": 0,
+    "recoverable": 0,
+    "infrastructure_degraded": false
+  },
+  "execution_quality": {
+    "participation_pct": 41.3,
+    "abstention_pct": 58.7,
+    "avg_confidence": 48.7,
+    "avg_ev": 0.49
+  },
+  "filter_quality": {
+    "TP": 1.0,
+    "TN": 6.0,
+    "FP": 0.0,
+    "FN": 1.0,
+    "Precision": 1.0,
+    "Recall": 0.5,
+    "Specificity": 1.0,
+    "F1_Score": 0.667,
+    "MCC": 0.655
+  },
+  "campaign": {
+    "completed": 10,
+    "required": 20,
+    "remaining": 10
+  },
+  "overall_status": "\u2705 HEALTHY"
+}

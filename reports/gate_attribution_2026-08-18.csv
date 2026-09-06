@@ -1,0 +1,12 @@
+Experiment,Configuration,Trades,Win Rate,Profit Factor,Drawdown,Winners Preserved
+A,Baseline (All OFF),0,0.0%,0.00,0.00R,0.0%
+A,+ Confidence,0,0.0%,0.00,0.00R,0.0%
+A,+ Confluence,0,0.0%,0.00,0.00R,0.0%
+A,+ EV,0,0.0%,0.00,0.00R,0.0%
+A,+ Structure,0,0.0%,0.00,0.00R,0.0%
+A,Full V2.1,0,0.0%,0.00,0.00R,0.0%
+B,Confidence ONLY,0,0.0%,0.00,0.00R,0.0%
+B,Confluence ONLY,0,0.0%,0.00,0.00R,0.0%
+B,EV ONLY,0,0.0%,0.00,0.00R,0.0%
+B,Structure ONLY,0,0.0%,0.00,0.00R,0.0%
+B,Regime ONLY,0,0.0%,0.00,0.00R,0.0%

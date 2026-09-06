@@ -1,0 +1,356 @@
+# Baseline Configuration Inventory
+
+## Environment Variables (.env)
+- `SYSTEM_MODE`
+- `TRADING_MODE`
+- `LOG_LEVEL`
+- `DATA_SOURCE`
+- `INSTRUMENT`
+- `CAPITAL`
+- `MAX_RISK_PER_TRADE`
+- `MAX_DAILY_TRADES`
+- `MAX_DAILY_LOSS`
+- `MARKET_AGENT_INTERVAL`
+- `MOMENTUM_AGENT_INTERVAL`
+- `OI_AGENT_INTERVAL`
+- `TRAP_AGENT_INTERVAL`
+- `SENTIMENT_AGENT_INTERVAL`
+- `RISK_AGENT_INTERVAL`
+- `DECISION_INTERVAL`
+- `MIN_CONFIDENCE`
+- `ENABLE_TELEGRAM_ALERTS`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `DASHBOARD_ENABLED`
+- `DASHBOARD_PORT`
+- `DHAN_CLIENT_ID`
+- `DHAN_ACCESS_TOKEN`
+- `ENTRY_TIMEFRAME`
+- `TREND_TIMEFRAME`
+- `HEARTBEAT_URL`
+- `NIFTY_SECURITY_ID`
+- `AUTO_SHUTDOWN`
+
+## Settings Definitions (config/settings.py)
+class SystemMode:
+  - mode
+  - simulation_capital
+  - small_capital
+  - scaled_capital
+  - forced_decision_interval_sec
+  - current_phase
+  - phase_1_min_days
+  - phase_1_min_trades
+  - phase_1_min_win_rate
+  - phase_1_max_drawdown
+  - phase_2_min_days
+  - phase_2_min_trades
+  - phase_2_min_win_rate
+  - phase_2_max_drawdown
+  - log_every_signal
+  - log_filter_kills
+  - verbose_mode
+class TradeFilterConfig:
+  - min_signal_confidence
+  - min_confluence_score
+  - min_agent_agreement_pct
+  - allowed_regimes_for_momentum
+  - allowed_regimes_for_mean_reversion
+  - blocked_regimes
+  - require_structure_alignment
+  - blocked_structures
+  - min_expected_move_vs_breakeven
+  - min_risk_reward_ratio
+  - max_cost_pct_of_target
+  - max_trades_per_day
+  - max_trades_per_session
+  - require_learning_approval
+  - learning_min_confidence
+  - learning_block_on_streak
+  - max_theta_pct_per_hour
+  - min_premium_time_value_pct
+  - block_if_iv_crushing
+  - grade_thresholds
+  - min_grade_to_trade
+  - require_multi_tf_alignment
+  - require_volume_above_average
+  - block_first_5_minutes
+  - block_last_10_minutes
+  - block_around_news_events
+  - min_atr_for_trade
+  - max_spread_pct
+  - execution_buffer_points
+  - min_candles_warmup
+  - market_open_safe_time
+  - gap_threshold_points
+class PositionConfig:
+  - total_capital
+  - max_capital_per_trade
+  - max_capital_deployed
+  - reserve_capital_pct
+  - risk_per_trade_pct
+  - max_risk_per_trade_pct
+  - min_risk_per_trade
+  - max_risk_per_trade
+  - min_lot_size
+  - max_lot_size
+  - lot_qty
+  - confidence_lot_mapping
+  - max_daily_loss
+  - max_daily_loss_pct
+  - max_weekly_loss
+  - max_weekly_loss_pct
+  - max_drawdown_pct
+  - drawdown_reduce_size_pct
+  - drawdown_halt_pct
+  - max_daily_trades
+  - max_open_positions
+  - max_same_direction
+  - min_time_between_trades
+  - partial_profit_1_pct
+  - partial_profit_2_pct
+  - trail_remaining
+  - trail_stop_atr_multiplier
+  - sl_type
+  - sl_atr_multiplier
+  - sl_fixed_points
+  - sl_percentage
+  - sl_move_to_cost_after_r1
+  - tsl_enabled
+  - tsl_breakeven_trigger_pct
+  - tsl_activate_trigger_pct
+  - tsl_tighten_1_trigger_pct
+  - tsl_tighten_2_trigger_pct
+  - tsl_trail_pct_normal
+  - tsl_trail_pct_tighten_1
+  - tsl_trail_pct_tighten_2
+  - tsl_grade_adjustments
+  - tsl_regime_adjustments
+  - tsl_max_trail_pct
+  - tsl_min_trail_pct
+  - tsl_idle_tighten_enabled
+  - tsl_idle_minutes_threshold
+  - tsl_idle_tighten_by_pct
+class ExitConfig:
+  - max_hold_time_minutes
+  - time_exit_if_flat_minutes
+  - time_exit_if_flat_threshold_pct
+  - exit_on_opposite_signal
+  - exit_on_vwap_cross
+  - exit_on_regime_change
+  - exit_on_structure_break
+  - move_sl_to_cost_at_rr
+  - trail_after_rr
+  - trail_step_pct
+  - exit_if_theta_exceeding_pnl
+  - max_hold_on_expiry_day_minutes
+  - force_exit_before_close_minutes
+  - daily_target_amount
+  - daily_target_pct
+  - stop_after_daily_target
+  - stop_after_consecutive_losses
+  - reduce_size_after_loss
+  - loss_size_reduction_pct
+class SessionStrategyConfig:
+  - sessions
+class TradingConfig:
+  - instrument
+  - capital
+  - max_risk_per_trade
+  - max_daily_trades
+  - max_daily_loss
+  - default_qty
+  - slippage_buffer
+  - auto_shutdown_after_market
+class AgentIntervals:
+  - market
+  - momentum
+  - oi
+  - trap
+  - sentiment
+  - risk
+  - time_session
+  - multi_timeframe
+  - price_action
+  - volatility
+  - correlation
+  - expiry
+  - order_flow
+  - level
+  - delta_gamma
+  - institutional
+  - gap
+  - consolidation
+  - learning
+  - expiry_day
+  - decay
+class ThresholdConfig:
+  - vwap_buffer
+  - trend_ema_fast
+  - trend_ema_slow
+  - structure_lookback
+  - rsi_overbought
+  - rsi_oversold
+  - rsi_bull_zone
+  - rsi_bear_zone
+  - volume_spike_multiplier
+  - candle_body_ratio
+  - oi_change_threshold
+  - pcr_bullish
+  - pcr_bearish
+  - trap_wick_ratio
+  - trap_volume_drop
+  - fake_breakout_candles
+  - vix_high
+  - vix_low
+  - vix_spike
+  - opening_range_minutes
+  - power_hour_start
+  - lunch_start
+  - lunch_end
+  - avoid_first_minutes
+  - avoid_last_minutes
+  - expiry_day_caution
+  - mtf_timeframes
+  - mtf_alignment_threshold
+  - engulfing_min_ratio
+  - pin_bar_wick_ratio
+  - inside_bar_lookback
+  - double_top_tolerance
+  - bb_period
+  - bb_std
+  - squeeze_threshold
+  - expansion_multiplier
+  - atr_fast
+  - atr_slow
+  - correlation_window
+  - correlation_strong
+  - correlation_weak
+  - banknifty_weight
+  - expiry_day
+  - gamma_exposure_threshold
+  - theta_decay_acceleration_dte
+  - pin_risk_range
+  - bid_ask_imbalance_threshold
+  - large_order_threshold
+  - absorption_candles
+  - round_number_interval
+  - pivot_type
+  - level_proximity_points
+  - delta_neutral_range
+  - gamma_wall_threshold
+  - iv_skew_threshold
+  - fii_bullish_threshold
+  - fii_bearish_threshold
+  - dii_confirmation
+  - gap_significant_points
+  - gap_fill_probability_threshold
+  - consolidation_min_candles
+  - consolidation_range_atr_ratio
+  - breakout_volume_multiplier
+  - breakout_confirmation_candles
+  - min_trades_for_learning
+  - learning_lookback_days
+  - win_rate_good
+  - win_rate_bad
+  - pattern_min_occurrences
+  - confidence_calibration_enabled
+  - optimal_confidence_min
+  - optimal_confidence_max
+  - streak_alert_threshold
+  - learning_weight_adaptation_rate
+  - condition_correlation_min_samples
+  - expiry_gamma_zone_points
+  - expiry_pin_proximity
+  - expiry_last_hour_start
+  - expiry_premium_crush_threshold
+  - expiry_straddle_decay_rate_high
+  - expiry_avoid_first_minutes
+  - expiry_avoid_last_minutes
+  - expiry_oi_concentration_threshold
+  - expiry_gamma_scalp_window
+  - expiry_weekly_vs_monthly_vol_diff
+  - expiry_max_pain_gravity_radius
+  - expiry_pin_level_oi_ratio
+  - decay_measurement_interval
+  - decay_acceleration_dte
+  - decay_critical_dte
+  - decay_iv_crush_threshold
+  - decay_theta_burn_rate_high
+  - decay_optimal_hold_minutes_trend
+  - decay_optimal_hold_minutes_scalp
+  - decay_weekend_premium_factor
+  - decay_overnight_gap_risk
+  - decay_itm_vs_otm_break_even
+  - decay_time_value_min_pct
+  - decay_intrinsic_safety_margin
+  - min_confidence
+  - min_confluence_agents
+  - signal_quality_min
+  - agent_weights
+  - blocker_agents
+  - base_stop_loss_pct
+  - trailing_sl_activation_pct
+  - trailing_sl_distance_pct
+  - structure_bos_confirmation
+  - structure_swing_order
+  - structure_ob_lookback
+  - structure_fvg_min_gap_pct
+  - regime_adx_trending
+  - regime_adx_strong_trend
+  - regime_adx_ranging
+  - regime_lookback
+  - learning_rolling_window
+  - learning_overfit_threshold
+  - learning_staleness_days
+  - learning_weight_decay
+class AlertConfig:
+  - console_enabled
+  - telegram_enabled
+  - telegram_bot_token
+  - telegram_chat_id
+  - sound_enabled
+  - cooldown_seconds
+  - trading_mode
+  - telegram_signal_expiry_seconds
+  - max_slippage_pct_on_confirm
+  - max_spread_abs
+  - max_spread_pct
+  - broker_latency_halt_ms
+  - broker_latency_warn_ms
+class DashboardConfig:
+  - enabled
+  - host
+  - port
+  - telemetry_emit_interval_seconds
+class InstrumentConfig:
+  - security_id_map
+class BrokerageConfig:
+  - brokerage_per_order
+  - stt_sell_pct
+  - transaction_charges_pct
+  - gst_pct
+  - sebi_charges_per_crore
+  - stamp_duty_buy_pct
+  - slippage_model
+  - fixed_slippage_points
+  - dynamic_slippage_base
+  - dynamic_slippage_vol_factor
+  - impact_cost_per_lot
+  - max_slippage_points
+  - typical_spread_points
+  - wide_spread_threshold_vix
+  - wide_spread_multiplier
+class LegacyPositionConfig:
+  - max_portfolio_heat
+  - max_open_positions
+  - scaling_enabled
+  - partial_profit_pct
+  - circuit_breaker_drawdown
+class EnginePipelineConfig:
+  - active_agents
+  - phase_1_gatekeepers
+  - phase_2_core
+  - phase_3_confirmation
+  - phase_4_risk
+class Settings:

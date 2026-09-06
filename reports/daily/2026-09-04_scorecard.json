@@ -1,0 +1,71 @@
+{
+  "date": "2026-09-04",
+  "signals": {
+    "total": 0,
+    "buy_ce": 0,
+    "buy_pe": 0,
+    "executed": 0,
+    "rejected": 0,
+    "capacity_rejected": 0,
+    "predictive_rejected": 0,
+    "predictive_reasons": {},
+    "capacity_reasons": {}
+  },
+  "market": {
+    "open": 0,
+    "high": 0,
+    "low": 0,
+    "close": 0,
+    "gap_pct": 0,
+    "status": "INCOMPLETE_SESSION_DATA"
+  },
+  "errors": {
+    "fatal": 0,
+    "recoverable": 0,
+    "rate_limits": 0,
+    "circuit_breakers": 0,
+    "infrastructure_degraded": false
+  },
+  "execution_quality": {
+    "participation_pct": 0,
+    "abstention_pct": 0,
+    "avg_confidence": 0,
+    "avg_ev": 0
+  },
+  "filter_quality": {},
+  "campaign": {
+    "valid": 0,
+    "completed": 0,
+    "economic_valid": 0,
+    "capture_valid": 1,
+    "observed": 1,
+    "excluded": 0,
+    "invalid": 0,
+    "required": 20,
+    "remaining": 20
+  },
+  "overall_status": "\ud83d\udfe1 HALTED \u2014 SAFETY FREEZE ACTIVE",
+  "session_metrics": {
+    "has_data": true,
+    "total_records": 39434,
+    "evaluation_cycles": 17219,
+    "halted_cycles": 17219,
+    "authorized_cycles": 0,
+    "rejected_cycles": 0,
+    "freeze_reasons": {
+      "Phase 2 Halt: Intraday Spike Freeze active": 17131,
+      "Phase 1 Halt: Bad time to trade: PRE_MARKET": 88
+    },
+    "cycle_reasons": {
+      "Phase 2 Halt: Intraday Spike Freeze active": 17131,
+      "Phase 1 Halt: Bad time to trade: PRE_MARKET": 88
+    },
+    "regimes": {
+      "RANGE": 11932,
+      "VOLATILE": 2234,
+      "TREND_DOWN": 1623,
+      "TREND_UP": 1430
+    },
+    "is_safety_freeze": true
+  }
+}

@@ -1,0 +1,293 @@
+{
+  "nodes": [
+    {
+      "id": "de_Agents",
+      "label": "23 Agents\n(DecisionEngineV3)",
+      "file_type": "code",
+      "source_file": "core/decision_engine_v3.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "main_run_cycle",
+      "label": "_run_cycle()",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "master_approve",
+      "label": "master.approve()\n[MasterDecisionEngine]",
+      "file_type": "code",
+      "source_file": "core/master_decision_engine.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "main_execute_signal",
+      "label": "execute_signal()\n[SINGLE ENTRY POINT]",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "main_live_execute",
+      "label": "_live_execute()\n[confirmed entries]",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tg_handle_callback",
+      "label": "Telegram: handle_callback_query()\n[SEMI_AUTO confirm]",
+      "file_type": "code",
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tg_execute_auto",
+      "label": "Telegram: _execute_auto()\n[AUTO mode]",
+      "file_type": "code",
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "sb_telegram_gate",
+      "label": "SignalBridge: Telegram Strict Gate\n(Score < 0.85 -> REJECTED)",
+      "file_type": "code",
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "sb_no_trade",
+      "label": "_no_trade() -> log_rejection()",
+      "file_type": "code",
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "rm_calc_size",
+      "label": "RiskManager.calculate_position_size()\n[Dynamic Telegram Scaling]",
+      "file_type": "code",
+      "source_file": "nifty_strategy/risk_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "pm_open_position",
+      "label": "PositionManager.open_position()\n[BROKER ORDER]",
+      "file_type": "code",
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "pm_close_position",
+      "label": "PositionManager.close_position()",
+      "file_type": "code",
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tl_log_trade",
+      "label": "TradeLogger.log_trade()\n-> trades.ndjson",
+      "file_type": "code",
+      "source_file": "utils/trade_logger.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tl_log_rejection",
+      "label": "TradeLogger.log_rejection()\n-> rejections.ndjson",
+      "file_type": "code",
+      "source_file": "utils/trade_logger.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "de_Agents",
+      "target": "main_run_cycle",
+      "relation": "feeds",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 2.0
+    },
+    {
+      "source": "main_run_cycle",
+      "target": "master_approve",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 2.0
+    },
+    {
+      "source": "main_run_cycle",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 2.0
+    },
+    {
+      "source": "main_live_execute",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.5
+    },
+    {
+      "source": "tg_handle_callback",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "weight": 1.5
+    },
+    {
+      "source": "tg_execute_auto",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "weight": 1.5
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "master_approve",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 3.0
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "sb_telegram_gate",
+      "relation": "routes_through",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "weight": 1.5
+    },
+    {
+      "source": "sb_telegram_gate",
+      "target": "sb_no_trade",
+      "relation": "rejects_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "sb_no_trade",
+      "target": "tl_log_rejection",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "rm_calc_size",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.5
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "pm_open_position",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 3.0
+    },
+    {
+      "source": "pm_close_position",
+      "target": "tl_log_trade",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "weight": 2.0
+    }
+  ],
+  "hyperedges": [],
+  "input_tokens": 0,
+  "output_tokens": 0
+}

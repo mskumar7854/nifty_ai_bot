@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Nifty AI System — Architecture Audit Graph</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 16px 24px; background: #161b22; border-bottom: 1px solid #30363d; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 18px; font-weight: 600; color: #58a6ff; }
+  header p { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: #1a4731; color: #3fb950; border: 1px solid #3fb950; }
+  .badge-blue  { background: #1a3a4f; color: #58a6ff; border: 1px solid #58a6ff; }
+  .badge-red   { background: #4a1f1f; color: #f85149; border: 1px solid #f85149; }
+  .badge-orange{ background: #3d2b00; color: #e3b341; border: 1px solid #e3b341; }
+  .layout { display: flex; flex: 1; overflow: hidden; }
+  #graph { flex: 1; }
+  .sidebar { width: 320px; background: #161b22; border-left: 1px solid #30363d; padding: 20px; overflow-y: auto; }
+  .sidebar h2 { font-size: 13px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+  .check { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; padding: 12px; background: #0d1117; border-radius: 8px; border: 1px solid #30363d; }
+  .check .icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .check h3 { font-size: 13px; font-weight: 600; color: #e6edf3; }
+  .check p  { font-size: 11px; color: #8b949e; margin-top: 3px; line-height: 1.5; }
+  .verdict { margin-top: 20px; padding: 14px; background: #1a4731; border: 1px solid #3fb950; border-radius: 8px; text-align: center; }
+  .verdict h2 { color: #3fb950; font-size: 15px; }
+  .verdict p  { color: #8b949e; font-size: 12px; margin-top: 6px; }
+  .legend { margin-top: 20px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: #8b949e; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  #tooltip { position: fixed; background: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #e6edf3; max-width: 240px; pointer-events: none; display: none; z-index: 100; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🧠 Nifty AI System — Architecture Audit Graph</h1>
+    <p>v4.6.1 Hardened · Graphify Safety Check · 2026-04-09</p>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span class="badge badge-green">✅ AUDIT PASSED</span>
+    <span class="badge badge-blue">14 nodes · 13 edges</span>
+  </div>
+</header>
+<div class="layout">
+  <div id="graph"></div>
+  <div class="sidebar">
+    <h2>Safety Checks</h2>
+
+    <div class="check">
+      <span class="icon">✅</span>
+      <div>
+        <h3>Single Execution Path</h3>
+        <p><code>open_position()</code> is only reachable via <code>execute_signal()</code>. No direct broker access from any other path.</p>
+      </div>
+    </div>
+
+    <div class="check">
+      <span class="icon">✅</span>
+      <div>
+        <h3>Master Gate Always Invoked</h3>
+        <p><code>execute_signal()</code> calls <code>master.approve()</code> as its first action. Every trade path — AI, Telegram, confirmed entries — must pass this gate.</p>
+      </div>
+    </div>
+
+    <div class="check">
+      <span class="icon">✅</span>
+      <div>
+        <h3>Telegram Cannot Bypass</h3>
+        <p>Both <code>handle_callback_query()</code> and <code>_execute_auto()</code> route through <code>execute_signal()</code> — not directly to the broker. Zero direct paths to <code>open_position()</code>.</p>
+      </div>
+    </div>
+
+    <div class="check">
+      <span class="icon">✅</span>
+      <div>
+        <h3>Telegram Strict Gate (L7.5)</h3>
+        <p>Score &lt; 0.85 → <code>_no_trade()</code> → logged to <code>rejections.ndjson</code>. The gate is embedded inside <code>SignalBridge.evaluate()</code>.</p>
+      </div>
+    </div>
+
+    <div class="check">
+      <span class="icon">✅</span>
+      <div>
+        <h3>Logging Complete</h3>
+        <p><code>close_position()</code> → <code>log_trade()</code> → <code>trades.ndjson</code><br>
+        <code>_no_trade()</code> → <code>log_rejection()</code> → <code>rejections.ndjson</code></p>
+      </div>
+    </div>
+
+    <div class="check">
+      <span class="icon">✅</span>
+      <div>
+        <h3>No Duplicate Systems</h3>
+        <p><code>nifty_strategy/main.py</code> is a standalone module — not part of the active execution path. Root <code>main.py</code> is the only orchestrator.</p>
+      </div>
+    </div>
+
+    <div class="verdict">
+      <h2>🏁 GRAPHIFY CHECK COMPLETE</h2>
+      <p>System is safe, controlled, and production-grade. Zero anomalies found.</p>
+    </div>
+
+    <div class="legend" style="margin-top:24px">
+      <h2>Legend</h2>
+      <div class="legend-item"><div class="dot" style="background:#1f6feb"></div> AI / Core Logic</div>
+      <div class="legend-item"><div class="dot" style="background:#2ea043"></div> Master Gate</div>
+      <div class="legend-item"><div class="dot" style="background:#9e6a03"></div> Telegram Path</div>
+      <div class="legend-item"><div class="dot" style="background:#a371f7"></div> Signal Bridge</div>
+      <div class="legend-item"><div class="dot" style="background:#f78166"></div> Broker Execution</div>
+      <div class="legend-item"><div class="dot" style="background:#3d444d"></div> Logging Layer</div>
+    </div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+const nodes = new vis.DataSet([
+  { id: 'de_Agents',          label: '23 Agents\n(DecisionEngineV3)',           color: { background: '#1f6feb', border: '#388bfd' }, font: { color: '#e6edf3', size: 13 }, shape: 'box', margin: 10 },
+  { id: 'main_run_cycle',     label: '_run_cycle()',                             color: { background: '#1f6feb', border: '#388bfd' }, font: { color: '#e6edf3', size: 13 }, shape: 'box', margin: 10 },
+  { id: 'master_approve',     label: 'master.approve()\n[MasterDecisionEngine]', color: { background: '#2ea043', border: '#3fb950' }, font: { color: '#e6edf3', size: 13 }, shape: 'diamond', margin: 12 },
+  { id: 'main_execute_signal',label: '⚡ execute_signal()\n[SINGLE ENTRY POINT]', color: { background: '#1158c7', border: '#58a6ff' }, font: { color: '#e6edf3', size: 14, bold: true }, shape: 'box', margin: 12, borderWidth: 3 },
+  { id: 'main_live_execute',  label: '_live_execute()\n[confirmed entries]',     color: { background: '#1f6feb', border: '#388bfd' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 8 },
+  { id: 'tg_handle_callback', label: 'Telegram\nhandle_callback_query()',        color: { background: '#9e6a03', border: '#e3b341' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 10 },
+  { id: 'tg_execute_auto',    label: 'Telegram\n_execute_auto()',                color: { background: '#9e6a03', border: '#e3b341' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 10 },
+  { id: 'sb_telegram_gate',   label: '🛡 Telegram Strict Gate\n(score < 0.85 → REJECT)', color: { background: '#6e40c9', border: '#a371f7' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 10 },
+  { id: 'sb_no_trade',        label: '_no_trade()\n→ log_rejection()',            color: { background: '#4a1f1f', border: '#f85149' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 8 },
+  { id: 'rm_calc_size',       label: 'RiskManager\ncalc_position_size()\n[0.25x / 0.50x / 0.75x]', color: { background: '#a371f7', border: '#a371f7' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 10 },
+  { id: 'pm_open_position',   label: '🏦 PositionManager\nopen_position()\n[BROKER ORDER]', color: { background: '#b91c1c', border: '#f85149' }, font: { color: '#e6edf3', size: 13, bold: true }, shape: 'box', margin: 12, borderWidth: 3 },
+  { id: 'pm_close_position',  label: 'PositionManager\nclose_position()',          color: { background: '#7d1a1a', border: '#f85149' }, font: { color: '#e6edf3', size: 12 }, shape: 'box', margin: 10 },
+  { id: 'tl_log_trade',       label: 'TradeLogger\nlog_trade()\n→ trades.ndjson', color: { background: '#21262d', border: '#30363d' }, font: { color: '#8b949e', size: 12 }, shape: 'box', margin: 10 },
+  { id: 'tl_log_rejection',   label: 'TradeLogger\nlog_rejection()\n→ rejections.ndjson', color: { background: '#21262d', border: '#30363d' }, font: { color: '#8b949e', size: 12 }, shape: 'box', margin: 10 },
+]);
+
+const edges = new vis.DataSet([
+  { from: 'de_Agents',          to: 'main_run_cycle',      label: 'signal', arrows: 'to', color: { color: '#388bfd' },  width: 2 },
+  { from: 'main_run_cycle',     to: 'master_approve',      label: 'pre-check', arrows: 'to', color: { color: '#3fb950' }, width: 2, dashes: true },
+  { from: 'main_run_cycle',     to: 'main_execute_signal', label: 'AUTO', arrows: 'to', color: { color: '#58a6ff' },  width: 3 },
+  { from: 'main_live_execute',  to: 'main_execute_signal', label: 'confirmed', arrows: 'to', color: { color: '#58a6ff' },  width: 2 },
+  { from: 'tg_handle_callback', to: 'main_execute_signal', label: 'SEMI_AUTO', arrows: 'to', color: { color: '#e3b341' },  width: 2 },
+  { from: 'tg_execute_auto',    to: 'main_execute_signal', label: 'AUTO', arrows: 'to', color: { color: '#e3b341' },  width: 2 },
+  { from: 'main_execute_signal',to: 'master_approve',      label: '✅ MANDATORY', arrows: 'to', color: { color: '#3fb950' }, width: 3 },
+  { from: 'main_execute_signal',to: 'sb_telegram_gate',    label: 'TELEGRAM signals', arrows: 'to', color: { color: '#a371f7' }, width: 2, dashes: true },
+  { from: 'sb_telegram_gate',   to: 'sb_no_trade',         label: 'score < 0.85', arrows: 'to', color: { color: '#f85149' }, width: 2 },
+  { from: 'sb_no_trade',        to: 'tl_log_rejection',    label: 'logs', arrows: 'to', color: { color: '#8b949e' }, width: 1 },
+  { from: 'main_execute_signal',to: 'rm_calc_size',        label: 'sizing', arrows: 'to', color: { color: '#a371f7' }, width: 2 },
+  { from: 'main_execute_signal',to: 'pm_open_position',    label: '🔴 ONLY PATH', arrows: 'to', color: { color: '#f85149' }, width: 4 },
+  { from: 'pm_close_position',  to: 'tl_log_trade',        label: 'logs', arrows: 'to', color: { color: '#8b949e' }, width: 2 },
+]);
+
+const container = document.getElementById('graph');
+const data = { nodes, edges };
+const options = {
+  layout: { hierarchical: { direction: 'LR', sortMethod: 'directed', levelSeparation: 220, nodeSpacing: 160, treeSpacing: 180 } },
+  physics: { enabled: false },
+  interaction: { hover: true, tooltipDelay: 200 },
+  nodes: { borderWidth: 1, borderWidthSelected: 3, shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 8, x: 2, y: 2 } },
+  edges: { smooth: { type: 'curvedCW', roundness: 0.15 }, font: { size: 11, color: '#8b949e', align: 'middle', background: 'rgba(13,17,23,0.8)' }, selectionWidth: 2 },
+};
+
+const network = new vis.Network(container, data, options);
+
+const tooltip = document.getElementById('tooltip');
+const details = {
+  'main_execute_signal': '⚡ CRITICAL: This is the ONLY function that can call open_position(). All AI, Telegram, and manual confirmation paths funnel through here.',
+  'master_approve': '🛡 MANDATORY gate. Called at cycle start AND inside execute_signal(). If it returns False → no trade.',
+  'pm_open_position': '🏦 The actual broker order. Only reachable from execute_signal(). NEVER called directly.',
+  'sb_telegram_gate': '🛡 Layer 7.5 in SignalBridge.evaluate(). Telegram signals with score < 0.85 (STRICT mode) are hard-blocked here.',
+  'tg_handle_callback': '📱 User clicked CONFIRM in Telegram UI (SEMI_AUTO). Routes to execute_signal — cannot bypass master gate.',
+  'rm_calc_size': '📊 Dynamic scaling: 0.75x (score>0.90), 0.50x (>0.85), 0.25x (<0.85). Protects capital on lower-quality Telegram signals.',
+  'tl_log_trade': '📝 Every closed trade logged to trades.ndjson with trade_id, score, entry_type, MAE, MFE.',
+  'tl_log_rejection': '📝 Every blocked signal logged to rejections.ndjson — the "near miss" dataset for future threshold tuning.',
+};
+
+network.on('hoverNode', (params) => {
+  const d = details[params.node];
+  if (d) {
+    tooltip.innerHTML = d;
+    tooltip.style.display = 'block';
+    tooltip.style.left = (params.event.center.x + 16) + 'px';
+    tooltip.style.top  = (params.event.center.y - 8) + 'px';
+  }
+});
+network.on('blurNode', () => { tooltip.style.display = 'none'; });
+</script>
+</body>
+</html>

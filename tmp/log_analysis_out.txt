@@ -1,0 +1,87 @@
+﻿================================================================
+  NIFTY AI SYSTEM  |  LOG MONITOR v2
+  Generated: 2026-07-29 15:49:30
+================================================================
+
+ΓöÇΓöÇΓöÇΓöÇ SYSTEM SNAPSHOT ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  Cycles run      : 0
+  Lines analyzed  : 106,124
+  Filter rate     : 195200.0%  (1,952 blocked / 0 cycles)
+  Warnings        : 1,480   Errors: 0   Criticals: 1360
+
+ΓöÇΓöÇΓöÇΓöÇ METRIC 1 | TRADE COUNT ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  Trades executed : 0
+  Rate            : 0.00 per 100 cycles
+  Verdict         : ZERO TRADES  ΓÇö system still suppressed or market is genuinely flat
+
+ΓöÇΓöÇΓöÇΓöÇ METRIC 2 | ENTRY QUALITY ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  Entries analyzed : 120
+  STRONG entries   : 120  (100%)
+  MODERATE entries : 0  (0%)
+  WEAK entries     : 0  (0%)  <-- watch these
+  Avg dominance    : 95.6%  (target: >8%)
+  Avg gap          : 0.5263  (gate: 0.04)
+  BUY_CE / BUY_PE  : 0 / 120
+
+  Entry log:
+    BUY_PE  gap=0.571  dom=95.9%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.571  dom=95.9%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.503  dom=95.4%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.503  dom=95.4%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.478  dom=95.2%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.478  dom=95.2%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.494  dom=95.3%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.494  dom=95.3%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.482  dom=95.2%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.482  dom=95.2%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.520  dom=95.6%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.520  dom=95.6%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.571  dom=95.9%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.571  dom=95.9%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.608  dom=96.2%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.608  dom=96.2%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.513  dom=95.5%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.513  dom=95.5%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.523  dom=95.6%  regime=0.78  [STRONG]
+    BUY_PE  gap=0.523  dom=95.6%  regime=0.78  [STRONG]
+
+ΓöÇΓöÇΓöÇΓöÇ METRIC 3 | CONFIDENCE DISTRIBUTION (at gate) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  < 0.30 (noise)              630  ||||||||||||||||||||||||||||||
+
+  Avg blocked conf : 0.225  (gate: 0.32 in low-regime, 0.45 normal)
+  WARNING: Most signals still below 0.30. Regime penalty may still be too strong.
+
+ΓöÇΓöÇΓöÇΓöÇ METRIC 4 | CYCLE LATENCY ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  Slow cycles (>500ms) : 3
+  Average              : 346ms  (target: <250ms)
+  95th percentile      : 392ms
+  Max                  : 392ms
+  >500ms count         : 0
+  >1000ms count        : 0
+
+  IMPROVING ΓÇö but still above target. Check if old process is still running.
+
+ΓöÇΓöÇΓöÇΓöÇ NO-TRADE REASON BREAKDOWN ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    592x   30.3%  |||||||||||||||  P1: Bad time to trade: CLOSING
+    315x   16.1%  ||||||||  Low Confidence Gate
+    119x    6.1%  |||  Signal Deduplication: Same direction signal within 300s
+     84x    4.3%  ||  Early Kill: dominant_score 0.162 < 0.18000000000000002 (MPM=BALAN
+     25x    1.3%    Early Kill: dominant_score 0.148 < 0.18000000000000002 (MPM=BALAN
+     20x    1.0%    Early Kill: dominant_score 0.165 < 0.18000000000000002 (MPM=BALAN
+     18x    0.9%    Early Kill: dominant_score 0.147 < 0.18000000000000002 (MPM=BALAN
+     14x    0.7%    Signal Integrity: both sides collapsed (B=0.034 S=0.041)
+     12x    0.6%    Early Kill: dominant_score 0.175 < 0.18000000000000002 (MPM=BALAN
+     11x    0.6%    Early Kill: dominant_score 0.177 < 0.18000000000000002 (MPM=BALAN
+
+ΓöÇΓöÇΓöÇΓöÇ REGIME SUMMARY ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  No regime warnings logged ΓÇö regime confidence >= 0.60 all day.
+  All agents running at full weight.
+
+================================================================
+  FINAL VERDICT
+================================================================
+  OK    Entry quality: 0% weak (target: <30%)
+  WARN  1360 CRITICAL log entries ΓÇö investigate immediately
+================================================================
+  Lines: 106,124  |  Cycles: 0  |  Trades: 0
+================================================================

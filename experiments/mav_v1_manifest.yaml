@@ -1,0 +1,44 @@
+experiment:
+  id: MAV_v1
+  description: >
+    Validate Market Acceptance Validator against frozen baseline.
+
+baseline:
+  git_commit: HEAD
+  engine_version: 5.0.0
+
+candidate:
+  git_commit: HEAD
+  engine_version: 5.1.0
+
+dataset:
+  benchmark_version: v1
+  sessions:
+    - 2026-03-24
+    - 2026-03-25
+    - 2026-03-27
+    - 2026-04-01
+    - 2026-04-02
+    - 2026-04-09
+    - 2026-05-06
+    - 2026-05-07
+    - 2026-05-09
+    - 2026-05-12
+    - 2026-05-14
+
+features:
+  enable_mav: true
+  enable_dynamic_threshold: true
+  enable_ev: false
+  enable_new_exit: false
+
+metrics:
+  - gross_profit
+  - gross_loss
+  - profit_factor
+  - max_drawdown
+  - expectancy
+  - win_rate
+  - false_breakout_rate
+  - precision
+  - recall

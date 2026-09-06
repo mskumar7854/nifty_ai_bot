@@ -1,0 +1,402 @@
+{
+  "nodes": [
+    {
+      "id": "main_NiftyAISystem",
+      "label": "NiftyAISystem",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "main_execute_signal",
+      "label": "execute_signal()",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "main_run_cycle",
+      "label": "_run_cycle()",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "main_live_execute",
+      "label": "_live_execute()",
+      "file_type": "code",
+      "source_file": "main.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "master_MasterDecisionEngine",
+      "label": "MasterDecisionEngine",
+      "file_type": "code",
+      "source_file": "core/master_decision_engine.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "master_approve",
+      "label": "master.approve()",
+      "file_type": "code",
+      "source_file": "core/master_decision_engine.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "pm_PositionManager",
+      "label": "PositionManager",
+      "file_type": "code",
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "pm_open_position",
+      "label": "open_position()",
+      "file_type": "code",
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "pm_close_position",
+      "label": "close_position()",
+      "file_type": "code",
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tg_TelegramController",
+      "label": "TelegramController",
+      "file_type": "code",
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tg_handle_callback",
+      "label": "handle_callback_query()",
+      "file_type": "code",
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tg_execute_auto",
+      "label": "_execute_auto()",
+      "file_type": "code",
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "sb_SignalBridge",
+      "label": "SignalBridge",
+      "file_type": "code",
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "sb_evaluate",
+      "label": "SignalBridge.evaluate()",
+      "file_type": "code",
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "sb_telegram_gate",
+      "label": "Telegram Strict Gate (L7.5)",
+      "file_type": "code",
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "sb_no_trade",
+      "label": "_no_trade() \u2192 rejection_logger",
+      "file_type": "code",
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "rm_RiskManager",
+      "label": "RiskManager (nifty_strategy)",
+      "file_type": "code",
+      "source_file": "nifty_strategy/risk_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "rm_calc_size",
+      "label": "calculate_position_size() [Telegram scaling]",
+      "file_type": "code",
+      "source_file": "nifty_strategy/risk_manager.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tl_TradeLogger",
+      "label": "TradeLogger",
+      "file_type": "code",
+      "source_file": "utils/trade_logger.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tl_log_trade",
+      "label": "log_trade() \u2192 trades.ndjson",
+      "file_type": "code",
+      "source_file": "utils/trade_logger.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tl_log_rejection",
+      "label": "log_rejection() \u2192 rejections.ndjson",
+      "file_type": "code",
+      "source_file": "utils/trade_logger.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "de_DecisionEngineV3",
+      "label": "DecisionEngineV3 (23 Agents)",
+      "file_type": "code",
+      "source_file": "core/decision_engine_v3.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    },
+    {
+      "id": "tr_TradeRecord",
+      "label": "TradeRecord (NDJSON model)",
+      "file_type": "code",
+      "source_file": "models/trade_record.py",
+      "source_location": null,
+      "source_url": null,
+      "captured_at": null,
+      "author": null,
+      "contributor": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "de_DecisionEngineV3",
+      "target": "main_run_cycle",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_run_cycle",
+      "target": "master_approve",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_run_cycle",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "master_approve",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "pm_open_position",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_live_execute",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "tg_handle_callback",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "tg_execute_auto",
+      "target": "main_execute_signal",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "core/telegram_controller.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "sb_evaluate",
+      "target": "sb_telegram_gate",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "sb_telegram_gate",
+      "target": "sb_no_trade",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "sb_no_trade",
+      "target": "tl_log_rejection",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "nifty_strategy/signal_bridge.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "main_execute_signal",
+      "target": "rm_calc_size",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "main.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "pm_close_position",
+      "target": "tl_log_trade",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "core/position_manager.py",
+      "source_location": null,
+      "weight": 1.0
+    },
+    {
+      "source": "tl_log_trade",
+      "target": "tr_TradeRecord",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "utils/trade_logger.py",
+      "source_location": null,
+      "weight": 1.0
+    }
+  ],
+  "hyperedges": [],
+  "input_tokens": 0,
+  "output_tokens": 0
+}

@@ -1,0 +1,68 @@
+{
+  "date": "2026-08-17",
+  "signals": {
+    "total": 339,
+    "buy_ce": 304,
+    "buy_pe": 35,
+    "executed": 8,
+    "rejected": 331,
+    "capacity_rejected": 0,
+    "predictive_rejected": 331,
+    "predictive_reasons": {
+      "Failed trade filter": 282,
+      "REJECTED_REGIME_GRADE_B+_IN_SQUEEZE": 10,
+      "REJECTED_SAME_STRUCTURAL_TREND": 9,
+      "PEV_TOO_LOW": 7,
+      "BAD_STRUCTURE_EXPANDING": 6,
+      "LOW_CONFIDENCE": 5,
+      "BAD_STRUCTURE_UNDEFINED": 2,
+      "REJECTED_LOW_EV_+0.39R": 1,
+      "REJECTED_LOW_EV_+0.30R": 1,
+      "REJECTED_LOW_EV_+0.22R": 1,
+      "CHOP_ZONE_ACTIVE": 1,
+      "REJECTED_LOW_EV_+0.38R": 1,
+      "REJECTED_LOW_EV_+0.32R": 1,
+      "REJECTED_LOW_EV_+0.40R": 1,
+      "REJECTED_LOW_EV_+0.31R": 1,
+      "REJECTED_LOW_EV_+0.16R": 1,
+      "REJECTED_LOW_EV_+0.21R": 1
+    },
+    "capacity_reasons": {}
+  },
+  "market": {
+    "open": 0,
+    "high": 0,
+    "low": 0,
+    "close": 0,
+    "gap_pct": 0,
+    "status": "INCOMPLETE_SESSION_DATA"
+  },
+  "errors": {
+    "fatal": 0,
+    "recoverable": 0,
+    "infrastructure_degraded": false
+  },
+  "execution_quality": {
+    "participation_pct": 90.2,
+    "abstention_pct": 9.8,
+    "avg_confidence": 53.5,
+    "avg_ev": 1.06
+  },
+  "filter_quality": {
+    "TP": 0.0,
+    "TN": 75.0,
+    "FP": 0.0,
+    "FN": 57.0,
+    "Precision": 0.0,
+    "Recall": 0.0,
+    "Specificity": 1.0,
+    "F1_Score": 0.0,
+    "MCC": 0.0
+  },
+  "campaign": {
+    "completed": 11,
+    "required": 20,
+    "remaining": 9
+  },
+  "overall_status": "\u2705 HEALTHY"
+}

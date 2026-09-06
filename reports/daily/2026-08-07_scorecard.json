@@ -1,0 +1,49 @@
+{
+  "date": "2026-08-07",
+  "signals": {
+    "total": 16,
+    "buy_ce": 7,
+    "buy_pe": 9,
+    "executed": 0,
+    "rejected": 16,
+    "rejection_reasons": {
+      "LOW_AGENT_AGREEMENT": 16
+    }
+  },
+  "market": {
+    "open": 0,
+    "high": 0,
+    "low": 0,
+    "close": 0,
+    "gap_pct": 0,
+    "status": "INCOMPLETE_SESSION_DATA"
+  },
+  "errors": {
+    "fatal": 0,
+    "recoverable": 0,
+    "infrastructure_degraded": false
+  },
+  "execution_quality": {
+    "participation_pct": 42.9,
+    "abstention_pct": 57.1,
+    "avg_confidence": 60.2,
+    "avg_ev": 0.49
+  },
+  "filter_quality": {
+    "TP": 0.0,
+    "TN": 3.0,
+    "FP": 0.0,
+    "FN": 4.0,
+    "Precision": 0.0,
+    "Recall": 0.0,
+    "Specificity": 1.0,
+    "F1_Score": 0.0,
+    "MCC": 0.0
+  },
+  "campaign": {
+    "completed": 5,
+    "required": 20,
+    "remaining": 15
+  },
+  "overall_status": "\u2705 HEALTHY_NO_TRADE"
+}
