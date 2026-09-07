@@ -46,6 +46,26 @@ class TimeSessionAgent(BaseAgent):
 
         now = snapshot.timestamp
         self.logger.debug(f"Current Time: {now}")
+
+        if isinstance(now, str):
+            try:
+                now = pd.to_datetime(now)
+            except Exception:
+                pass
+
+        # Timezone safety: convert to IST if timezone-aware
+        if getattr(now, 'tzinfo', None) is not None:
+            try:
+                ist = pytz.timezone("Asia/Kolkata")
+                now = now.astimezone(ist)
+            except Exception:
+                pass
+
+        # Guard against corrupt or epoch timestamps (e.g. 1970-01-01 from integer indexes)
+        if getattr(now, 'year', 2026) < 2020:
+            self.logger.warning(f"Corrupt/epoch snapshot timestamp detected: {now}. Falling back to system clock.")
+            now = datetime.now()
+
         current_time = now.time()
         weekday = now.strftime("%A")
 

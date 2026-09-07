@@ -80,7 +80,7 @@ class MultiSessionCounterfactualReplay:
             has_levels = bool(entry_p > 0 and sl_p > 0 and tp_p > 0)
             
             if has_levels:
-                sig_type = "BUY_CE" if sig_dir == "LONG" else "BUY_PE" if sig_dir == "SHORT" else "BUY_CE"
+                sig_type = "BUY_PE" if sig_dir in ("SHORT", "BEARISH") else "BUY_CE"
                 spot_entry = entry_p
                 sl_dist = abs(entry_p - sl_p)
                 tp_dist = abs(tp_p - entry_p)

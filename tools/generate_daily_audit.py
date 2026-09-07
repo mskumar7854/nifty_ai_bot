@@ -459,6 +459,8 @@ def _get_campaign_progress(target_date: str, current_overall_status: str) -> dic
         elif "SAFETY FREEZE" in status or "HALTED" in status:
             # Valid observed session with telemetry capture, but freeze prevented directional candidates for replay
             capture_valid_count += 1
+        elif "INSUFFICIENT" in status:
+            capture_valid_count += 1
         elif "PASS" in status or "HEALTHY" in status or "VALID" in status:
             capture_valid_count += 1
             economic_valid_count += 1

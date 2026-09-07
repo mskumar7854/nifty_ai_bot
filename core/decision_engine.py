@@ -166,6 +166,7 @@ class DecisionEngine:
             self.experiment_config = experiment_config
 
         self.spike_freeze_until = 0.0
+        self._last_spike_candle_id = None
         self.session_started_date = None
         self.fingerprint = SystemFingerprint()
         
@@ -548,41 +549,47 @@ class DecisionEngine:
                 self.gap_penalty_mgr.new_session(gap_pts, estimated_daily_atr)
                 self.session_gap_detected = gap_pts > 0  # kept for metadata compat
 
-        if df is not None and not df.empty:
-            last_candle = df.iloc[-1]
-            if 'high' in last_candle and 'low' in last_candle:
-                candle_range = last_candle['high'] - last_candle['low']
-                # Require range to be at least 30 points AND > 2x ATR for it to be considered a freeze-worthy spike
-                if snapshot.atr > 0 and candle_range > 30 and candle_range > 2 * snapshot.atr:
-                    self.spike_freeze_until = time.time() + 600  # 10 minute freeze
-                    try:
-                        # Extract candle details for diagnostics
-                        c_open = last_candle.get('open', 0)
-                        c_high = last_candle['high']
-                        c_low = last_candle['low']
-                        c_close = last_candle.get('close', 0)
-                        c_vol = last_candle.get('volume', 0)
-                        
-                        # Calculate data staleness
-                        if hasattr(last_candle, 'name') and hasattr(last_candle.name, 'timestamp'):
-                            c_time = last_candle.name.timestamp()
-                        else:
-                            c_time = time.time()
-                        staleness = time.time() - c_time
-                        
-                        # Check for API latency (from snapshot)
-                        snap_latency = getattr(snapshot, 'latency_ms', 0)
-                        
-                        self.logger.warning(
-                            f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.\n"
-                            f"   [DIAGNOSTICS] O:{c_open:.1f} H:{c_high:.1f} L:{c_low:.1f} C:{c_close:.1f} Vol:{c_vol} | "
-                            f"Staleness: {staleness:.1f}s | API Latency: {snap_latency}ms"
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.")
-        
+        # ── Intraday Spike Protection (Phase 2) ──
         if time.time() < self.spike_freeze_until:
             return self._no_trade_signal(snapshot, ["Phase 2 Halt: Intraday Spike Freeze active"], outputs_dict)
+
+        if df is not None and not df.empty:
+            last_candle = df.iloc[-1]
+            candle_id = getattr(last_candle, 'name', None) or last_candle.get('timestamp', None)
+            if 'high' in last_candle and 'low' in last_candle:
+                candle_range = float(last_candle['high']) - float(last_candle['low'])
+                # Require range to be at least 30 points AND > 2x ATR for it to be considered a freeze-worthy spike
+                if snapshot.atr > 0 and candle_range > 30 and candle_range > 2 * snapshot.atr:
+                    if getattr(self, '_last_spike_candle_id', None) != candle_id:
+                        self._last_spike_candle_id = candle_id
+                        self.spike_freeze_until = time.time() + 600  # 10 minute freeze
+                        try:
+                            # Extract candle details for diagnostics
+                            c_open = last_candle.get('open', 0)
+                            c_high = last_candle['high']
+                            c_low = last_candle['low']
+                            c_close = last_candle.get('close', 0)
+                            c_vol = last_candle.get('volume', 0)
+                            
+                            # Calculate data staleness
+                            if hasattr(last_candle, 'name') and hasattr(last_candle.name, 'timestamp'):
+                                c_time = last_candle.name.timestamp()
+                            else:
+                                c_time = time.time()
+                            staleness = time.time() - c_time
+                            
+                            # Check for API latency (from snapshot)
+                            snap_latency = getattr(snapshot, 'latency_ms', 0)
+                            
+                            self.logger.warning(
+                                f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.\n"
+                                f"   [DIAGNOSTICS] O:{c_open:.1f} H:{c_high:.1f} L:{c_low:.1f} C:{c_close:.1f} Vol:{c_vol} | "
+                                f"Staleness: {staleness:.1f}s | API Latency: {snap_latency}ms"
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"⚡ INTRADAY SPIKE! Range {candle_range:.1f} > 30 & 2xATR ({2*snapshot.atr:.1f}). Freezing for 10m.")
+
+                        return self._no_trade_signal(snapshot, ["Phase 2 Halt: Intraday Spike Freeze active"], outputs_dict)
 
         # ── Opening Volatility Context Flag ──
         # Use the live gap penalty multiplier as a proxy for "danger zone":

@@ -151,6 +151,20 @@ class OptionStrikeSelector:
         reg_enum = None
         if isinstance(regime, RegimeContext):
             reg_enum = regime.normalized_regime
+        elif isinstance(regime, dict):
+            raw = regime.get("normalized_regime") or regime.get("raw_regime")
+            if isinstance(raw, MarketRegime):
+                reg_enum = raw
+            elif isinstance(raw, str) and raw:
+                try:
+                    reg_enum = MarketRegime[raw.upper()]
+                except KeyError:
+                    try:
+                        reg_enum = MarketRegime(raw.upper())
+                    except ValueError:
+                        reg_enum = MarketRegime.UNKNOWN
+            else:
+                reg_enum = MarketRegime.UNKNOWN
         elif isinstance(regime, MarketRegime):
             reg_enum = regime
         elif isinstance(regime, str) and regime:

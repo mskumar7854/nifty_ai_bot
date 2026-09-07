@@ -394,7 +394,7 @@ class DataManager:
                         # Remove timezone info for comparison with naive datetime.now()
                         if hasattr(candle_ts, "tzinfo") and candle_ts.tzinfo is not None:
                             candle_ts = candle_ts.replace(tzinfo=None)
-                        if (self.last_market_activity_ts is None or
+                        if isinstance(candle_ts, datetime) and (self.last_market_activity_ts is None or
                                 candle_ts > self.last_market_activity_ts):
                             self.last_market_activity_ts = candle_ts
                             self.logger.info(f"📡 MARKET_ACTIVITY_UPDATE ts={self.last_market_activity_ts} source=candle_ts (candle_ts newer)")
@@ -869,6 +869,36 @@ class DataManager:
             iv=self._sim_vix
         )
 
+    @staticmethod
+    def _extract_snapshot_timestamp(latest) -> datetime:
+        """Extract a valid datetime timestamp from a DataFrame row or index, guarding against epoch/corrupt values."""
+        ts = None
+        if 'timestamp' in latest and pd.notna(latest['timestamp']):
+            ts = latest['timestamp']
+        elif isinstance(latest.name, (datetime, pd.Timestamp)):
+            ts = latest.name
+        elif isinstance(latest.name, str) and not latest.name.isdigit():
+            try:
+                ts = pd.to_datetime(latest.name)
+            except Exception:
+                pass
+
+        if ts is None or isinstance(ts, (int, float)):
+            ts = datetime.now()
+        elif hasattr(ts, 'to_pydatetime'):
+            ts = ts.to_pydatetime()
+        elif isinstance(ts, str):
+            try:
+                ts = pd.to_datetime(ts).to_pydatetime()
+            except Exception:
+                ts = datetime.now()
+
+        # Guard against corrupt or epoch-based timestamps (e.g. 1970-01-01 from integer RangeIndex)
+        if getattr(ts, 'year', 2026) < 2020:
+            ts = datetime.now()
+
+        return ts
+
     def get_snapshot_incremental(self, df: pd.DataFrame) -> MarketSnapshot:
         """
         🚀 DELTA STATE CACHING
@@ -940,7 +970,7 @@ class DataManager:
         expiry_ctx = OptionContractBuilder.get_expiry_context()
 
         return MarketSnapshot(
-            timestamp=latest.name if isinstance(latest.name, datetime) else pd.to_datetime(latest.name),
+            timestamp=self._extract_snapshot_timestamp(latest),
             price=price, open=latest['open'], high=high, low=low, close=price,
             volume=int(vol),
             vwap=vwap_val,
@@ -1014,7 +1044,7 @@ class DataManager:
         expiry_ctx = OptionContractBuilder.get_expiry_context()
 
         snapshot = MarketSnapshot(
-            timestamp=latest.name if isinstance(latest.name, datetime) else pd.to_datetime(latest.name),
+            timestamp=self._extract_snapshot_timestamp(latest),
             price=latest['close'],
             open=latest['open'],
             high=latest['high'],
@@ -1125,31 +1155,33 @@ class DataManager:
         if self.tick_count % 50 == 0:
             self._sim_trend = np.random.choice([-1, 1])
 
-        # Price movement
-        noise = np.random.normal(0, 8)
-        trend_component = self._sim_trend * np.random.uniform(1, 5)
+        # Price movement (calibrated for realistic Nifty 1m/tick behavior)
+        noise = np.random.normal(0, 3.0)
+        trend_component = self._sim_trend * np.random.uniform(0.5, 2.0)
         self._sim_price += trend_component + noise
         self._sim_price = max(23000, min(23800, self._sim_price))
 
         # VIX movement
-        self._sim_vix += np.random.normal(0, 0.3)
+        self._sim_vix += np.random.normal(0, 0.1)
         self._sim_vix = max(9, min(25, self._sim_vix))
 
-        # Generate OHLCV candle
+        # Generate OHLCV candle (calibrated for realistic ~10pt ATR without synthetic spike lock)
         new_close = self._sim_price
-        new_open = new_close + np.random.normal(0, 10)
-        new_high = max(new_open, new_close) + abs(np.random.normal(0, 15))
-        new_low = min(new_open, new_close) - abs(np.random.normal(0, 15))
+        body = np.random.normal(0, 4.5)
+        new_open = new_close - body
+        new_high = max(new_open, new_close) + abs(np.random.normal(0, 3.5))
+        new_low = min(new_open, new_close) - abs(np.random.normal(0, 3.5))
         new_volume = int(np.random.uniform(50000, 500000))
 
+        now_ts = datetime.now()
         new_row = pd.DataFrame([{
-            'timestamp': datetime.now(),
+            'timestamp': now_ts,
             'open': round(new_open, 2),
             'high': round(new_high, 2),
             'low': round(new_low, 2),
             'close': round(new_close, 2),
             'volume': new_volume,
-        }])
+        }], index=pd.DatetimeIndex([now_ts], name='timestamp'))
 
         if self.ohlcv_data is None:
             # Initialize with historical data
@@ -1157,12 +1189,12 @@ class DataManager:
 
         # Append new data
         self.ohlcv_data = pd.concat(
-            [self.ohlcv_data, new_row], ignore_index=True
+            [self.ohlcv_data, new_row]
         )
 
         # Keep only last 200 candles
         if len(self.ohlcv_data) > 200:
-            self.ohlcv_data = self.ohlcv_data.tail(200).reset_index(drop=True)
+            self.ohlcv_data = self.ohlcv_data.tail(200)
 
         return self.ohlcv_data
 
@@ -1172,14 +1204,15 @@ class DataManager:
         price = self._sim_price - 200  # Start lower
 
         for i in range(100):
-            noise = np.random.normal(0, 8)
-            trend = np.random.choice([-1, 1]) * np.random.uniform(1, 4)
+            noise = np.random.normal(0, 3.0)
+            trend = np.random.choice([-1, 1]) * np.random.uniform(0.5, 2.5)
             price += trend + noise
             price = max(23000, min(23800, price))
 
-            o = price + np.random.normal(0, 10)
-            h = max(o, price) + abs(np.random.normal(0, 15))
-            l = min(o, price) - abs(np.random.normal(0, 15))
+            body = np.random.normal(0, 4.5)
+            o = price - body
+            h = max(o, price) + abs(np.random.normal(0, 3.5))
+            l = min(o, price) - abs(np.random.normal(0, 3.5))
             v = int(np.random.uniform(50000, 500000))
 
             data.append({
@@ -1191,7 +1224,9 @@ class DataManager:
                 'volume': v,
             })
 
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        df.set_index('timestamp', drop=False, inplace=True)
+        return df
 
     def _sim_ce_oi(self) -> float:
         """Simulated CE OI"""

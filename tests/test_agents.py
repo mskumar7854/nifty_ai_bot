@@ -16,6 +16,8 @@ from agents.market_agent import MarketAgent
 from agents.momentum_agent import MomentumAgent
 from agents.trap_agent import TrapAgent
 from agents.risk_agent import RiskAgent
+from agents.time_session_agent import TimeSessionAgent
+from core.data_manager import DataManager
 
 
 @pytest.fixture
@@ -107,9 +109,42 @@ class TestRiskAgent:
         assert output.confidence > 0
         assert "trades_today" in output.details
 
-#    def test_daily_limit_reached(self, settings, sample_df, bullish_snapshot):
-#        pass
+
+class TestTimeSessionAgent:
+    def test_open_market_permission(self, settings, sample_df):
+        # 09:28 on a Monday
+        snap = MarketSnapshot(
+            timestamp=datetime(2026, 9, 7, 9, 28, 5),
+            price=24500, open=24500, high=24500, low=24500, close=24500,
+            volume=1000, vwap=24500, rsi=50, ema_fast=24500, ema_slow=24500, atr=20
+        )
+        agent = TimeSessionAgent(settings)
+        out = agent.run(sample_df, snap)
+        assert out.is_blocker is False
+        assert out.confidence >= 40
+
+    def test_epoch_timestamp_fallback(self, settings, sample_df):
+        # Epoch timestamp corruption (1970-01-01) should fall back to system clock and not crash
+        snap = MarketSnapshot(
+            timestamp=pd.to_datetime(100),
+            price=24500, open=24500, high=24500, low=24500, close=24500,
+            volume=1000, vwap=24500, rsi=50, ema_fast=24500, ema_slow=24500, atr=20
+        )
+        agent = TimeSessionAgent(settings)
+        out = agent.run(sample_df, snap)
+        assert out.agent_name == "time_session"
+
+
+class TestDataManagerSnapshot:
+    def test_simulated_snapshot_timestamp_integrity(self, settings):
+        dm = DataManager(settings)
+        df = dm._fetch_simulated()
+        snap = dm.get_snapshot_incremental(df)
+        assert isinstance(snap.timestamp, datetime)
+        assert snap.timestamp.year >= 2026
+        assert isinstance(df.index, pd.DatetimeIndex)
 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+

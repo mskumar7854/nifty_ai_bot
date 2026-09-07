@@ -269,7 +269,9 @@ class TradingOrchestrator:
                     v2_kill_reason = ""
                     if 'result' in locals() and result:
                         if getattr(result, "signal", None):
-                            v2_decision = result.signal.action.value if hasattr(result.signal.action, "value") else str(result.signal.action)
+                            sig = result.signal
+                            action_val = getattr(sig, "action", getattr(sig, "signal_type", getattr(sig, "direction", "NO_SIGNAL")))
+                            v2_decision = action_val.value if hasattr(action_val, "value") else str(action_val)
                             if not result.approved and hasattr(result, "gate_results") and result.gate_results:
                                 v2_kill_reason = result.gate_results[-1].reason
                         

@@ -334,3 +334,53 @@ class TestRegimeInvariantsAndFreeze:
         base_snapshot.regime_state = 99999
         res = engine._classify_market(base_snapshot, outputs={})
         assert res == MarketRegime.RANGING
+
+    def test_9_spike_freeze_lifecycle_and_no_perpetual_extension(self, settings, base_snapshot):
+        """
+        Test 9: Spike freeze triggers on wide candle (>30 & >2*ATR), does NOT
+        perpetually re-extend the timer during active freeze, and expires cleanly.
+        """
+        engine = DecisionEngine(settings)
+        base_snapshot.atr = 12.0
+
+        # 1. Wide candle (range = 40.0 > 30 and > 2 * 12 = 24)
+        spike_ts = datetime.now()
+        df_spike = pd.DataFrame([{
+            'open': 23670.0,
+            'high': 23700.0,
+            'low': 23660.0,
+            'close': 23690.0,
+            'volume': 100000,
+        }], index=pd.DatetimeIndex([spike_ts], name='timestamp'))
+
+        # Process cycle 1: Spike triggers freeze
+        sig1 = engine.process(df_spike, base_snapshot)
+        assert sig1.signal_type == SignalType.NO_TRADE
+        assert "Phase 2 Halt: Intraday Spike Freeze active" in sig1.reasons[0]
+        initial_freeze_until = engine.spike_freeze_until
+        assert initial_freeze_until > time.time() + 590
+
+        # Process cycle 2 (subsequent tick on same or another spike candle while frozen):
+        # Freeze timer MUST NOT be pushed forward
+        time.sleep(0.05)
+        sig2 = engine.process(df_spike, base_snapshot)
+        assert sig2.signal_type == SignalType.NO_TRADE
+        assert "Phase 2 Halt: Intraday Spike Freeze active" in sig2.reasons[0]
+        assert engine.spike_freeze_until == initial_freeze_until  # Timer was not extended!
+
+        # Process cycle 3: Simulate freeze expiry
+        engine.spike_freeze_until = time.time() - 1  # Expired
+
+        # Normal candle (range = 10.0, not a spike)
+        normal_ts = spike_ts + pd.Timedelta(minutes=10)
+        df_normal = pd.DataFrame([{
+            'open': 23670.0,
+            'high': 23675.0,
+            'low': 23665.0,
+            'close': 23672.0,
+            'volume': 100000,
+        }], index=pd.DatetimeIndex([normal_ts], name='timestamp'))
+
+        sig3 = engine.process(df_normal, base_snapshot)
+        # Freeze is cleared, no longer halted on spike freeze
+        assert "Phase 2 Halt: Intraday Spike Freeze active" not in (sig3.reasons[0] if sig3.reasons else "")
