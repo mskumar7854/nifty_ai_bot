@@ -1486,9 +1486,9 @@ class SimulationEngine:
                     trade.timestamp.isoformat() if trade.timestamp else None,
                     trade.timestamp.isoformat() if trade.timestamp else None, # opened_at
                     datetime.now().isoformat() if trade.result != "OPEN" else None, # closed_at
-                    trade.signal_type.value if hasattr(trade.signal_type, 'value') else str(trade.signal_type),
-                    trade.spot_entry, # We approximate strike using spot if not explicitly passed
-                    "CE" if "CE" in str(trade.signal_type) else ("PE" if "PE" in str(trade.signal_type) else ""),
+                    (trade.instrument.get("symbol") if getattr(trade, "instrument", None) and trade.instrument.get("symbol") else (trade.signal_type.value if hasattr(trade.signal_type, 'value') else str(trade.signal_type))),
+                    (float(trade.instrument.get("strike")) if getattr(trade, "instrument", None) and trade.instrument.get("strike") else trade.spot_entry),
+                    (trade.instrument.get("type") if getattr(trade, "instrument", None) and trade.instrument.get("type") else ("CE" if "CE" in str(trade.signal_type) else ("PE" if "PE" in str(trade.signal_type) else ""))),
                     trade.qty,
                     trade.entry_price,
                     trade.stop_loss,

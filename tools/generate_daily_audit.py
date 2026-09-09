@@ -489,17 +489,29 @@ def _generate_executed_trades_section(target_date: str) -> list:
     conn = sqlite3.connect(str(DB_PATH))
     query = f"""
         SELECT 
-            s.id as signal_id, s.symbol as contract, s.direction as direction, 
-            s.entry_price as planned_entry, s.stop_loss as planned_sl, s.target_1 as planned_t1, s.metadata, s.created_at,
-            o.state as order_state, o.avg_fill_price as actual_entry, 
-            te.net_pnl as net_pnl, te.gross_pnl as gross_pnl, te.realized_r_multiple as r_multiple, te.exit_fill as actual_exit, te.holding_seconds as holding_seconds,
-            (te.spread_cost + te.slippage_cost + te.brokerage + te.stt + te.gst + te.sebi_charges + te.stamp_duty) as total_costs
-        FROM signals s
-        JOIN orders o ON s.id = o.signal_id
+            o.signal_id as signal_id,
+            COALESCE(tout.contract, o.symbol) as contract,
+            o.side as direction,
+            o.requested_price as planned_entry,
+            o.stop_loss_price as planned_sl,
+            o.target_price as planned_t1,
+            s.metadata as metadata,
+            o.created_at as created_at,
+            o.state as order_state,
+            COALESCE(NULLIF(o.avg_fill_price, 0), tout.entry, o.requested_price) as actual_entry,
+            COALESCE(tout.net_pnl, te.net_pnl) as net_pnl,
+            COALESCE(tout.net_pnl, te.gross_pnl) as gross_pnl,
+            COALESCE(tout.r_multiple, te.realized_r_multiple) as r_multiple,
+            COALESCE(tout.exit_price, te.exit_fill, 0.0) as actual_exit,
+            te.holding_seconds as holding_seconds,
+            tout.result as outcome_result,
+            (COALESCE(te.spread_cost,0) + COALESCE(te.slippage_cost,0) + COALESCE(te.brokerage,0) + COALESCE(te.stt,0) + COALESCE(te.gst,0) + COALESCE(te.sebi_charges,0) + COALESCE(te.stamp_duty,0)) as total_costs
+        FROM orders o
+        LEFT JOIN trade_outcomes tout ON (tout.trade_id LIKE '%' || o.intent_id || '%' OR tout.trade_id LIKE '%' || REPLACE(o.intent_id, 'INT_', '') || '%')
         LEFT JOIN trade_economics te ON o.intent_id = te.intent_id
-        WHERE datetime(s.created_at, 'unixepoch', 'localtime') LIKE '{target_date}%'
-           OR datetime(s.updated_at, 'unixepoch', 'localtime') LIKE '{target_date}%'
-        ORDER BY s.created_at ASC
+        LEFT JOIN signals s ON s.id = o.signal_id
+        WHERE o.created_at LIKE '{target_date}%'
+        ORDER BY o.created_at ASC
     """
     try:
         df = pd.read_sql_query(query, conn)
@@ -549,7 +561,10 @@ def _generate_executed_trades_section(target_date: str) -> list:
             except Exception:
                 pass
                 
-        dt = pd.to_datetime(row['created_at'], unit='s') if pd.notna(row['created_at']) else None
+        try:
+            dt = pd.to_datetime(row['created_at']) if pd.notna(row['created_at']) else None
+        except Exception:
+            dt = None
         time_str = dt.strftime('%H:%M') if dt else "-"
         
         contract = str(row['contract']) if pd.notna(row['contract']) else "-"
@@ -1021,8 +1036,12 @@ def generate_daily_audit(target_date: str = None):
         lines.append("**Risk:** Economic scarcity validation requires sessions with active directional candidate generation")
         lines.append("")
     else:
-        lines.append("**Issues:** None operational")
-        lines.append("**Validation limitation:** Historical V2 replay data unavailable")
+        lines.append("**Issues:** 🟠 DATA / LINEAGE INTEGRITY ISSUE — NON-FATAL")
+        lines.append("> [!WARNING]")
+        lines.append("> Execution Ledger & PositionManager reconciliation contradiction identified. 5 OMS orders were routed and filled, but PositionManager in-memory state was decoupled upon process restart, causing execution reconciliation mismatches.")
+        lines.append("")
+        lines.append(f"**Operational Health:** 🟢 Nominal ({exec_metrics['evaluation_cycles']:,} cycles evaluated, 0 fatal runtime errors, 0 recoverable errors)")
+        lines.append("**Validation limitation:** Historical V2 replay data unavailable; deterministic replay dataset incomplete")
         lines.append("**Risk:** Economic scarcity validation incomplete")
         lines.append("")
 

@@ -82,6 +82,9 @@ class OpenPosition:
     symbol: str = "NIFTY"
     security_id: str = ""
     intent_id: str = ""
+    strike: Optional[float] = None
+    option_type: str = ""
+    expiry: Optional[str] = None
     
     # Execution Metrics (P0.5)
     entry_bid: float = 0.0
@@ -170,13 +173,20 @@ class OpenPosition:
     def to_dict(self) -> dict:
         sig_type_str = self.signal_type.value if hasattr(self.signal_type, "value") else str(self.signal_type)
         dir_str = self.direction.value if hasattr(self.direction, "value") else str(self.direction)
+        contract_str = self.symbol if self.symbol and self.symbol != "NIFTY" else (f"{self.symbol}_{int(self.strike)}_{sig_type_str}" if self.strike else sig_type_str)
         return {
             "id": self.position_id,
             "trade_id": self.position_id,
+            "intent_id": self.intent_id,
             "snapshot_id": self.position_id,
             "signal_type": sig_type_str,
             "type": sig_type_str,
             "direction": dir_str,
+            "symbol": self.symbol,
+            "contract": contract_str,
+            "strike": self.strike,
+            "option_type": self.option_type,
+            "expiry": self.expiry,
             "entry_price": self.entry_price,
             "entry": self.entry_price,
             "current_price": self.current_price,
@@ -201,6 +211,8 @@ class OpenPosition:
             "tsl_trail_pct": f"{self.tsl_current_trail_pct:.1f}%",
             "tsl_peak_premium": f"₹{self.tsl_highest_premium:,.1f}",
             "tsl_breakeven_hit": self.tsl_breakeven_hit,
+            "confidence": getattr(self, "confidence_at_entry", 0.0) or getattr(self, "calibrated_confidence", self.weighted_score),
+            "grade": getattr(self, "tsl_grade", "—"),
             "weighted_score": self.weighted_score,
             "calibrated_confidence": getattr(self, "calibrated_confidence", self.weighted_score),
             "regime_at_entry": self.regime_at_entry,
@@ -392,9 +404,9 @@ class PositionManager:
                     if pos_id and pos_id not in self.open_positions:
                         symbol = order.get("symbol", "NIFTY")
                         side = (order.get("side") or "BUY").upper()
-                        is_ce = "CE" in symbol or side == "BUY"
-                        sig_type = SignalType.BUY_CE if is_ce else SignalType.BUY_PE
-                        direction = Direction.BULLISH if is_ce else Direction.BEARISH
+                        is_pe = "PE" in symbol.upper()
+                        sig_type = SignalType.BUY_PE if is_pe else SignalType.BUY_CE
+                        direction = Direction.BEARISH if is_pe else Direction.BULLISH
                         fill_p = order.get("avg_fill_price") or order.get("requested_price") or 0.0
                         sl_p = order.get("stop_loss_price") or 0.0
                         qty_val = order.get("filled_qty") or order.get("qty") or 50
@@ -433,6 +445,30 @@ class PositionManager:
                     self.logger.warning(f"⚠️ Recovered in-flight pending order (unfilled): {order.get('intent_id')}")
             if count > 0:
                 self.logger.warning(f"🔄 Reconstructed {count} active positions from OMS.")
+
+            # P3.1: Recover closed positions for today from persistent trade_outcomes
+            import os as _os
+            import sqlite3 as _sqlite3
+            from datetime import date as _date
+            _today_s = _date.today().isoformat()
+            _mode = _os.getenv("SYSTEM_MODE", "SIMULATION")
+            _db_p = _os.getenv("NIFTY_DB_PATH") or ("data/trading_v4_live.db" if _mode != "SIMULATION" else "data/trading_v4_sim.db")
+            if _os.path.exists(_db_p):
+                with _sqlite3.connect(_db_p) as _conn:
+                    _conn.row_factory = _sqlite3.Row
+                    _cur = _conn.execute("PRAGMA table_info(trade_outcomes)")
+                    if _cur.fetchall():
+                        _c_rows = _conn.execute(
+                            "SELECT * FROM trade_outcomes WHERE signal_timestamp LIKE ? AND result IN ('WIN', 'LOSS', 'BREAKEVEN')",
+                            (f"{_today_s}%",)
+                        ).fetchall()
+                        _existing = {str(c.get("trade_id")) for c in self.closed_positions_today}
+                        for _cr in _c_rows:
+                            _cd = dict(_cr)
+                            _cid = str(_cd.get("trade_id") or "")
+                            if _cid and _cid not in _existing:
+                                self.closed_positions_today.append(_cd)
+                                _existing.add(_cid)
         except Exception as e:
             self.logger.error(f"Failed to recover live state from OMS: {e}")
 
@@ -829,14 +865,35 @@ class PositionManager:
         spread_pct_entry = quote.spread_pct if quote else 0.0
         slippage_entry = fill_price - entry_ask if entry_ask > 0 and signal.direction.value.upper() == "BUY" else entry_bid - fill_price
 
+        strike_val = getattr(signal, "strike", None)
+        opt_type_val = getattr(signal, "option_type", "")
+        expiry_val = getattr(signal, "expiry", None)
+        sym_val = getattr(signal, "symbol", "NIFTY")
+        if (strike_val is None or not opt_type_val or not expiry_val) and sym_val and sym_val != "NIFTY":
+            import re
+            m = re.search(r"NIFTY(\d{2}[A-Z]{3})?(\d{4,5})(CE|PE)", str(sym_val).upper())
+            if m:
+                if not expiry_val and m.group(1):
+                    expiry_val = m.group(1)
+                if strike_val is None and m.group(2):
+                    try:
+                        strike_val = float(m.group(2))
+                    except Exception:
+                        pass
+                if not opt_type_val and m.group(3):
+                    opt_type_val = m.group(3)
+
         position = OpenPosition(
             position_id=position_id,
             intent_id=getattr(signal, "intent_id", ""),
             entry_time=datetime.now(),
             signal_type=signal.signal_type,
             direction=signal.direction,
-            symbol=signal.symbol,
-            security_id=signal.security_id or "",
+            symbol=sym_val,
+            security_id=getattr(signal, "security_id", "") or "",
+            strike=strike_val,
+            option_type=opt_type_val,
+            expiry=expiry_val,
             entry_price=fill_price,
             entry_bid=entry_bid,
             entry_ask=entry_ask,
@@ -879,6 +936,70 @@ class PositionManager:
 
         self.last_trade_time = datetime.now()
         self.today_stats.trades_taken += 1
+
+        # ── Persist to trade_outcomes in OPEN state ──
+        try:
+            import os as _os
+            import sqlite3 as _sqlite3
+            _mode = _os.getenv("SYSTEM_MODE", "SIMULATION")
+            _db_p = _os.getenv("NIFTY_DB_PATH") or ("data/trading_v4_live.db" if _mode != "SIMULATION" else "data/trading_v4_sim.db")
+            _dir = _os.path.dirname(_db_p)
+            if not _dir or _os.path.exists(_dir):
+                with _sqlite3.connect(_db_p) as _conn:
+                    _conn.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_outcomes (
+                        trade_id TEXT PRIMARY KEY,
+                        signal_timestamp TEXT,
+                        opened_at TEXT,
+                        closed_at TEXT,
+                        contract TEXT,
+                        strike REAL,
+                        option_type TEXT,
+                        qty INTEGER,
+                        entry REAL,
+                        sl REAL,
+                        target REAL,
+                        exit_price REAL,
+                        net_pnl REAL,
+                        r_multiple REAL,
+                        result TEXT,
+                        confidence REAL,
+                        grade TEXT,
+                        source TEXT,
+                        campaign_id TEXT,
+                        session_id TEXT
+                    )
+                    """)
+                    _sig_type = signal.signal_type.value if hasattr(signal.signal_type, 'value') else str(signal.signal_type)
+                    _contract_name = position.symbol if position.symbol and position.symbol != "NIFTY" else (f"{position.symbol}_{int(position.strike)}_{_sig_type}" if position.strike else _sig_type)
+                    _conn.execute("""
+                        INSERT OR REPLACE INTO trade_outcomes (
+                            trade_id, signal_timestamp, opened_at, closed_at, contract, strike, option_type,
+                            qty, entry, sl, target, exit_price, net_pnl, r_multiple, result, confidence, grade, source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        position.position_id,
+                        position.entry_time.isoformat(),
+                        position.entry_time.isoformat(),
+                        None,
+                        _contract_name,
+                        position.strike,
+                        position.option_type or ("CE" if "CE" in _sig_type else "PE"),
+                        position.qty,
+                        position.entry_price,
+                        position.stop_loss,
+                        position.target_1,
+                        None,
+                        0.0,
+                        0.0,
+                        "OPEN",
+                        position.confidence_at_entry or position.calibrated_confidence,
+                        position.tsl_grade,
+                        "position_manager"
+                    ))
+                    _conn.commit()
+        except Exception as _pe_db:
+            self.logger.warning(f"Failed to record opened position in trade_outcomes: {_pe_db}")
 
         self.logger.info(
             f"OPENED: {position_id} | "
@@ -964,11 +1085,15 @@ class PositionManager:
                 self.oms.create_intent(
                     signal_id=getattr(signal, "id", "UNKNOWN"),
                     intent_id=intent_id,
-                    symbol=signal.symbol,
-                    side=signal.direction.value.upper(),
+                    symbol=getattr(signal, "symbol", "NIFTY"),
+                    side="BUY",
                     qty=size_params["qty"],
                     requested_price=fill_price,
-                    stop_loss_price=size_params["sl_price"]
+                    stop_loss_price=size_params["sl_price"],
+                    target_price=size_params.get("target_1"),
+                    strike=getattr(signal, "strike", None),
+                    expiry=getattr(signal, "expiry", None),
+                    option_type=getattr(signal, "option_type", None)
                 )
             
             # ── P4: Shadow Execution Telemetry (Fire & Forget) ──
@@ -1002,13 +1127,13 @@ class PositionManager:
         
         self.logger.info(
             "Placing entry: %s %d qty | SL target: %.2f",
-            signal.symbol, qty, stop_loss_price
+            getattr(signal, "symbol", "NIFTY"), qty, stop_loss_price
         )
 
         start_time = time.time()
         try:
             entry_response = await self._place_order_async(
-                security_id=signal.security_id,
+                security_id=getattr(signal, "security_id", None),
                 exchange_segment="NSE_FNO",
                 transaction_type=transaction_type,
                 quantity=qty,
@@ -1074,8 +1199,8 @@ class PositionManager:
                         order_id=order_id,
                         fill_price=fill_price,
                         fill_qty=qty,
-                        symbol=signal.symbol,
-                        security_id=signal.security_id or "",
+                        symbol=getattr(signal, "symbol", "NIFTY"),
+                        security_id=getattr(signal, "security_id", "") or "",
                         exchange_segment="NSE_FNO"
                     ),
                     stop_loss_price,
@@ -1093,8 +1218,8 @@ class PositionManager:
             order_id=order_id,
             fill_price=fill_price,
             fill_qty=qty,
-            symbol=signal.symbol,
-            security_id=signal.security_id or "",
+            symbol=getattr(signal, "symbol", "NIFTY"),
+            security_id=getattr(signal, "security_id", "") or "",
             exchange_segment="NSE_FNO"
         )
 
@@ -1329,7 +1454,8 @@ class PositionManager:
             for action in pipeline_actions:
                 if action.action_type == "FULL_EXIT":
                     reason = action.reason
-                    pnl = self.close_position(pos_id, snapshot.price if snapshot else current_price, reason)
+                    exit_p = pos.current_price if hasattr(pos, "current_price") and pos.current_price > 0 else (pos.entry_price if hasattr(pos, "entry_price") else current_price)
+                    pnl = self.close_position(pos_id, exit_p, reason)
                     if pnl is not None:
                         actions_taken.append({
                             "position_id": pos_id,
@@ -1465,7 +1591,7 @@ class PositionManager:
                 if getattr(pos, "intent_id", ""):
                     import os as _os
                     _mode = _os.getenv("SYSTEM_MODE", "SIMULATION")
-                    _econ_db = "data/trading_v4_live.db" if _mode != "SIMULATION" else "data/trading_v4_sim.db"
+                    _econ_db = _os.getenv("NIFTY_DB_PATH") or ("data/trading_v4_live.db" if _mode != "SIMULATION" else "data/trading_v4_sim.db")
                     CostEngine.save_trade_economics(
                         db_path=_econ_db,
                         intent_id=pos.intent_id,
@@ -1493,10 +1619,22 @@ class PositionManager:
 
             # ── Log to Learning Layer ──
             try:
+                trade_id_val = pos.position_id or (f"TRD_{pos.intent_id[4:]}" if getattr(pos, "intent_id", "").startswith("INT_") else (pos.intent_id or "UNKNOWN"))
+                contract_val = pos.symbol if pos.symbol and pos.symbol != "NIFTY" else (f"{pos.symbol}_{int(pos.strike)}_{pos.signal_type.value}" if pos.strike else pos.signal_type.value)
                 record = TradeRecord(
-                    trade_id=pos.position_id,
+                    trade_id=trade_id_val,
                     timestamp=datetime.now().isoformat(),
                     signal=pos.signal_type.value,
+                    contract=contract_val,
+                    strike=pos.strike,
+                    expiry=pos.expiry,
+                    entry_price=pos.entry_price,
+                    exit_price=exit_price,
+                    stop_loss=pos.original_stop_loss or pos.stop_loss,
+                    target_1=pos.target_1,
+                    quantity=pos.qty,
+                    confidence=pos.confidence_at_entry or pos.calibrated_confidence,
+                    grade=pos.tsl_grade,
                     weighted_score=pos.weighted_score,
                     buy_score=pos.buy_score,
                     sell_score=pos.sell_score,
@@ -1506,9 +1644,6 @@ class PositionManager:
                     volatility=pos.volatility_at_entry,
                     time_of_day=datetime.now().strftime("%H:%M"),
                     entry_type=pos.entry_type,
-                    entry_price=pos.entry_price,
-                    exit_price=exit_price,
-                    quantity=pos.qty,
                     pnl=total_pnl,
                     outcome="WIN" if total_pnl > 0 else ("LOSS" if total_pnl < 0 else "BREAKEVEN"),
                     max_favorable=pos.max_favorable,
@@ -1537,6 +1672,105 @@ class PositionManager:
 
             # Remove from active
             del self.open_positions[position_id]
+
+            # ── Update OMS order state to POSITION_CLOSED ──
+            try:
+                if self.oms and getattr(pos, "intent_id", None):
+                    self.oms.update_order_state(
+                        intent_id=pos.intent_id,
+                        new_state="POSITION_CLOSED",
+                        event_type="POSITION_CLOSED",
+                        avg_fill_price=exit_price,
+                        payload={"reason": reason, "net_pnl": total_pnl}
+                    )
+            except Exception as oe:
+                self.logger.error(f"Failed to update OMS state on position close: {oe}")
+
+            # ── Update SQLite trade_outcomes table ──
+            try:
+                import os as _os
+                import sqlite3 as _sqlite3
+                _mode = _os.getenv("SYSTEM_MODE", "SIMULATION")
+                _db_p = _os.getenv("NIFTY_DB_PATH") or ("data/trading_v4_live.db" if _mode != "SIMULATION" else "data/trading_v4_sim.db")
+                _dir = _os.path.dirname(_db_p)
+                if not _dir or _os.path.exists(_dir):
+                    with _sqlite3.connect(_db_p) as _conn:
+                        _conn.execute("""
+                        CREATE TABLE IF NOT EXISTS trade_outcomes (
+                            trade_id TEXT PRIMARY KEY,
+                            signal_timestamp TEXT,
+                            opened_at TEXT,
+                            closed_at TEXT,
+                            contract TEXT,
+                            strike REAL,
+                            option_type TEXT,
+                            qty INTEGER,
+                            entry REAL,
+                            sl REAL,
+                            target REAL,
+                            exit_price REAL,
+                            net_pnl REAL,
+                            r_multiple REAL,
+                            result TEXT,
+                            confidence REAL,
+                            grade TEXT,
+                            source TEXT,
+                            campaign_id TEXT,
+                            session_id TEXT
+                        )
+                        """)
+                        _res_str = "WIN" if total_pnl > 0 else ("LOSS" if total_pnl < 0 else "BREAKEVEN")
+                        _r_mult = (total_pnl / (abs(pos.entry_price - pos.original_stop_loss) * pos.qty)) if abs(pos.entry_price - pos.original_stop_loss) > 0 and pos.qty > 0 else 0.0
+                        _intent_suffix = pos.intent_id.replace("INT_", "") if getattr(pos, "intent_id", None) else ""
+                        _contract_name = pos.symbol if pos.symbol and pos.symbol != "NIFTY" else (f"{pos.symbol}_{int(pos.strike)}_{pos.signal_type.value}" if pos.strike else pos.signal_type.value)
+                        _cur = _conn.execute("""
+                            UPDATE trade_outcomes
+                            SET exit_price = ?, net_pnl = ?, result = ?, closed_at = ?, r_multiple = ?,
+                                contract = COALESCE(NULLIF(contract, 'NIFTY'), ?),
+                                strike = COALESCE(strike, ?),
+                                sl = COALESCE(NULLIF(sl, 0), ?),
+                                target = COALESCE(NULLIF(target, 0), ?)
+                            WHERE trade_id = ? OR trade_id LIKE ? OR (trade_id LIKE ? AND ? != '')
+                        """, (
+                            exit_price, total_pnl, _res_str, datetime.now().isoformat(), _r_mult,
+                            _contract_name,
+                            pos.strike,
+                            pos.original_stop_loss or pos.stop_loss,
+                            pos.target_1,
+                            pos.position_id,
+                            f"%{pos.position_id.split('-')[-1]}",
+                            f"%{_intent_suffix}",
+                            _intent_suffix
+                        ))
+                        if _cur.rowcount == 0:
+                            _conn.execute("""
+                                INSERT OR REPLACE INTO trade_outcomes (
+                                    trade_id, signal_timestamp, opened_at, closed_at, contract, strike, option_type,
+                                    qty, entry, sl, target, exit_price, net_pnl, r_multiple, result, confidence, grade, source
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                pos.position_id,
+                                pos.entry_time.isoformat() if hasattr(pos.entry_time, "isoformat") else str(pos.entry_time),
+                                pos.entry_time.isoformat() if hasattr(pos.entry_time, "isoformat") else str(pos.entry_time),
+                                datetime.now().isoformat(),
+                                _contract_name,
+                                pos.strike,
+                                pos.option_type or ("CE" if "CE" in pos.signal_type.value else "PE"),
+                                pos.qty,
+                                pos.entry_price,
+                                pos.original_stop_loss or pos.stop_loss,
+                                pos.target_1,
+                                exit_price,
+                                total_pnl,
+                                _r_mult,
+                                _res_str,
+                                pos.confidence_at_entry or pos.calibrated_confidence,
+                                pos.tsl_grade,
+                                "position_manager"
+                            ))
+                        _conn.commit()
+            except Exception as te_db:
+                self.logger.error(f"Failed to update trade_outcomes in DB on close: {te_db}")
 
             try:
                 analytics_bus.publish("trade_closed", {

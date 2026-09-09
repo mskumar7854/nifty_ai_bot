@@ -26,6 +26,11 @@ class Signal:
     updated_at: Optional[float] = None
     queue_position: Optional[int] = None
     metadata: Dict = field(default_factory=dict)
+    symbol: str = "NIFTY"
+    security_id: Optional[str] = None
+    strike: Optional[float] = None
+    option_type: Optional[str] = None
+    expiry: Optional[str] = None
 
     entry_price: float = 0
     stop_loss: float = 0
@@ -33,6 +38,11 @@ class Signal:
     target_2: float = 0
     target_3: float = 0
     position_size: int = 0
+
+    # Spot references before option level translation
+    spot_entry: float = 0
+    spot_sl: float = 0
+    spot_target: float = 0
 
     weighted_score: float = 0
     buy_score: float = 0

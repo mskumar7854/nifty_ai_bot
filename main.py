@@ -141,6 +141,7 @@ class LegacySystem:
             broker = SimulationBroker()
             
         self.position_manager = PositionManager(settings, broker=broker)
+        self.oms = self.position_manager.oms
         self.entry_engine = EntryEngine(settings)
         self.exit_engine = ExitEngine(settings)
         self.burnin_tracker = BurninTracker()
@@ -203,6 +204,8 @@ def main():
         if hasattr(ctx.market_data, "data_manager"):
             ctx.data_manager = ctx.market_data.data_manager
             ctx.system.data_manager = ctx.market_data.data_manager
+            if hasattr(ctx.system, "entry_engine"):
+                ctx.system.entry_engine.data_manager = ctx.market_data.data_manager
 
         ctx.telemetry = TelemetryPipeline(ctx)
         ctx.decision = DecisionPipeline(ctx)
@@ -213,6 +216,7 @@ def main():
         ctx.system.market_pipeline = ctx.market_data
         ctx.system.decision_pipeline = ctx.decision
         ctx.system.execution_pipeline = ctx.execution
+        ctx.system.oms = ctx.system.position_manager.oms
         
         if hasattr(ctx.decision, "decision_engine"): ctx.system.decision_engine = ctx.decision.decision_engine
         if hasattr(ctx.decision, "master"): ctx.system.master = ctx.decision.master

@@ -21,12 +21,8 @@ def build_status_data(oms: OrderManagementSystem, pos_manager: PositionManager) 
     open_pos_count = len(positions)
     closed_pos_count = len(pos_manager.closed_positions_today)
     
-    recon_status = "CONSISTENT"
-    recon_mismatches = []
-    
-    if exec_stats["orders_filled"] != (open_pos_count + closed_pos_count):
-        recon_status = "MISMATCH"
-        recon_mismatches.append(f"Filled orders ({exec_stats['orders_filled']}) != Open ({open_pos_count}) + Closed ({closed_pos_count})")
+    from core.reconciliation import compute_execution_reconciliation
+    recon_status, recon_mismatches = compute_execution_reconciliation(oms, pos_manager)
         
     return {
         "execution": {
@@ -79,6 +75,10 @@ def mock_deps():
             state TEXT,
             requested_price REAL,
             stop_loss_price REAL,
+            target_price REAL,
+            strike REAL,
+            expiry TEXT,
+            option_type TEXT,
             created_at TEXT,
             updated_at TEXT,
             broker_order_id TEXT,
@@ -132,6 +132,9 @@ def create_mock_signal(sig_id: str) -> Signal:
         warnings=[]
     )
     sig.symbol = "NIFTY24AUG24000PE"
+    sig.strike = 24000.0
+    sig.option_type = "PE"
+    sig.expiry = "2024-08-29"
     sig.intent_id = sig_id
     sig.security_id = "12345"
     sig.exchange_segment = "NSE_FO"
@@ -307,7 +310,7 @@ def test_deliberate_corruption(mock_deps):
     assert ex["closed_outcomes"] == 1
     
     recon = status_data["reconciliation"]
-    assert recon["status"] == "MISMATCH"
+    assert recon["status"] == "COUNT_MISMATCH"
     assert "Filled orders (2) != Open (0) + Closed (1)" in recon["mismatches"][0]
     
     # No silent disappearance constraint violation check
@@ -404,4 +407,67 @@ def test_position_manager_oms_state_recovery(mock_deps):
     status_data = build_status_data(oms, pos_manager)
     assert status_data["reconciliation"]["status"] == "CONSISTENT"
     assert status_data["execution"]["open_positions"] == 2
+
+
+def test_reconciliation_detects_incomplete_contract(mock_deps):
+    """
+    Test 8 — Reconciliation flags INCOMPLETE_CONTRACT when SL/Target/Strike is missing on non-legacy executions.
+    """
+    oms, pos_manager = mock_deps
+    signal = create_mock_signal("sig_incomp_1")
+    pos = pos_manager.open_position(
+        signal,
+        {"lots": 1, "qty": 50, "risk_amount": 2000, "allowed": True, "sl_price": 90.0, "target_1": 150.0, "target_2": 200.0},
+        100.0,
+        100.0
+    )
+    # Simulate missing contract identity, missing strike and zero SL
+    pos.symbol = "NIFTY"
+    pos.contract = "NIFTY"
+    pos.strike = None
+    pos.stop_loss = 0.0
+    pos.is_reconstructed = False
+    
+    # Matching filled order in OMS so count matches
+    oms.create_intent("sig_incomp_1", pos.intent_id or "intent_incomp", "NIFTY24300CE", "BUY", 50, 100.0, 90.0)
+    oms.update_order_state(pos.intent_id or "intent_incomp", "ENTRY_FILLED", "BROKER_EXEC_SUCCESS", avg_fill_price=100.0, filled_qty=50)
+
+    status_data = build_status_data(oms, pos_manager)
+    assert status_data["reconciliation"]["status"] == "INCOMPLETE_CONTRACT"
+    assert any("strike=None" in m for m in status_data["reconciliation"]["mismatches"])
+
+
+def test_reconciliation_detects_identity_mismatch(mock_deps):
+    """
+    Test 9 — Reconciliation flags IDENTITY_MISMATCH when OMS filled order has no matching PositionManager trade.
+    """
+    oms, pos_manager = mock_deps
+    
+    # 1 open position with intent_A
+    signal = create_mock_signal("sig_id_1")
+    signal.strike = 24000
+    signal.expiry = "2026-09-25"
+    signal.option_type = "CE"
+    pos = pos_manager.open_position(
+        signal,
+        {"lots": 1, "qty": 50, "risk_amount": 2000, "allowed": True, "sl_price": 90.0, "target_1": 150.0, "target_2": 200.0},
+        100.0,
+        100.0
+    )
+    pos.contract = "NIFTY26SEP24000CE"
+    pos.strike = 24000.0
+    pos.expiry = "2026-09-25"
+    pos.stop_loss = 90.0
+    pos.target_1 = 150.0
+    pos.is_reconstructed = False
+
+    # But OMS filled a completely different intent_GHOST
+    oms.create_intent("sig_ghost", "intent_GHOST", "NIFTY24300CE", "BUY", 50, 100.0, 90.0)
+    oms.update_order_state("intent_GHOST", "ENTRY_FILLED", "BROKER_EXEC_SUCCESS", avg_fill_price=100.0, filled_qty=50)
+
+    status_data = build_status_data(oms, pos_manager)
+    # Count matches (1 filled vs 1 open), but identity differs
+    assert status_data["reconciliation"]["status"] == "IDENTITY_MISMATCH"
+    assert any("intent_GHOST" in m for m in status_data["reconciliation"]["mismatches"])
+
 

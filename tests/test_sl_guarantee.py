@@ -30,6 +30,7 @@ def manager():
     mock_client = MagicMock()
     with patch("dhan_client.get_dhan_client", return_value=mock_client):
         pm = PositionManager(settings)
+        pm.open_positions.clear()
         
         # Patch the async wrapper directly so we can test the logic without real threads
         pm._place_order_async = AsyncMock()

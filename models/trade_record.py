@@ -34,9 +34,16 @@ class TradeRecord:
     open_positions: int = 0
 
     # Execution Details
+    contract: str = ""
+    strike: Optional[float] = None
+    expiry: Optional[str] = None
     entry_price: float = 0.0
     exit_price: float = 0.0
+    stop_loss: float = 0.0
+    target_1: float = 0.0
     quantity: int = 0
+    confidence: float = 0.0
+    grade: str = "—"
 
     # Outcome Details
     pnl: float = 0.0

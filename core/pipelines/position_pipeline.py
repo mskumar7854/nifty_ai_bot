@@ -126,16 +126,28 @@ class PositionPipeline:
     def _make_exit_decision(self, pos: PositionState, snapshot: MarketSnapshot) -> ExitDecision:
         """Answers: 'Should this position continue to exist?'"""
         direction_str = getattr(pos.direction, 'value', str(pos.direction)).upper()
+        entry_ref = getattr(pos, "entry_premium", 0.0) or getattr(pos, "entry_price", 0.0)
+        is_long_premium = (pos.stop_loss < entry_ref) if (entry_ref > 0 and pos.stop_loss > 0) else (direction_str in ["BUY", "BULLISH"])
         
         # 1. Hard Stop Loss Trigger
-        if direction_str in ["BUY", "BULLISH"] and pos.current_price <= pos.stop_loss:
-            return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
-        elif direction_str in ["SELL", "BEARISH"] and pos.current_price >= pos.stop_loss:
-            return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
+        if is_long_premium:
+            if pos.stop_loss > 0 and pos.current_price <= pos.stop_loss:
+                return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
+        else:
+            if pos.stop_loss > 0 and pos.current_price >= pos.stop_loss:
+                return ExitDecision(ExitDecisionType.FULL_EXIT, "Hard Stop Loss Hit", urgency_level="HIGH")
 
         # 2. Hard Target Trigger
-        if direction_str in ["BUY", "BULLISH"] and pos.current_price >= pos.target_2:
-            return ExitDecision(ExitDecisionType.FULL_EXIT, "Target 2 Hit", urgency_level="NORMAL")
+        t2 = getattr(pos, "target_2", 0.0) or 0.0
+        t1 = getattr(pos, "target_1", 0.0) or 0.0
+        if is_long_premium:
+            if t2 > 0 and pos.current_price >= t2:
+                return ExitDecision(ExitDecisionType.FULL_EXIT, "Target 2 Hit", urgency_level="NORMAL")
+            elif t1 > 0 and pos.current_price >= t1:
+                return ExitDecision(ExitDecisionType.FULL_EXIT, "Target 1 Hit", urgency_level="NORMAL")
+        else:
+            if t2 > 0 and pos.current_price <= t2:
+                return ExitDecision(ExitDecisionType.FULL_EXIT, "Target 2 Hit", urgency_level="NORMAL")
             
         # 3. Health Based Exit (Critical deterioration)
         if pos.health_state == TradeHealth.CRITICAL:

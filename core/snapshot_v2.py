@@ -8,14 +8,15 @@ logger = logging.getLogger("snapshot_v2")
 
 def _resolve_db_path() -> str:
     import os
+    env_path = os.getenv("NIFTY_DB_PATH")
+    if env_path:
+        return env_path
     mode = os.getenv("SYSTEM_MODE", "SIMULATION")
     return "data/trading_v4_live.db" if mode != "SIMULATION" else "data/trading_v4_sim.db"
 
-_DB_PATH = _resolve_db_path()
-
 def persist_snapshot_v2(snap: DecisionSnapshotV2, db_path: Optional[str] = None) -> bool:
     """Write the V2 snapshot to SQLite. Non-blocking, non-fatal."""
-    db_path = db_path or _DB_PATH
+    db_path = db_path or _resolve_db_path()
     try:
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -70,7 +71,7 @@ def reject_snapshot_execution(snapshot_id: str, reason: str, db_path: Optional[s
     """Updates an existing snapshot to reflect an execution-stage rejection."""
     if not snapshot_id:
         return False
-    db_path = db_path or _DB_PATH
+    db_path = db_path or _resolve_db_path()
     try:
         conn = sqlite3.connect(db_path)
         with conn:
@@ -86,3 +87,23 @@ def reject_snapshot_execution(snapshot_id: str, reason: str, db_path: Optional[s
     except Exception as e:
         logger.error(f"[SNAPSHOT_V2] Failed to reject snapshot {snapshot_id}: {e}")
         return False
+
+
+def link_snapshot_trade(snapshot_id: str, trade_id: str, db_path: Optional[str] = None) -> bool:
+    """Updates an existing snapshot to link the executed trade_id without overwriting other immutable fields."""
+    if not snapshot_id or not trade_id:
+        return False
+    db_path = db_path or _resolve_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        with conn:
+            conn.execute(
+                "UPDATE decision_snapshots_v2 SET trade_id = ? WHERE snapshot_id = ? AND (trade_id IS NULL OR trade_id = '')",
+                (trade_id, snapshot_id)
+            )
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"[SNAPSHOT_V2] Failed to link trade {trade_id} to snapshot {snapshot_id}: {e}")
+        return False
+

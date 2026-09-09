@@ -55,14 +55,21 @@ class _SafeEncoder(json.JSONEncoder):
         except TypeError:
             return str(obj)
 
+def get_db_path(override_path: str = None) -> str:
+    """Resolve the canonical SQLite database path."""
+    import os
+    if override_path and override_path != "data/trading_v4.db":
+        return override_path
+    env_override = os.getenv("NIFTY_DB_PATH")
+    if env_override:
+        return env_override
+    mode = os.getenv("SYSTEM_MODE", "SIMULATION")
+    return "data/trading_v4_live.db" if mode != "SIMULATION" else "data/trading_v4_sim.db"
+
+
 class DBManager:
     def __init__(self, db_path=None):
-        if db_path and db_path != "data/trading_v4.db":
-            self.db_path = db_path
-        else:
-            import os
-            mode = os.getenv("SYSTEM_MODE", "SIMULATION")
-            self.db_path = "data/trading_v4_live.db" if mode != "SIMULATION" else "data/trading_v4_sim.db"
+        self.db_path = get_db_path(db_path)
 
     async def initialize(self):
         """Creates tables if they don't exist. Run on startup."""
@@ -118,11 +125,22 @@ class DBManager:
                 requested_price REAL,
                 avg_fill_price REAL,
                 stop_loss_price REAL,
+                target_price REAL,
+                strike REAL,
+                expiry TEXT,
+                option_type TEXT,
                 filled_qty INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """)
+
+            # Startup Schema Verification: Ensure contract execution columns exist
+            for col, col_type in [("strike", "REAL"), ("expiry", "TEXT"), ("option_type", "TEXT"), ("target_price", "REAL")]:
+                try:
+                    await db.execute(f"ALTER TABLE orders ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass
 
             # 4. OMS Order Events (P0.3) - Append-only audit log
             await db.execute("""

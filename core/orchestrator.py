@@ -9,8 +9,9 @@ from datetime import datetime
 
 from core.context import RuntimeContext
 from models.events import SessionChanged, MarketSnapshotCreated, EndOfDayTriggered
+from utils.logger import get_logger
 
-logger = logging.getLogger("orchestrator")
+logger = get_logger("orchestrator")
 
 class TradingOrchestrator:
     """
@@ -194,10 +195,14 @@ class TradingOrchestrator:
             if self.decision_pipeline and runtime_state.is_trading_allowed:
                 if hasattr(self.ctx.system, "entry_engine"):
                     # Check pending first (execution engine continues)
-                    confirmed = self.ctx.system.entry_engine.check_confirmations(snapshot, df)
+                    data_mgr = getattr(self.ctx, "data_manager", None) or getattr(self.ctx.system, "data_manager", None)
+                    confirmed = self.ctx.system.entry_engine.check_confirmations(snapshot, df, data_manager=data_mgr)
                     for eid, pending in confirmed:
                         if self.execution_pipeline:
-                            await self.execution_pipeline.execute(pending, snapshot, self.ctx.is_simulation, mode="confirmed")
+                            actual_signal = pending.signal if hasattr(pending, "signal") else pending
+                            if hasattr(pending, "adjusted_entry") and pending.adjusted_entry:
+                                actual_signal.adjusted_entry = pending.adjusted_entry
+                            await self.execution_pipeline.execute(actual_signal, snapshot, self.ctx.is_simulation, mode="confirmed")
                 
                 if not is_suspended:
                     # New decisions via DecisionPipeline
@@ -332,12 +337,11 @@ class TradingOrchestrator:
                     open_pos_count = len(positions)
                     closed_pos_count = len(pos_manager.closed_positions_today) if pos_manager else 0
                     
-                    recon_status = "CONSISTENT"
-                    recon_mismatches = []
-                    
-                    if exec_stats["orders_filled"] != (open_pos_count + closed_pos_count):
-                        recon_status = "MISMATCH"
-                        recon_mismatches.append(f"Filled orders ({exec_stats['orders_filled']}) != Open ({open_pos_count}) + Closed ({closed_pos_count})")
+                    from core.reconciliation import compute_execution_reconciliation
+                    recon_status, recon_mismatches = compute_execution_reconciliation(
+                        getattr(self.ctx.system, "oms", None),
+                        pos_manager
+                    )
                     
                     live_ts = datetime.now().isoformat()
                     snap_ts = getattr(snapshot, "timestamp", None)

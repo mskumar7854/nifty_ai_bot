@@ -84,7 +84,37 @@ class CostEngine:
             
             with conn:
                 conn.execute("""
-                    INSERT INTO trade_economics (
+                CREATE TABLE IF NOT EXISTS trade_economics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    intent_id TEXT NOT NULL UNIQUE,
+                    gross_pnl REAL,
+                    net_pnl REAL,
+                    spread_cost REAL,
+                    slippage_cost REAL,
+                    brokerage REAL,
+                    stt REAL,
+                    gst REAL,
+                    sebi_charges REAL,
+                    stamp_duty REAL,
+                    holding_seconds REAL,
+                    mfe REAL,
+                    mae REAL,
+                    realized_r_multiple REAL,
+                    entry_bid REAL,
+                    entry_ask REAL,
+                    entry_fill REAL,
+                    exit_bid REAL,
+                    exit_ask REAL,
+                    exit_fill REAL,
+                    spread_pct_entry REAL,
+                    spread_pct_exit REAL,
+                    quote_age_ms REAL,
+                    slippage_entry REAL,
+                    slippage_exit REAL
+                )
+                """)
+                conn.execute("""
+                    INSERT OR REPLACE INTO trade_economics (
                         intent_id, gross_pnl, net_pnl, spread_cost, slippage_cost,
                         brokerage, stt, gst, sebi_charges, stamp_duty,
                         holding_seconds, mfe, mae, realized_r_multiple,

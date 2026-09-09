@@ -1178,8 +1178,8 @@ DASHBOARD_HTML = """
                     <div class="funnel-connector">↓</div>
                     <div class="funnel-stage">
                         <div class="funnel-gate">
-                            <div class="f-gate">Grade / Structure</div>
-                            <div class="f-req">≥ B+ tier & valid regime</div>
+                            <div class="f-gate">Strategy Approved</div>
+                            <div class="f-req">passed predictive gates</div>
                             <div class="f-rejected" id="fn-grade-rej">--</div>
                         </div>
                         <div class="funnel-count"><div class="f-count pass" id="fn-grade">--</div></div>
@@ -1187,7 +1187,7 @@ DASHBOARD_HTML = """
                     <div class="funnel-connector">↓</div>
                     <div class="funnel-stage">
                         <div class="funnel-gate">
-                            <div class="f-gate">OMS Reached / Capacity</div>
+                            <div class="f-gate">Capacity Guard</div>
                             <div class="f-req">max 1 active position</div>
                             <div class="f-rejected cap" id="fn-oms-rej">--</div>
                         </div>
@@ -1196,7 +1196,7 @@ DASHBOARD_HTML = """
                     <div class="funnel-connector">↓</div>
                     <div class="funnel-stage executed">
                         <div class="funnel-gate">
-                            <div class="f-gate">Executed Trades</div>
+                            <div class="f-gate">Confirmed Fills (OMS)</div>
                             <div class="f-req">order filled via OMS</div>
                         </div>
                         <div class="funnel-count"><div class="f-count pass" id="fn-executed">--</div></div>
@@ -1601,10 +1601,10 @@ DASHBOARD_HTML = """
                 badge.className = 'badge-text badge-executed';
                 document.getElementById('recon-mismatches').style.display = 'none';
             } else {
-                badge.textContent = '⚠ MISMATCH';
+                badge.textContent = '🔴 EXECUTION RECONCILIATION INVALID';
                 badge.className = 'badge-text badge-rejected';
                 const mmEl = document.getElementById('recon-mismatches');
-                mmEl.innerHTML = (rc.mismatches || []).map(m => `<div>${m}</div>`).join('');
+                mmEl.innerHTML = `<div style="padding:6px 10px; background:rgba(239,68,68,0.15); border:1px solid var(--red); border-radius:4px; margin-bottom:6px; font-weight:600;">⚠ EXECUTION RECONCILIATION INVALID: OMS filled orders do not reconcile with PositionManager ledger. Realized session performance metrics are suppressed.</div>` + (rc.mismatches || []).map(m => `<div>• ${m}</div>`).join('');
                 mmEl.style.display = 'block';
             }
         }
@@ -1955,26 +1955,47 @@ DASHBOARD_HTML = """
                     setText('ss-pred-rej', s.predictive_rejections || 0);
                     setText('ss-cap-rej', s.capacity_rejections || 0);
 
-                    const wins = s.wins || 0;
-                    const losses = s.losses || 0;
-                    const wlEl = document.getElementById('ss-wl');
-                    wlEl.textContent = `${wins}W / ${losses}L`;
-                    wlEl.style.color = wins > losses ? 'var(--green)' : wins < losses ? 'var(--red)' : 'var(--amber)';
-                    const wr = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : '—';
-                    document.getElementById('ss-winrate').textContent = `win rate ${wr}%`;
+                    if (s.is_reconciled === false) {
+                        const wlEl = document.getElementById('ss-wl');
+                        wlEl.textContent = '—';
+                        wlEl.style.color = 'var(--red)';
+                        const wrEl = document.getElementById('ss-winrate');
+                        wrEl.textContent = 'RECONCILIATION INVALID';
+                        wrEl.style.color = 'var(--red)';
 
-                    const pnl = s.net_pnl || 0;
-                    const pnlEl = document.getElementById('ss-pnl');
-                    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '₹' + Math.round(pnl).toLocaleString('en-IN');
-                    pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+                        const pnlEl = document.getElementById('ss-pnl');
+                        pnlEl.textContent = s.pnl_display || '— (RECONCILIATION INVALID)';
+                        pnlEl.style.color = 'var(--red)';
 
-                    const netR = s.net_r || 0;
-                    const rEl = document.getElementById('ss-r');
-                    rEl.textContent = (netR >= 0 ? '+' : '') + Number(netR).toFixed(2) + 'R';
-                    rEl.style.color = netR >= 0 ? 'var(--green)' : 'var(--red)';
+                        const rEl = document.getElementById('ss-r');
+                        rEl.textContent = s.r_display || '— (RECONCILIATION INVALID)';
+                        rEl.style.color = 'var(--red)';
 
-                    const ac = s.avg_conf_executed;
-                    setText('ss-avgconf', ac !== undefined && ac !== null ? Number(ac).toFixed(1) + '%' : '—');
+                        setText('ss-avgconf', '—');
+                    } else {
+                        const wins = s.wins || 0;
+                        const losses = s.losses || 0;
+                        const wlEl = document.getElementById('ss-wl');
+                        wlEl.textContent = `${wins}W / ${losses}L`;
+                        wlEl.style.color = wins > losses ? 'var(--green)' : wins < losses ? 'var(--red)' : 'var(--amber)';
+                        const wr = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : '—';
+                        const wrEl = document.getElementById('ss-winrate');
+                        wrEl.textContent = `win rate ${wr}%`;
+                        wrEl.style.color = 'var(--text-secondary)';
+
+                        const pnl = s.net_pnl || 0;
+                        const pnlEl = document.getElementById('ss-pnl');
+                        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '₹' + Math.round(pnl).toLocaleString('en-IN');
+                        pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+                        const netR = s.net_r || 0;
+                        const rEl = document.getElementById('ss-r');
+                        rEl.textContent = (netR >= 0 ? '+' : '') + Number(netR).toFixed(2) + 'R';
+                        rEl.style.color = netR >= 0 ? 'var(--green)' : 'var(--red)';
+
+                        const ac = s.avg_conf_executed;
+                        setText('ss-avgconf', ac !== undefined && ac !== null ? Number(ac).toFixed(1) + '%' : '—');
+                    }
                 }
 
                 if (f) {
@@ -2038,8 +2059,9 @@ DASHBOARD_HTML = """
                 cachedTrades = d.trades || [];
                 renderTradeLedger(cachedTrades);
                 
-                const todayStr = new Date().toISOString().slice(0, 10);
-                const closedToday = cachedTrades.filter(t => !t.is_reconstructed && t.time && t.time.startsWith(todayStr) && t.result && t.result !== 'OPEN');
+                const localToday = new Date();
+                const todayStr = localToday.getFullYear() + '-' + String(localToday.getMonth() + 1).padStart(2, '0') + '-' + String(localToday.getDate()).padStart(2, '0');
+                const closedToday = cachedTrades.filter(t => t.time && t.time.startsWith(todayStr) && t.result && t.result !== 'OPEN');
                 renderClosedPositions(closedToday);
             })
             .catch(() => {});
@@ -2052,9 +2074,10 @@ DASHBOARD_HTML = """
             return;
         }
 
-        const todayStr = new Date().toISOString().slice(0, 10);
-        const todayTrades = trades.filter(t => !t.is_reconstructed && t.time && t.time.startsWith(todayStr));
-        const recoveredTrades = trades.filter(t => t.is_reconstructed || (t.time && !t.time.startsWith(todayStr)));
+        const localToday = new Date();
+        const todayStr = localToday.getFullYear() + '-' + String(localToday.getMonth() + 1).padStart(2, '0') + '-' + String(localToday.getDate()).padStart(2, '0');
+        const todayTrades = trades.filter(t => t.time && t.time.startsWith(todayStr));
+        const recoveredTrades = trades.filter(t => t.time && !t.time.startsWith(todayStr));
 
         let html = '';
 
@@ -2210,7 +2233,7 @@ class Dashboard:
                     "session_total": cfg_raw.get("session_total", self._status_data.get("session_total", 20)),
                 }
 
-                db_path = "data/trading_v4_sim.db"
+                db_path = os.getenv("NIFTY_DB_PATH", "data/trading_v4_sim.db")
                 funnel = {
                     "signals": 0,
                     "after_confidence": 0, "rej_confidence": 0,
@@ -2258,12 +2281,10 @@ class Dashboard:
                         (today_str,)
                     )
                     rows = cur.fetchall()
-                    conn.close()
 
                     total = len(rows)
                     funnel["signals"] = total
 
-                    executed_count = 0
                     pred_rej = 0
                     cap_rej = 0
 
@@ -2272,7 +2293,6 @@ class Dashboard:
                     passed_pev = 0
                     passed_ev = 0
                     passed_grade = 0
-                    passed_oms = 0
 
                     latest_candidate_row = None
 
@@ -2289,17 +2309,15 @@ class Dashboard:
                         if latest_candidate_row is None and action in ("REJECTED", "EXECUTE", "APPROVED", "PENDING"):
                             latest_candidate_row = row
 
-                        is_executed = action == "EXECUTE"
+                        is_approved = action == "EXECUTE"
                         is_capacity = "Max Open Positions" in reason or "CAPACITY" in reason.upper() or "POSITION_LIMIT" in reason.upper()
 
-                        if is_executed:
-                            executed_count += 1
+                        if is_approved:
                             passed_conf += 1
                             passed_agree += 1
                             passed_pev += 1
                             passed_ev += 1
                             passed_grade += 1
-                            passed_oms += 1
                         elif is_capacity:
                             cap_rej += 1
                             passed_conf += 1
@@ -2331,7 +2349,38 @@ class Dashboard:
                                 passed_conf += 1
                             pred_reasons[reason] = pred_reasons.get(reason, 0) + 1
 
+                    # Determine OMS downstream execution authorization and fills
+                    oms_routed = 0
+                    oms_filled = 0
+                    try:
+                        cur.execute(
+                            "SELECT COUNT(*), SUM(CASE WHEN state IN ('FILLED_ACTIVE', 'ENTRY_FILLED', 'POSITION_CLOSED') THEN 1 ELSE 0 END) FROM orders WHERE date(created_at) = ?",
+                            (today_str,)
+                        )
+                        ord_row = cur.fetchone()
+                        if ord_row:
+                            oms_routed = ord_row[0] or 0
+                            oms_filled = ord_row[1] or 0
+                    except Exception:
+                        pass
+
+                    if self._oms and hasattr(self._oms, "get_execution_stats_today"):
+                        try:
+                            oms_st = self._oms.get_execution_stats_today()
+                            if oms_st.get("orders_submitted", 0) > 0:
+                                oms_routed = oms_st.get("orders_submitted", 0)
+                            if oms_st.get("orders_filled", 0) > 0:
+                                oms_filled = oms_st.get("orders_filled", 0)
+                        except Exception:
+                            pass
+
+                    strategy_approved = passed_grade
+                    cap_rej_count = max(0, strategy_approved - oms_routed)
+                    if cap_rej_count > 0 and "Max Open Positions (1/1)" not in cap_reasons:
+                        cap_reasons["Max Open Positions (1/1)"] = cap_rej_count
+
                     funnel.update({
+                        "signals": total,
                         "after_confidence": passed_conf,
                         "rej_confidence": total - passed_conf,
                         "after_agreement": passed_agree,
@@ -2340,14 +2389,16 @@ class Dashboard:
                         "rej_pev": passed_agree - passed_pev,
                         "after_ev": passed_ev,
                         "rej_ev": passed_pev - passed_ev,
-                        "after_grade": passed_grade,
-                        "rej_grade": passed_ev - passed_grade,
-                        "after_oms_check": passed_oms,
-                        "rej_capacity": cap_rej,
-                        "executed": executed_count,
-                        "total_predictive": pred_rej,
-                        "total_capacity": cap_rej,
+                        "after_grade": strategy_approved,
+                        "rej_grade": passed_ev - strategy_approved,
+                        "after_oms_check": oms_routed,
+                        "rej_capacity": cap_rej_count,
+                        "executed": oms_filled,
+                        "total_predictive": total - strategy_approved,
+                        "total_capacity": cap_rej_count,
                     })
+
+                    conn.close()
 
                     # If an evaluated candidate row was found, parse into canonical snapshot
                     if latest_candidate_row is not None:
@@ -2577,7 +2628,12 @@ class Dashboard:
                     with sqlite3.connect(db_path) as conn:
                         conn.row_factory = sqlite3.Row
                         cur = conn.cursor()
-                        cur.execute("SELECT result, net_pnl, r_multiple, confidence FROM trade_outcomes WHERE signal_timestamp LIKE ?", (f"{today_str}%",))
+                        cur.execute(
+                            "SELECT result, net_pnl, r_multiple, confidence FROM trade_outcomes "
+                            "WHERE date(signal_timestamp) = ? "
+                            "AND trade_id NOT LIKE 'POS_%' AND trade_id NOT LIKE 'sig_%' AND trade_id NOT LIKE 'test-%' AND trade_id NOT LIKE 'INT_POS_%'",
+                            (today_str,)
+                        )
                         rows = cur.fetchall()
                         for r in rows:
                             res = r["result"]
@@ -2585,25 +2641,76 @@ class Dashboard:
                                 wins += 1
                             elif res == "LOSS":
                                 losses += 1
-                            if r["net_pnl"]:
-                                net_pnl += r["net_pnl"]
-                            if r["r_multiple"]:
-                                net_r += r["r_multiple"]
-                            if r["confidence"] and r["confidence"] > 0:
-                                conf_executed.append(r["confidence"])
+                            if r["net_pnl"] is not None:
+                                net_pnl += float(r["net_pnl"])
+                            if r["r_multiple"] is not None:
+                                net_r += float(r["r_multiple"])
+                            if r["confidence"] and float(r["confidence"]) > 0:
+                                conf_executed.append(float(r["confidence"]))
 
-                session = {
-                    "session_date": today_str,
-                    "total_signals": funnel["signals"],
-                    "executed": funnel["executed"],
-                    "predictive_rejections": funnel["total_predictive"],
-                    "capacity_rejections": funnel["total_capacity"],
-                    "wins": wins,
-                    "losses": losses,
-                    "net_pnl": round(net_pnl, 2),
-                    "net_r": round(net_r, 2),
-                    "avg_conf_executed": round(sum(conf_executed) / len(conf_executed), 1) if conf_executed else None,
-                }
+                # Fail-Closed Reality Ledger Reconciliation Check (P0.5 & P5)
+                recon_status = "CONSISTENT"
+                recon_mismatches = []
+                if self._oms and self._position_manager:
+                    try:
+                        from core.reconciliation import compute_execution_reconciliation
+                        recon_status, recon_mismatches = compute_execution_reconciliation(self._oms, self._position_manager)
+                    except Exception as re_err:
+                        logger.warning(f"Reconciliation check failed: {re_err}")
+                else:
+                    try:
+                        with sqlite3.connect(db_path) as conn:
+                            c = conn.cursor()
+                            c.execute("SELECT COUNT(*) FROM orders WHERE date(created_at) = ? AND state IN ('FILLED_ACTIVE', 'ENTRY_FILLED', 'POSITION_CLOSED')", (today_str,))
+                            db_filled = c.fetchone()[0] or 0
+                            c.execute("SELECT COUNT(*) FROM trade_outcomes WHERE date(signal_timestamp) = ? AND trade_id NOT LIKE 'POS_%' AND trade_id NOT LIKE 'sig_%' AND trade_id NOT LIKE 'test-%' AND trade_id NOT LIKE 'INT_POS_%'", (today_str,))
+                            db_outcomes = c.fetchone()[0] or 0
+                            if db_filled != db_outcomes:
+                                recon_status = "COUNT_MISMATCH"
+                                recon_mismatches.append(f"DB Reality Invariant: OMS filled ({db_filled}) != trade outcomes ({db_outcomes})")
+                    except Exception as e:
+                        recon_status = "ERROR"
+                        recon_mismatches.append(f"DB reconciliation query error: {e}")
+
+                is_reconciled = (recon_status == "CONSISTENT")
+
+                if not is_reconciled:
+                    session = {
+                        "session_date": today_str,
+                        "total_signals": funnel["signals"],
+                        "strategy_approved": funnel["after_grade"],
+                        "executed": funnel["executed"],
+                        "predictive_rejections": funnel["total_predictive"],
+                        "capacity_rejections": funnel["total_capacity"],
+                        "wins": None,
+                        "losses": None,
+                        "net_pnl": None,
+                        "net_r": None,
+                        "avg_conf_executed": None,
+                        "is_reconciled": False,
+                        "reconciliation_status": recon_status,
+                        "reconciliation_mismatches": recon_mismatches,
+                        "pnl_display": "— (RECONCILIATION INVALID)",
+                        "r_display": "— (RECONCILIATION INVALID)",
+                        "winrate_display": "RECONCILIATION INVALID",
+                    }
+                else:
+                    session = {
+                        "session_date": today_str,
+                        "total_signals": funnel["signals"],
+                        "strategy_approved": funnel["after_grade"],
+                        "executed": funnel["executed"],
+                        "predictive_rejections": funnel["total_predictive"],
+                        "capacity_rejections": funnel["total_capacity"],
+                        "wins": wins,
+                        "losses": losses,
+                        "net_pnl": round(net_pnl, 2),
+                        "net_r": round(net_r, 2),
+                        "avg_conf_executed": round(sum(conf_executed) / len(conf_executed), 1) if conf_executed else None,
+                        "is_reconciled": True,
+                        "reconciliation_status": "CONSISTENT",
+                        "reconciliation_mismatches": [],
+                    }
 
                 rejections = {
                     "predictive": [{"reason": k, "count": v} for k, v in sorted(pred_reasons.items(), key=lambda x: -x[1])],
@@ -2641,6 +2748,54 @@ class Dashboard:
                 today_str = datetime.now().date().isoformat()
                 trades = []
                 seen_ids = set()
+                seen_keys = set()
+
+                def _normalize_trade_id(raw_id) -> str:
+                    if not raw_id:
+                        return ""
+                    s = str(raw_id)
+                    for prefix in ["TRD_", "INT_", "SIM_ORD_", "SIM_SL_"]:
+                        if s.startswith(prefix):
+                            s = s[len(prefix):]
+                    s = s.replace("-", "_")
+                    parts = s.split("_")
+                    if len(parts) >= 4:
+                        s = f"{parts[0]}_{parts[1]}_{parts[3]}"
+                    return s
+
+                import re
+                def _extract_fallback_strike_and_expiry(symbol, strike, expiry):
+                    # User Directive: Only parse if concrete contract symbol e.g. NIFTY26SEP24000PE or NIFTY24300CE
+                    # NEVER guess or parse from generic "NIFTY", "BUY_CE", "BUY_PE"
+                    if not symbol or str(symbol).upper() in ("NIFTY", "BUY_CE", "BUY_PE", "SIMULATED", "UNKNOWN"):
+                        return strike, expiry
+                    if strike is None:
+                        m = re.search(r"NIFTY(?:\d{2}[A-Z]{3})?(\d{4,5})(CE|PE)", str(symbol).upper())
+                        if m:
+                            try:
+                                strike = float(m.group(1))
+                            except Exception:
+                                pass
+                    return strike, expiry
+
+                def _add_trade(trade_obj, orig_ids=None):
+                    t_id = trade_obj.get("trade_id")
+                    norm_key = _normalize_trade_id(t_id)
+                    if (t_id and t_id in seen_ids) or (norm_key and norm_key in seen_keys):
+                        return False
+                    if t_id:
+                        seen_ids.add(t_id)
+                    if norm_key:
+                        seen_keys.add(norm_key)
+                    if orig_ids:
+                        for oid in orig_ids:
+                            if oid:
+                                seen_ids.add(oid)
+                                k = _normalize_trade_id(oid)
+                                if k:
+                                    seen_keys.add(k)
+                    trades.append(trade_obj)
+                    return True
 
                 # 1. Canonical Live Open Positions
                 open_pos_list = []
@@ -2651,9 +2806,9 @@ class Dashboard:
 
                 for pos in open_pos_list:
                     pos_dict = pos.to_dict() if hasattr(pos, "to_dict") else dict(pos)
-                    trade_id = pos_dict.get("id") or pos_dict.get("trade_id") or pos_dict.get("snapshot_id")
-                    if trade_id:
-                        seen_ids.add(trade_id)
+                    pos_id = pos_dict.get("id") or pos_dict.get("trade_id") or pos_dict.get("snapshot_id")
+                    intent_id = pos_dict.get("intent_id", "")
+                    canon_trade_id = f"TRD_{intent_id[4:]}" if intent_id.startswith("INT_") else (pos_id or "")
 
                     entry_p = float(pos_dict.get("entry_price") or pos_dict.get("entry") or 0.0)
                     sl_p = float(pos_dict.get("stop_loss") or pos_dict.get("sl") or 0.0)
@@ -2675,12 +2830,18 @@ class Dashboard:
                         r_mult = unrealized_pnl / (abs(entry_p - sl_p) * qty_val)
 
                     opened_time = pos_dict.get("opened_at") or pos_dict.get("time") or datetime.now().isoformat()
-                    trades.append({
-                        "trade_id": trade_id,
+                    is_today = opened_time.startswith(today_str)
+                    contract_sym = pos_dict.get("contract") or pos_dict.get("symbol") or pos_dict.get("signal_type") or pos_dict.get("type") or "UNKNOWN"
+                    stk_val = pos_dict.get("strike")
+                    exp_val = pos_dict.get("expiry")
+                    stk_val, exp_val = _extract_fallback_strike_and_expiry(contract_sym, stk_val, exp_val)
+
+                    _add_trade({
+                        "trade_id": canon_trade_id or pos_id,
                         "time": opened_time,
-                        "signal": pos_dict.get("signal_type") or pos_dict.get("type") or "UNKNOWN",
-                        "strike": pos_dict.get("strike"),
-                        "expiry": None,
+                        "signal": contract_sym,
+                        "strike": stk_val,
+                        "expiry": exp_val,
                         "entry": entry_p,
                         "exit_price": None,
                         "sl": sl_p,
@@ -2690,11 +2851,11 @@ class Dashboard:
                         "result": "OPEN",
                         "opened_at": opened_time,
                         "closed_at": None,
-                        "confidence": pos_dict.get("calibrated_confidence") or pos_dict.get("weighted_score") or 0.0,
-                        "grade": pos_dict.get("tsl_grade") or pos_dict.get("grade") or "—",
-                        "is_reconstructed": bool(pos_dict.get("is_reconstructed", False)),
+                        "confidence": float(pos_dict.get("confidence") or pos_dict.get("calibrated_confidence") or pos_dict.get("weighted_score") or 0.0),
+                        "grade": pos_dict.get("grade") or pos_dict.get("tsl_grade") or "—",
+                        "is_reconstructed": not is_today,
                         "r_multiple": r_mult
-                    })
+                    }, orig_ids=[pos_id, intent_id, canon_trade_id])
 
                 # 2. Canonical Live Closed Positions Today
                 closed_pos_list = []
@@ -2706,15 +2867,22 @@ class Dashboard:
                 for c_pos in closed_pos_list:
                     c_dict = c_pos.to_dict() if hasattr(c_pos, "to_dict") else dict(c_pos)
                     trade_id = c_dict.get("trade_id") or c_dict.get("id")
-                    if trade_id:
-                        seen_ids.add(trade_id)
+                    intent_id = c_dict.get("intent_id", "")
+                    canon_trade_id = f"TRD_{intent_id[4:]}" if intent_id.startswith("INT_") else (trade_id or "")
 
-                    trades.append({
-                        "trade_id": trade_id,
-                        "time": c_dict.get("timestamp") or c_dict.get("time") or datetime.now().isoformat(),
-                        "signal": c_dict.get("signal") or c_dict.get("signal_type") or "",
-                        "strike": c_dict.get("strike"),
-                        "expiry": None,
+                    c_time = c_dict.get("timestamp") or c_dict.get("time") or datetime.now().isoformat()
+                    is_today = c_time.startswith(today_str)
+                    contract_sym = c_dict.get("contract") or c_dict.get("signal") or c_dict.get("signal_type") or ""
+                    stk_val = c_dict.get("strike")
+                    exp_val = c_dict.get("expiry")
+                    stk_val, exp_val = _extract_fallback_strike_and_expiry(contract_sym, stk_val, exp_val)
+
+                    _add_trade({
+                        "trade_id": canon_trade_id or trade_id,
+                        "time": c_time,
+                        "signal": contract_sym,
+                        "strike": stk_val,
+                        "expiry": exp_val,
                         "entry": float(c_dict.get("entry_price") or c_dict.get("entry") or 0.0),
                         "exit_price": float(c_dict.get("exit_price") or c_dict.get("exit") or 0.0),
                         "sl": float(c_dict.get("stop_loss") or c_dict.get("sl") or 0.0),
@@ -2724,11 +2892,11 @@ class Dashboard:
                         "result": c_dict.get("outcome") or "CLOSED",
                         "opened_at": c_dict.get("timestamp") or c_dict.get("opened_at"),
                         "closed_at": c_dict.get("closed_at") or datetime.now().isoformat(),
-                        "confidence": c_dict.get("weighted_score") or c_dict.get("confidence") or 0.0,
+                        "confidence": float(c_dict.get("confidence") or c_dict.get("weighted_score") or 0.0),
                         "grade": c_dict.get("grade") or "—",
-                        "is_reconstructed": bool(c_dict.get("is_reconstructed", False)),
+                        "is_reconstructed": not is_today,
                         "r_multiple": c_dict.get("r_multiple")
-                    })
+                    }, orig_ids=[trade_id, intent_id, canon_trade_id])
 
                 # 3. Check OMS Orders Table for Today
                 if self._oms:
@@ -2736,64 +2904,114 @@ class Dashboard:
                         open_orders = self._oms.get_open_orders()
                         for order in open_orders:
                             o_id = order.get("signal_id") or order.get("intent_id")
-                            if o_id and o_id not in seen_ids:
-                                state = order.get("state")
-                                if state in ("ENTRY_SUBMITTED", "PARTIAL_FILLED", "FILLED_ACTIVE", "ENTRY_FILLED"):
-                                    seen_ids.add(o_id)
-                                    fill_p = float(order.get("avg_fill_price") or order.get("requested_price") or 0.0)
-                                    sl_p = float(order.get("stop_loss_price") or 0.0)
-                                    qty_v = int(order.get("qty") or 50)
-                                    trades.append({
-                                        "trade_id": o_id,
-                                        "time": order.get("created_at") or datetime.now().isoformat(),
-                                        "signal": order.get("symbol") or "NIFTY",
-                                        "strike": None,
-                                        "expiry": None,
-                                        "entry": fill_p,
-                                        "exit_price": None,
-                                        "sl": sl_p,
-                                        "target1": fill_p + (abs(fill_p - sl_p) * 1.5) if sl_p > 0 else 0.0,
-                                        "qty": qty_v,
-                                        "net_pnl": 0.0,
-                                        "result": "OPEN",
-                                        "opened_at": order.get("created_at"),
-                                        "closed_at": None,
-                                        "confidence": 0.0,
-                                        "grade": "—",
-                                        "is_reconstructed": True,
-                                        "r_multiple": 0.0
-                                    })
+                            intent_id = order.get("intent_id", "")
+                            canon_trade_id = f"TRD_{intent_id[4:]}" if intent_id.startswith("INT_") else (o_id or "")
+                            state = order.get("state")
+                            if state in ("ENTRY_SUBMITTED", "PARTIAL_FILLED", "FILLED_ACTIVE", "ENTRY_FILLED"):
+                                fill_p = float(order.get("avg_fill_price") or order.get("requested_price") or 0.0)
+                                sl_p = float(order.get("stop_loss_price") or 0.0)
+                                qty_v = int(order.get("qty") or 50)
+                                o_time = order.get("created_at") or datetime.now().isoformat()
+                                is_today = o_time.startswith(today_str)
+                                contract_sym = order.get("symbol") or "NIFTY"
+                                stk_val = order.get("strike")
+                                exp_val = order.get("expiry")
+                                stk_val, exp_val = _extract_fallback_strike_and_expiry(contract_sym, stk_val, exp_val)
+                                _add_trade({
+                                    "trade_id": canon_trade_id or o_id,
+                                    "time": o_time,
+                                    "signal": contract_sym,
+                                    "strike": stk_val,
+                                    "expiry": exp_val,
+                                    "entry": fill_p,
+                                    "exit_price": None,
+                                    "sl": sl_p,
+                                    "target1": float(order.get("target_price") or (fill_p + (abs(fill_p - sl_p) * 1.5) if sl_p > 0 else 0.0)),
+                                    "qty": qty_v,
+                                    "net_pnl": 0.0,
+                                    "result": "OPEN",
+                                    "opened_at": order.get("created_at"),
+                                    "closed_at": None,
+                                    "confidence": 0.0,
+                                    "grade": "—",
+                                    "is_reconstructed": not is_today,
+                                    "r_multiple": 0.0
+                                }, orig_ids=[o_id, intent_id, canon_trade_id])
                     except Exception as oms_e:
                         logger.warning(f"OMS order check in /api/trades failed: {oms_e}")
 
+                # 3b. Check Canonical Simulation Engine State
+                if self._simulation_engine:
+                    try:
+                        sim_open = getattr(self._simulation_engine, "open_trades", [])
+                        for s_trade in sim_open:
+                            s_dict = s_trade.to_dict() if hasattr(s_trade, "to_dict") else dict(s_trade)
+                            s_id = s_dict.get("trade_id") or s_dict.get("id")
+                            s_time = s_dict.get("opened_at") or s_dict.get("time") or datetime.now().isoformat()
+                            is_today = s_time.startswith(today_str)
+                            contract_sym = s_dict.get("contract") or (s_dict.get("instrument") or {}).get("symbol") or s_dict.get("signal_type") or "SIMULATED"
+                            stk_val = s_dict.get("strike") or (s_dict.get("instrument") or {}).get("strike")
+                            exp_val = s_dict.get("expiry") or (s_dict.get("instrument") or {}).get("expiry")
+                            stk_val, exp_val = _extract_fallback_strike_and_expiry(contract_sym, stk_val, exp_val)
+                            _add_trade({
+                                "trade_id": s_id,
+                                "time": s_time,
+                                "signal": contract_sym,
+                                "strike": stk_val,
+                                "expiry": exp_val,
+                                "entry": float(s_dict.get("entry_price") or 0.0),
+                                "exit_price": None,
+                                "sl": float(s_dict.get("sl") or s_dict.get("stop_loss") or 0.0),
+                                "target1": float(s_dict.get("target") or s_dict.get("target_1") or 0.0),
+                                "qty": int(s_dict.get("qty") or 50),
+                                "net_pnl": float(s_dict.get("unrealized_pnl") or 0.0),
+                                "result": "OPEN",
+                                "opened_at": s_dict.get("opened_at"),
+                                "closed_at": None,
+                                "confidence": float(s_dict.get("confidence") or 0.0),
+                                "grade": s_dict.get("grade", "—"),
+                                "is_reconstructed": not is_today,
+                                "r_multiple": None
+                            }, orig_ids=[s_id])
+                    except Exception as sim_e:
+                        logger.warning(f"Simulation engine check in /api/trades failed: {sim_e}")
+
                 # 4. Fetch Historical Recovery State (SQLite DB)
-                db_paths = ["data/trading_v4_sim.db", "data/trading_v4_live.db"]
+                db_paths = [
+                    os.getenv("NIFTY_DB_PATH", "data/trading_v4_sim.db"),
+                    "data/trading_v4_live.db"
+                ]
                 for db_path in db_paths:
                     if os.path.exists(db_path):
                         try:
                             with sqlite3.connect(db_path) as conn:
                                 conn.row_factory = sqlite3.Row
                                 cur = conn.cursor()
-                                cur.execute("SELECT * FROM trade_outcomes ORDER BY signal_timestamp DESC LIMIT 100")
+                                cur.execute(
+                                    "SELECT * FROM trade_outcomes "
+                                    "WHERE trade_id NOT LIKE 'POS_%' AND trade_id NOT LIKE 'sig_%' AND trade_id NOT LIKE 'test-%' AND trade_id NOT LIKE 'INT_POS_%' "
+                                    "ORDER BY signal_timestamp DESC LIMIT 100"
+                                )
                                 rows = cur.fetchall()
                                 for r in rows:
                                     t = dict(r)
                                     t_id = t.get("trade_id")
-                                    if t_id and t_id in seen_ids:
-                                        continue
-                                    if t_id:
-                                        seen_ids.add(t_id)
-
                                     sig_ts = t.get("signal_timestamp") or ""
                                     is_today = sig_ts.startswith(today_str)
-                                    is_recon = t.get("source") == "historical_recovery" or not is_today
+                                    is_recon = not is_today
 
-                                    trades.append({
+                                    contract_sym = t.get("contract")
+                                    stk_val = t.get("strike")
+                                    exp_val = t.get("expiry")
+                                    stk_val, exp_val = _extract_fallback_strike_and_expiry(contract_sym, stk_val, exp_val)
+
+                                    _add_trade({
                                         "trade_id": t_id,
+                                        "campaign_id": "SHADOW-V2",
                                         "time": sig_ts,
-                                        "signal": t.get("contract"),
-                                        "strike": t.get("strike"),
-                                        "expiry": None,
+                                        "signal": contract_sym,
+                                        "strike": stk_val,
+                                        "expiry": exp_val,
                                         "entry": t.get("entry"),
                                         "exit_price": t.get("exit_price"),
                                         "sl": t.get("sl"),
@@ -2804,10 +3022,11 @@ class Dashboard:
                                         "opened_at": t.get("opened_at"),
                                         "closed_at": t.get("closed_at"),
                                         "confidence": t.get("confidence"),
-                                        "grade": t.get("grade"),
+                                        "grade": t.get("grade") or "—",
                                         "is_reconstructed": is_recon,
-                                        "r_multiple": t.get("r_multiple")
-                                    })
+                                        "r_multiple": t.get("r_multiple"),
+                                        "scope_status": "VALID_SESSION" if is_today else "UNSCOPED / HISTORICAL"
+                                    }, orig_ids=[t_id])
                         except Exception as dbe:
                             logger.warning(f"Failed to query {db_path} in /api/trades: {dbe}")
 

@@ -1,5 +1,6 @@
 import time
 import uuid
+import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -36,6 +37,13 @@ class ExecutionPipeline:
         mode="confirmed" -> Proceeds directly to Phase B (live execution) assuming Phase A already passed.
         """
         t0 = time.perf_counter()
+
+        # Defensive unpacking if a PendingEntry is passed
+        if hasattr(signal, "signal"):
+            actual_signal = signal.signal
+            if hasattr(signal, "adjusted_entry") and signal.adjusted_entry:
+                actual_signal.adjusted_entry = signal.adjusted_entry
+            signal = actual_signal
 
         if mode == "confirmed":
             return await self._execute_live_phase_b(signal, snapshot)
@@ -94,6 +102,24 @@ class ExecutionPipeline:
         # 3. Translate Levels
         levels = OptionExecutionTranslator.translate_levels(signal, quote, instrument_info)
         
+        # User Directive 1: Copy translated option levels once onto canonical signal fields.
+        # Preserve original index spot levels in spot_entry, spot_sl, spot_target.
+        signal.spot_entry = snapshot.price
+        signal.spot_sl = signal.stop_loss
+        signal.spot_target = signal.target_1
+
+        # Canonical execution contract parameters
+        signal.symbol = instrument_info.get("symbol", getattr(signal, "symbol", "NIFTY"))
+        signal.security_id = str(instrument_info.get("security_id", "") or getattr(signal, "security_id", "") or "")
+        signal.strike = float(instrument_info["strike"]) if instrument_info.get("strike") else getattr(signal, "strike", None)
+        signal.option_type = instrument_info.get("type", getattr(signal, "option_type", None))
+        signal.expiry = instrument_info.get("expiry", getattr(signal, "expiry", None))
+
+        signal.entry_price = levels["premium_entry"]
+        signal.stop_loss = levels["premium_sl"]
+        signal.target_1 = levels["premium_t1"]
+        signal.target_2 = levels["premium_t2"]
+
         signal.metadata["instrument"] = instrument_info
         signal.metadata["quote"] = quote
         signal.metadata["premium_entry"] = levels["premium_entry"]
@@ -106,8 +132,11 @@ class ExecutionPipeline:
         signal.metadata["delta_used"] = levels.get("delta_used", 0.50)
 
         # 4. Route to Queue
+        pending_entry = None
         if hasattr(self.ctx.system, "entry_engine"):
-            self.ctx.system.entry_engine.create_pending_entry(signal, snapshot, None)
+            pending_entry = self.ctx.system.entry_engine.create_pending_entry(signal, snapshot, None)
+            if pending_entry and hasattr(signal, "metadata") and isinstance(signal.metadata, dict):
+                signal.metadata["pending_entry_id"] = pending_entry.entry_id
         return ExecutionResult(
             status="queued",
             broker_order_id="",
@@ -198,6 +227,28 @@ class ExecutionPipeline:
             if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
             return self._build_failed_result(f"Broker Health: {reason}")
 
+        # Refresh option quote immediately before sizing to satisfy the 1500ms quote freshness firewall
+        instrument_info = getattr(signal, "metadata", {}).get("instrument")
+        data_mgr = getattr(self.ctx, "data_manager", None) or getattr(system, "data_manager", None)
+        if instrument_info and data_mgr and hasattr(data_mgr, "fetch_option_quote"):
+            try:
+                fresh_quote = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        data_mgr.fetch_option_quote,
+                        instrument_info.get("strike"),
+                        instrument_info.get("type"),
+                        instrument_info.get("expiry")
+                    ),
+                    timeout=5.0
+                )
+                if fresh_quote:
+                    signal.metadata["quote"] = fresh_quote
+                    fresh_premium = getattr(fresh_quote, "ask", 0) if getattr(fresh_quote, "ask", 0) > 0 else getattr(fresh_quote, "ltp", 0)
+                    if fresh_premium > 0:
+                        signal.metadata["premium_entry"] = fresh_premium
+            except Exception as qe:
+                logger.warning(f"⚠️ [EXEC] Phase-B quote refresh failed: {qe}")
+
         premium = signal.metadata.get("premium_entry", snapshot.price)
             
         # Sizing
@@ -218,40 +269,50 @@ class ExecutionPipeline:
         state_mgr = get_state_manager()
         breaker = StructuralBreaker(state_mgr)
         direction_str = signal.direction.value if hasattr(signal.direction, "value") else str(getattr(signal, "direction", "UNKNOWN"))
+        sig_symbol = getattr(signal, "symbol", "NIFTY")
+        sig_id = getattr(signal, "id", "unknown")
+        sig_created_at = getattr(signal, "created_at", time.time())
         
-        if not breaker.check_duplicate_order(signal.symbol, direction_str):
+        if not breaker.check_duplicate_order(sig_symbol, direction_str):
             logger.error("🚫 [EXEC] Duplicate order detected by StructuralBreaker.")
             if hasattr(system, "trading_enabled"): system.trading_enabled = False
-            if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+            if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(sig_id)
             return self._build_failed_result("Duplicate Order Detected")
             
         current_price = snapshot.price
+        # Structural Breaker checks Nifty index spot drift (spot ↔ spot).
+        # Must compare snapshot.price against signal.spot_entry (NOT option premium signal.entry_price!).
+        spot_reference = getattr(signal, "spot_entry", 0.0) or current_price
         is_valid, should_halt = breaker.check_telegram_execution_sync(
-            signal.id, signal.created_at, time.time(), current_price, getattr(signal, "entry_price", current_price)
+            sig_id, sig_created_at, time.time(), current_price, spot_reference
         )
         if not is_valid:
             if should_halt and hasattr(system, "trading_enabled"): system.trading_enabled = False
-            if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+            if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(sig_id)
             return self._build_failed_result("Telegram Sync/Price Drift Failed")
             
         sl_price = size_info.get("sl_price", 0.0)
-        if not breaker.check_stop_loss_attached(signal.id, sl_price):
+        if not breaker.check_stop_loss_attached(sig_id, sl_price):
             logger.error("🚫 [EXEC] Stop Loss missing or invalid.")
             if hasattr(system, "trading_enabled"): system.trading_enabled = False
-            if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+            if hasattr(system, "entry_engine"): system.entry_engine.cancel_pending(sig_id)
             return self._build_failed_result("Invalid Stop Loss")
 
         # C. OMS Intent
         intent_id = f"INT_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:6].upper()}"
-        if hasattr(system, "oms"):
+        if hasattr(system, "oms") and system.oms:
             system.oms.create_intent(
-                signal_id=getattr(signal, "id", "unknown"),
+                signal_id=sig_id,
                 intent_id=intent_id,
-                symbol=signal.symbol,
-                side="BUY" if direction_str.upper() == "BUY" else "SELL",
+                symbol=sig_symbol,
+                side="BUY",  # Option buying is always BUY
                 qty=qty,
                 requested_price=premium,
-                stop_loss_price=sl_price
+                stop_loss_price=sl_price,
+                target_price=getattr(signal, "target_1", None),
+                strike=getattr(signal, "strike", None),
+                expiry=getattr(signal, "expiry", None),
+                option_type=getattr(signal, "option_type", None)
             )
             setattr(signal, "intent_id", intent_id)
 
@@ -260,21 +321,20 @@ class ExecutionPipeline:
         if pos_manager:
             try:
                 if hasattr(pos_manager, "broker") and pos_manager.broker and hasattr(pos_manager.broker, "set_context"):
-                    instrument_info = getattr(signal, "metadata", {}).get("instrument", {})
-                    pos_manager.broker.set_context(signal, snapshot, instrument_info)
+                    pos_manager.broker.set_context(signal, snapshot, instrument_info or {})
                     
                 t_exec = time.perf_counter()
-                pos = await pos_manager.open_position_with_sl_guarantee(signal, size_info, premium)
+                pos = await pos_manager.open_position_with_sl_guarantee(signal, size_info, fill_price=premium, premium=premium)
                 latency = int((time.perf_counter() - t_exec) * 1000)
             except Exception as e:
                 logger.error(f"❌ [EXEC] Broker execution failed: {e}")
                 latency = 0
                 
         if hasattr(system, "entry_engine"):
-            system.entry_engine.cancel_pending(getattr(signal, "id", "unknown"))
+            system.entry_engine.cancel_pending(sig_id)
                 
         if pos:
-            if hasattr(system, "oms"):
+            if hasattr(system, "oms") and system.oms:
                 system.oms.update_order_state(
                     intent_id=intent_id,
                     new_state="ENTRY_FILLED",
@@ -283,6 +343,47 @@ class ExecutionPipeline:
                     filled_qty=pos.qty,
                     payload={"position_id": pos.position_id}
                 )
+
+            # Link snapshot trade_id in decision_snapshots_v2
+            snap_id = getattr(signal, "id", "")
+            if snap_id and hasattr(pos, "position_id") and pos.position_id:
+                try:
+                    from core.snapshot_v2 import link_snapshot_trade
+                    link_snapshot_trade(snap_id, pos.position_id)
+                except Exception as le:
+                    logger.warning(f"Failed to link snapshot {snap_id} to trade {pos.position_id}: {le}")
+
+            # Phase 3 User Directive 5: Authoritative Immutable Execution Reality Ledger
+            try:
+                from core.telemetry.execution_logger import ExecutionLedgerWriter
+                from models.execution import ExecutedTrade
+                executed_trade = ExecutedTrade(
+                    schema_version=1,
+                    execution_version=1,
+                    trade_id=pos.position_id,
+                    decision_snapshot_id=getattr(signal, "id", pos.position_id),
+                    execution_context="SIMULATION" if getattr(self.ctx, "is_simulation", True) else "DHAN_LIVE",
+                    timestamp=datetime.now().isoformat(),
+                    security_id=str(getattr(signal, "security_id", "") or ""),
+                    trading_symbol=str(getattr(signal, "symbol", sig_symbol)),
+                    expiry=str(getattr(signal, "expiry", "") or ""),
+                    strike=float(getattr(signal, "strike", 0.0) or 0.0),
+                    option_type=str(getattr(signal, "option_type", "") or ""),
+                    quantity=int(pos.qty),
+                    side="BUY",
+                    entry_price=float(pos.entry_price),
+                    exit_price=0.0,
+                    fill_timestamp=datetime.now().isoformat(),
+                    broker_order_id=getattr(pos, "broker_order_id", intent_id),
+                    initial_sl=float(sl_price),
+                    final_sl=float(sl_price),
+                    target_price=float(getattr(signal, "target_1", 0.0) or 0.0),
+                    pnl=0.0,
+                    realized_r=0.0
+                )
+                ExecutionLedgerWriter.append_executed_trade(executed_trade)
+            except Exception as ele:
+                logger.error(f"Failed to append executed trade to immutable ledger: {ele}")
             logger.info(f"✅ [EXECUTE_SIGNAL] LIVE TRADE EXECUTED | {signal.signal_type.value} @ ₹{premium:,.1f}")
             if hasattr(system, "execution_failures"):
                 system.execution_failures = 0
